@@ -1,0 +1,103 @@
+package credentials
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+type NvidiaModelListResponse struct {
+	Object string `json:"object"`
+	Data   []struct {
+		ID string `json:"id"`
+	} `json:"data"`
+}
+
+// DiscoverAndRegisterNvidiaModels connects to NVIDIA's REST endpoint, fetches all available models,
+// auto-provisions model pools inside PostgreSQL, and binds the newly added key to all of them.
+func DiscoverAndRegisterNvidiaModels(ctx context.Context, db *pgxpool.Pool, vault *Vault, apiKey, baseURL string, weight int) (int, []string, error) {
+	// 1. Fetch live models array directly from NVIDIA
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/models", nil)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to build model discovery request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("nvidia endpoint connection failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, nil, fmt.Errorf("nvidia rejected request with status code: %d", resp.StatusCode)
+	}
+
+	var modelList NvidiaModelListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&modelList); err != nil {
+		return 0, nil, fmt.Errorf("failed to parse nvidia models json stream: %w", err)
+	}
+
+	// Encrypt the credentials prior to database transaction storage
+	encryptedKey, err := vault.Encrypt(apiKey)
+	if err != nil {
+		return 0, nil, fmt.Errorf("vault encryption failed: %w", err)
+	}
+
+	var discoveredModels []string
+
+	// 2. Open a transaction block to safely write configuration metrics
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	for _, m := range modelList.Data {
+		var poolID int
+		
+		// Ensure model_pattern contains the required prefix for routing matching logic
+		// We prepend "nvidia/" prefix so that they automatically hit the NVIDIA proxy routes!
+		modelPattern := "nvidia/" + m.ID
+
+		// Insert or fetch the model pool ID
+		err = tx.QueryRow(ctx, 
+			`INSERT INTO model_pools (model_pattern, strategy) 
+			 VALUES ($1, 'round-robin') 
+			 ON CONFLICT (model_pattern) DO UPDATE SET model_pattern = EXCLUDED.model_pattern
+			 RETURNING id`, 
+			modelPattern,
+		).Scan(&poolID)
+		
+		if err != nil {
+			return 0, nil, fmt.Errorf("failed to upsert model pool row for %s: %w", modelPattern, err)
+		}
+
+		// Connect the discovered model pool directly to our hardware key credential
+		_, err = tx.Exec(ctx,
+			`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy) 
+			 VALUES ($1, 'nvidia', $2, $3, $4, true)
+			 ON CONFLICT DO NOTHING`, // prevents duplicates if the same key is submitted twice
+			poolID, encryptedKey, baseURL, weight,
+		)
+		if err != nil {
+			return 0, nil, fmt.Errorf("failed to bind credential to pool %s: %w", modelPattern, err)
+		}
+
+		discoveredModels = append(discoveredModels, modelPattern)
+	}
+
+	// 3. Emit PostgreSQL NOTIFY channel statement to instantly trigger SyncManager cache swap
+	_, err = tx.Exec(ctx, "NOTIFY config_change, 'model_pools:reload'")
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to broadcast config change notification: %w", err)
+	}
+
+	return len(discoveredModels), discoveredModels, tx.Commit(ctx)
+}

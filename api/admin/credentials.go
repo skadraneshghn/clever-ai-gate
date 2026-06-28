@@ -199,3 +199,53 @@ func (h *CredentialHandler) Delete(c *gin.Context) {
 
 	c.JSON(http.StatusOK, dto.SuccessResponse{Message: "credential deleted successfully"})
 }
+
+// RegisterNvidiaProvider auto-discovers all models available under an NVIDIA API key,
+// creates model pools for each, and binds the credential to all of them in one transaction.
+// @Summary      Auto-discover NVIDIA Models
+// @Description  Submits an NVIDIA key, hits their /models endpoint, and registers all active models automatically
+// @Tags         Credentials
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        body  body      dto.DiscoverProviderRequest  true  "NVIDIA provider details"
+// @Success      200   {object}  dto.DiscoverProviderResponse
+// @Failure      400   {object}  dto.ErrorResponse
+// @Failure      500   {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/providers/nvidia [post]
+func (h *CredentialHandler) RegisterNvidiaProvider(c *gin.Context) {
+	var req dto.DiscoverProviderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
+		return
+	}
+
+	if req.Provider != "nvidia" {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid provider, must be 'nvidia'"})
+		return
+	}
+
+	if req.Weight <= 0 {
+		req.Weight = 1
+	}
+
+	count, models, err := credentials.DiscoverAndRegisterNvidiaModels(
+		c.Request.Context(),
+		h.db,
+		h.vault,
+		req.APIKey,
+		req.BaseURL,
+		req.Weight,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "NVIDIA auto-discovery failed", Details: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.DiscoverProviderResponse{
+		Message:       "Successfully synchronized all NVIDIA models",
+		ModelsCount:   count,
+		DiscoveredIDs: models,
+	})
+}
+

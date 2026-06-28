@@ -48,3 +48,16 @@ type UpdateCredentialRequest struct {
 	Weight    int    `json:"weight" example:"1"`
 	IsHealthy bool   `json:"is_healthy" example:"true"`
 }
+
+type DiscoverProviderRequest struct {
+	Provider string `json:"provider" binding:"required" example:"nvidia"`
+	APIKey   string `json:"api_key" binding:"required" example:"nvapi-..."`
+	BaseURL  string `json:"base_url" binding:"required" example:"https://integrate.api.nvidia.com/v1"`
+	Weight   int    `json:"weight" example:"1"`
+}
+
+type DiscoverProviderResponse struct {
+	Message       string   `json:"message" example:"Successfully synchronized provider models"`
+	ModelsCount   int      `json:"models_count" example:"45"`
+	DiscoveredIDs []string `json:"discovered_models"`
+}

@@ -137,6 +137,9 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		adminGroup.GET("/credentials/:id", credHandler.Get)
 		adminGroup.PUT("/credentials/:id", credHandler.Update)
 		adminGroup.DELETE("/credentials/:id", credHandler.Delete)
+
+		// Provider auto-discovery (registers all models for a given provider key)
+		adminGroup.POST("/providers/nvidia", credHandler.RegisterNvidiaProvider)
 	}
 
 	return engine
