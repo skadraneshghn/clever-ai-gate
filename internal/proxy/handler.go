@@ -164,11 +164,12 @@ func (h *Handler) Handle(c *gin.Context) {
 	pool := poolVal.(*credentials.BalancedChannelPool)
 
 	// --- NVIDIA Reasoning Parameter Injection ---
-	// When the model is NVIDIA, inject reasoning_budget and chat_template_kwargs
-	// into the request body to enable the thinking/reasoning pipeline.
-	// This is transparent to the client (Cline/Kilo don't need to know).
+	// When the model is NVIDIA and supports Nemotron reasoning, inject reasoning_budget 
+	// and chat_template_kwargs into the request body.
 	if isNvidia {
-		body = injectNvidiaParams(body, scanSlice, h.logger)
+		if strings.Contains(strings.ToLower(model), "nemotron") {
+			body = injectNvidiaParams(body, scanSlice, h.logger)
+		}
 		body = rewriteModelField(body, model)
 	}
 
