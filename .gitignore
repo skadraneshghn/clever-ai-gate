@@ -20,7 +20,6 @@ Thumbs.db
 vendor/
 
 # Swagger generated docs
-docs/
 
 # Docker
 docker-compose.override.yml

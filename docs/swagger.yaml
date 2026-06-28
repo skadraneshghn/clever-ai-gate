@@ -1,0 +1,684 @@
+basePath: /
+definitions:
+  github_com_skadraneshghn_clever-ai-gate_api_dto.CreateCredentialRequest:
+    properties:
+      api_key:
+        example: sk-...
+        type: string
+      base_url:
+        example: https://api.openai.com
+        type: string
+      pool_id:
+        example: 1
+        type: integer
+      provider:
+        example: openai
+        type: string
+      weight:
+        example: 1
+        type: integer
+    required:
+    - api_key
+    - base_url
+    - pool_id
+    - provider
+    type: object
+  github_com_skadraneshghn_clever-ai-gate_api_dto.CreatePoolRequest:
+    properties:
+      fallback_pool_id:
+        example: 2
+        type: integer
+      model_pattern:
+        example: gpt-4o
+        type: string
+      strategy:
+        example: round-robin
+        type: string
+    required:
+    - model_pattern
+    type: object
+  github_com_skadraneshghn_clever-ai-gate_api_dto.CreateTenantRequest:
+    properties:
+      name:
+        example: Acme Corp
+        type: string
+      rate_limit_rpm:
+        example: 60
+        type: integer
+      token_balance:
+        example: 1000000000
+        type: integer
+    required:
+    - name
+    type: object
+  github_com_skadraneshghn_clever-ai-gate_api_dto.CredentialResponse:
+    properties:
+      base_url:
+        example: https://api.openai.com
+        type: string
+      created_at:
+        example: "2024-01-15T10:30:00Z"
+        type: string
+      id:
+        example: 1
+        type: integer
+      is_healthy:
+        example: true
+        type: boolean
+      key_mask:
+        example: sk-...xxxx
+        type: string
+      last_error:
+        type: string
+      pool_id:
+        example: 1
+        type: integer
+      provider:
+        example: openai
+        type: string
+      weight:
+        example: 1
+        type: integer
+    type: object
+  github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse:
+    properties:
+      details:
+        example: tenant with id 'xxx' does not exist
+        type: string
+      error:
+        example: resource not found
+        type: string
+    type: object
+  github_com_skadraneshghn_clever-ai-gate_api_dto.PoolResponse:
+    properties:
+      created_at:
+        example: "2024-01-15T10:30:00Z"
+        type: string
+      credential_count:
+        example: 3
+        type: integer
+      credentials:
+        items:
+          $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CredentialResponse'
+        type: array
+      fallback_pool_id:
+        example: 2
+        type: integer
+      id:
+        example: 1
+        type: integer
+      model_pattern:
+        example: gpt-4o
+        type: string
+      strategy:
+        example: round-robin
+        type: string
+    type: object
+  github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse:
+    properties:
+      message:
+        example: resource deleted successfully
+        type: string
+    type: object
+  github_com_skadraneshghn_clever-ai-gate_api_dto.TenantResponse:
+    properties:
+      api_key:
+        example: cag_xxxxxxxxxxxxxxxxxxxx
+        type: string
+      created_at:
+        example: "2024-01-15T10:30:00Z"
+        type: string
+      id:
+        example: 550e8400-e29b-41d4-a716-446655440000
+        type: string
+      is_active:
+        example: true
+        type: boolean
+      name:
+        example: Acme Corp
+        type: string
+      rate_limit_rpm:
+        example: 60
+        type: integer
+      token_balance:
+        example: 1000000000
+        type: integer
+      updated_at:
+        example: "2024-01-15T10:30:00Z"
+        type: string
+    type: object
+  github_com_skadraneshghn_clever-ai-gate_api_dto.UpdateCredentialRequest:
+    properties:
+      api_key:
+        example: sk-...
+        type: string
+      base_url:
+        example: https://api.openai.com
+        type: string
+      is_healthy:
+        example: true
+        type: boolean
+      provider:
+        example: openai
+        type: string
+      weight:
+        example: 1
+        type: integer
+    required:
+    - base_url
+    - provider
+    type: object
+  github_com_skadraneshghn_clever-ai-gate_api_dto.UpdatePoolRequest:
+    properties:
+      fallback_pool_id:
+        type: integer
+      model_pattern:
+        example: gpt-4o
+        type: string
+      strategy:
+        example: weighted-round-robin
+        type: string
+    required:
+    - model_pattern
+    type: object
+  github_com_skadraneshghn_clever-ai-gate_api_dto.UpdateTenantRequest:
+    properties:
+      is_active:
+        example: true
+        type: boolean
+      name:
+        example: Acme Corp Updated
+        type: string
+      rate_limit_rpm:
+        example: 120
+        type: integer
+      token_balance:
+        example: 2000000000
+        type: integer
+    required:
+    - name
+    type: object
+  internal_health.LivenessResponse:
+    properties:
+      status:
+        type: string
+      uptime:
+        type: string
+    type: object
+  internal_health.ReadinessResponse:
+    properties:
+      checks:
+        additionalProperties:
+          type: string
+        type: object
+      ready:
+        type: boolean
+      status:
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact:
+    email: support@clever-ai-gate.dev
+    name: Clever AI Gate Team
+    url: https://clever-ai-gate.dev
+  description: High-performance AI Router & Orchestration Core. Routes requests to
+    1600+ AI models with sub-millisecond overhead.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  termsOfService: https://clever-ai-gate.dev/terms
+  title: Clever AI Gate API
+  version: 1.0.0
+paths:
+  /api/v1/admin/credentials:
+    post:
+      consumes:
+      - application/json
+      description: Adds a new provider API key to a model routing pool
+      parameters:
+      - description: Credential details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CreateCredentialRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CredentialResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Add credential
+      tags:
+      - Credentials
+  /api/v1/admin/credentials/{id}:
+    delete:
+      description: Permanently removes a provider credential
+      parameters:
+      - description: Credential ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Delete credential
+      tags:
+      - Credentials
+    get:
+      description: Returns a credential by ID with masked API key
+      parameters:
+      - description: Credential ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CredentialResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get credential
+      tags:
+      - Credentials
+    put:
+      consumes:
+      - application/json
+      description: Updates a credential's provider, key, URL, weight, and health
+      parameters:
+      - description: Credential ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Updated credential details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.UpdateCredentialRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Update credential
+      tags:
+      - Credentials
+  /api/v1/admin/pools:
+    get:
+      description: Returns all model routing pools with credential counts
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.PoolResponse'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List model pools
+      tags:
+      - Pools
+    post:
+      consumes:
+      - application/json
+      description: Creates a new model routing pool
+      parameters:
+      - description: Pool details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CreatePoolRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.PoolResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Create model pool
+      tags:
+      - Pools
+  /api/v1/admin/pools/{id}:
+    delete:
+      description: Permanently removes a pool and cascades to its credentials
+      parameters:
+      - description: Pool ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Delete model pool
+      tags:
+      - Pools
+    get:
+      description: Returns a model pool with all associated credentials
+      parameters:
+      - description: Pool ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.PoolResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get model pool
+      tags:
+      - Pools
+    put:
+      consumes:
+      - application/json
+      description: Updates a model pool's pattern, strategy, and fallback
+      parameters:
+      - description: Pool ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Updated pool details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.UpdatePoolRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Update model pool
+      tags:
+      - Pools
+  /api/v1/admin/tenants:
+    get:
+      description: Returns all registered tenants
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.TenantResponse'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List tenants
+      tags:
+      - Tenants
+    post:
+      consumes:
+      - application/json
+      description: Creates a new tenant and generates a virtual API key
+      parameters:
+      - description: Tenant details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CreateTenantRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.TenantResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Create tenant
+      tags:
+      - Tenants
+  /api/v1/admin/tenants/{id}:
+    delete:
+      description: Permanently removes a tenant
+      parameters:
+      - description: Tenant ID (UUID)
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Delete tenant
+      tags:
+      - Tenants
+    get:
+      description: Returns a single tenant by ID
+      parameters:
+      - description: Tenant ID (UUID)
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.TenantResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get tenant
+      tags:
+      - Tenants
+    put:
+      consumes:
+      - application/json
+      description: Updates a tenant's name, balance, active status, and rate limit
+      parameters:
+      - description: Tenant ID (UUID)
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Updated tenant details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.UpdateTenantRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Update tenant
+      tags:
+      - Tenants
+  /health:
+    get:
+      description: Returns 200 if the server process is running
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_health.LivenessResponse'
+      summary: Liveness probe
+      tags:
+      - Health
+  /ready:
+    get:
+      description: Checks database connectivity and cache initialization
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/internal_health.ReadinessResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/internal_health.ReadinessResponse'
+      summary: Readiness probe
+      tags:
+      - Health
+  /v1/{path}:
+    post:
+      consumes:
+      - application/json
+      description: Routes AI requests to upstream providers with automatic failover
+      parameters:
+      - description: Bearer virtual-api-key
+        in: header
+        name: Authorization
+        required: true
+        type: string
+      - description: OpenAI-compatible request body
+        in: body
+        name: body
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses: {}
+      summary: Proxy AI request
+      tags:
+      - Proxy
+securityDefinitions:
+  BearerAuth:
+    description: Enter your API key with the "Bearer " prefix, e.g. "Bearer cag_xxxx"
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"
