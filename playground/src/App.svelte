@@ -44,6 +44,8 @@
   let showSettingsModal = $state(false);
   let showModelDropdown = $state(false);
   let visibleApiKey = $state(false);
+  let connectError = $state('');
+  let isConnecting = $state(false);
 
   // Dynamic templates values
   let showCodePanel = $state(false);
@@ -73,14 +75,24 @@
   });
 
   // Load configuration from localStorage on mount
-  onMount(() => {
+  onMount(async () => {
     const savedKey = localStorage.getItem('cag_playground_api_key');
     if (savedKey) {
-      apiKey = savedKey;
-      statusHUD = 'Ready';
-      loadTenantInfo();
-      loadModels();
-      loadChats();
+      statusHUD = 'Verifying...';
+      const isValid = await loadTenantInfo(savedKey);
+      if (isValid) {
+        apiKey = savedKey;
+        statusHUD = 'Ready';
+        loadModels();
+        loadChats();
+      } else {
+        localStorage.removeItem('cag_playground_api_key');
+        apiKey = '';
+        statusHUD = 'Enter API Key';
+        showSettingsModal = true;
+      }
+    } else {
+      showSettingsModal = true;
     }
 
     const savedTheme = localStorage.getItem('cag_playground_theme');
@@ -101,24 +113,38 @@
     }
   }
 
-  function handleSaveKey() {
-    if (apiKey.trim()) {
-      localStorage.setItem('cag_playground_api_key', apiKey.trim());
+  async function handleSaveKey() {
+    const keyToSave = apiKey.trim();
+    if (!keyToSave) {
+      connectError = 'API key cannot be empty.';
+      return;
+    }
+
+    connectError = '';
+    isConnecting = true;
+    statusHUD = 'Connecting...';
+
+    const isValid = await loadTenantInfo(keyToSave);
+    if (isValid) {
+      localStorage.setItem('cag_playground_api_key', keyToSave);
       showSettingsModal = false;
-      statusHUD = 'Loading...';
-      loadTenantInfo();
+      statusHUD = 'Ready';
       loadModels();
       loadChats();
+    } else {
+      connectError = 'Invalid API key. Please check your credentials and try again.';
+      statusHUD = 'Error';
     }
+    isConnecting = false;
   }
 
-  // Load tenant details from GET /api/v1/playground/tenant
-  async function loadTenantInfo() {
-    if (!apiKey.trim()) return;
+  // Load tenant details from GET /api/v1/playground/tenant. Returns true if key is valid.
+  async function loadTenantInfo(keyToUse = apiKey) {
+    if (!keyToUse.trim()) return false;
     try {
       const res = await fetch('/api/v1/playground/tenant', {
         headers: {
-          'Authorization': `Bearer ${apiKey}`
+          'Authorization': `Bearer ${keyToUse}`
         }
       });
       if (res.status === 200) {
@@ -126,9 +152,12 @@
         tenantName = data.name || 'Tenant';
         tenantBalance = data.token_balance || 0;
         tenantRateLimit = data.rate_limit_rpm || 0;
+        return true;
       }
+      return false;
     } catch (e) {
       console.error('Failed to load tenant info', e);
+      return false;
     }
   }
 
@@ -741,11 +770,25 @@
         </div>
       </div>
 
+      {#if connectError}
+        <div class="text-red-500 text-xs mb-4 font-medium">{connectError}</div>
+      {/if}
+
       <div class="flex justify-end gap-2 text-xs">
-        {#if apiKey.trim() && localStorage.getItem('cag_playground_api_key')}
-          <button class="px-4 py-2 rounded-lg border" onclick={() => showSettingsModal = false}>Cancel</button>
+        {#if apiKey.trim() && localStorage.getItem('cag_playground_api_key') && !isConnecting}
+          <button class="px-4 py-2 rounded-lg border" onclick={() => { showSettingsModal = false; connectError = ''; }}>Cancel</button>
         {/if}
-        <button class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold" onclick={handleSaveKey} disabled={!apiKey.trim()}>Save & Connect</button>
+        <button 
+          class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold flex items-center justify-center gap-1.5 min-w-[120px]" 
+          onclick={handleSaveKey} 
+          disabled={!apiKey.trim() || isConnecting}
+        >
+          {#if isConnecting}
+            <span class="animate-spin">🔄</span> Connecting...
+          {:else}
+            Save & Connect
+          {/if}
+        </button>
       </div>
     </div>
   </div>
@@ -1004,5 +1047,14 @@
   .icon-button:hover {
     color: var(--text-primary);
     background: var(--item-hover);
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+  .animate-spin {
+    animation: spin 1s linear infinite;
+    display: inline-block;
   }
 </style>
