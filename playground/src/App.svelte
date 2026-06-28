@@ -126,6 +126,7 @@
 
     const isValid = await loadTenantInfo(keyToSave);
     if (isValid) {
+      apiKey = keyToSave;
       localStorage.setItem('cag_playground_api_key', keyToSave);
       showSettingsModal = false;
       statusHUD = 'Ready';
@@ -759,6 +760,7 @@
             class="input-box w-full p-2.5 rounded-lg border text-sm" 
             placeholder="cag_xxxx..." 
             bind:value={apiKey} 
+            onkeydown={(e) => { if(e.key === 'Enter') { e.preventDefault(); handleSaveKey(); } }}
           />
           <button class="absolute right-3" onclick={() => visibleApiKey = !visibleApiKey}>
             {#if visibleApiKey}🔒{:else}👁️{/if}
