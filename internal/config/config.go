@@ -8,6 +8,15 @@ import (
 	"time"
 )
 
+func init() {
+	// Sanitize GIN_MODE before Gin's init() reads it.
+	// Some deployment platforms (Clever Cloud) may include inline
+	// comments in env vars, e.g. 'debug  # description'.
+	if mode := os.Getenv("GIN_MODE"); mode != "" {
+		os.Setenv("GIN_MODE", stripInlineComment(mode))
+	}
+}
+
 // Config holds all application configuration loaded from environment variables.
 // All fields are resolved at startup — no reflection or lazy loading on the hot-path.
 type Config struct {
@@ -112,8 +121,17 @@ func (c *Config) validate() {
 
 // --- Helper functions: direct os.Getenv with typed conversion, zero reflection ---
 
+// stripInlineComment removes shell-style inline comments from env values.
+// e.g. "debug  # description" → "debug"
+func stripInlineComment(val string) string {
+	if idx := strings.Index(val, "#"); idx > 0 {
+		val = val[:idx]
+	}
+	return strings.TrimSpace(val)
+}
+
 func envRequired(key string) string {
-	val := os.Getenv(key)
+	val := stripInlineComment(os.Getenv(key))
 	if val == "" {
 		panic(fmt.Sprintf("required environment variable %s is not set", key))
 	}
@@ -122,7 +140,7 @@ func envRequired(key string) string {
 
 func envStr(key, fallback string) string {
 	if val := os.Getenv(key); val != "" {
-		return val
+		return stripInlineComment(val)
 	}
 	return fallback
 }
