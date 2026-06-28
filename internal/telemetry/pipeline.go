@@ -59,8 +59,21 @@ func NewPipeline(pool *pgxpool.Pool, logger *zap.Logger, queueSize, batchSize in
 }
 
 // Start launches the background worker goroutine.
+// Gap 3 Fix: The worker goroutine is wrapped in a panic defender to prevent
+// database flush errors or malformed batch data from crashing the gateway.
 func (p *Pipeline) Start() {
-	go p.worker()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				p.logger.Error("recovered from telemetry worker panic",
+					zap.Any("panic", r),
+				)
+				// Restart the worker to maintain telemetry service
+				go p.worker()
+			}
+		}()
+		p.worker()
+	}()
 	p.logger.Info("telemetry pipeline started",
 		zap.Int("queue_size", cap(p.queue)),
 		zap.Int("batch_size", p.batchSize),

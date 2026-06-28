@@ -146,8 +146,23 @@ func (sm *SyncManager) loadTenants(ctx context.Context) error {
 // StartListener starts the PostgreSQL LISTEN/NOTIFY watcher.
 // Runs in a background goroutine and hot-reloads affected pools
 // when configuration changes are detected.
+//
+// Gap 3 Fix: The listener goroutine is wrapped in a panic defender
+// to prevent config reload errors from crashing the gateway container.
 func (sm *SyncManager) StartListener() {
-	go sm.listenLoop()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				sm.logger.Error("recovered from LISTEN/NOTIFY listener panic",
+					zap.Any("panic", r),
+				)
+				// Restart the listener to maintain config sync
+				time.Sleep(5 * time.Second)
+				go sm.listenLoop()
+			}
+		}()
+		sm.listenLoop()
+	}()
 	sm.logger.Info("LISTEN/NOTIFY watcher started")
 }
 

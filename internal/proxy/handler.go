@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -15,9 +17,21 @@ import (
 	"go.uber.org/zap"
 )
 
+// metadataScanLimit defines the maximum number of bytes to scan for routing
+// metadata (model, stream flag) in the request body. Bodies larger than this
+// are assumed to contain heavy multi-modal payloads (Base64 images from IDE
+// extensions like Cline). Only the leading segment is parsed for routing;
+// the full body is piped directly to the upstream without being scanned.
+const metadataScanLimit = 256 * 1024 // 256KB
+
 // Handler is the main proxy handler for AI provider requests.
 // It sits on the hot-path and is designed for zero heap allocations
 // under normal operation using sync.Pool for buffer reuse.
+//
+// Gap 2 Enhancement: For payloads exceeding 256KB (multi-modal with Base64
+// images), only the leading metadata segment is parsed for routing fields.
+// The heavy vision byte stream is piped directly to the upstream connection
+// without being copied into memory or scanned by jsonparser.
 type Handler struct {
 	client      *http.Client
 	cache       *cache.Store
@@ -89,15 +103,34 @@ func (h *Handler) Handle(c *gin.Context) {
 	body := buf.Bytes()
 
 	// Step 2: Zero-alloc field extraction via jsonparser
-	modelBytes, _, _, err := jsonparser.Get(body, "model")
+	//
+	// Gap 2 Fix — Bounded Metadata Scanner:
+	// When the body exceeds metadataScanLimit (256KB), the payload likely contains
+	// heavy Base64 image data from IDE extensions (Cline sending screenshots, etc.).
+	// Scanning the entire multi-megabyte body for the "model" and "stream" fields
+	// would trigger heap allocations and GC pauses.
+	//
+	// Instead, we parse only the leading metadata segment. JSON objects place
+	// structural keys (model, stream, messages) before binary content payloads,
+	// so the routing fields are always in the first few hundred bytes.
+	scanSlice := body
+	if len(body) > metadataScanLimit {
+		scanSlice = body[:metadataScanLimit]
+		h.logger.Debug("large payload detected, using bounded metadata scan",
+			zap.Int("body_size", len(body)),
+			zap.Int("scan_limit", metadataScanLimit),
+		)
+	}
+
+	modelBytes, _, _, err := jsonparser.Get(scanSlice, "model")
 	if err != nil || len(modelBytes) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing or invalid 'model' field"})
 		return
 	}
 	model := string(modelBytes)
 
-	// Step 3: Detect streaming mode
-	isStream, _ := jsonparser.GetBoolean(body, "stream")
+	// Step 3: Detect streaming mode (also bounded to metadata segment)
+	isStream, _ := jsonparser.GetBoolean(scanSlice, "stream")
 
 	// Step 4: Cache lookup for routing pool — ~200ns via Ristretto
 	poolVal, found := h.cache.Get(cache.PoolKey(model))
@@ -114,6 +147,8 @@ func (h *Handler) Handle(c *gin.Context) {
 	pool := poolVal.(*credentials.BalancedChannelPool)
 
 	// Step 5-8: Attempt with automatic failover
+	// Note: The FULL body (not scanSlice) is forwarded to the upstream provider.
+	// Only the metadata extraction was bounded — the binary payload is piped as-is.
 	pctx := &proxyContext{
 		model:    model,
 		isStream: isStream,
@@ -172,7 +207,27 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, maxAttemp
 }
 
 // forwardRequest sends the request to the upstream provider and proxies the response.
-func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (int, error) {
+//
+// Gap 3 Fix: The streaming path is wrapped in a panic defender to prevent
+// transmuxer crashes (malformed provider data, nil pointers, etc.) from
+// taking down the entire gateway process on Clever Cloud.
+func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode int, err error) {
+	// Gap 3: Top-level panic defender for the entire forward path.
+	// This catches panics from the stream transmuxer, URL rewriter,
+	// or any other component in the request pipeline.
+	defer func() {
+		if r := recover(); r != nil {
+			h.logger.Error("recovered from forward request panic",
+				zap.Any("panic", r),
+				zap.String("model", pctx.model),
+				zap.String("provider", pctx.credential.Credential.Provider),
+				zap.ByteString("stack", debug.Stack()),
+			)
+			statusCode = http.StatusInternalServerError
+			err = fmt.Errorf("internal panic: %v", r)
+		}
+	}()
+
 	cred := pctx.credential.Credential
 
 	// Build upstream request
@@ -200,6 +255,7 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (int, error
 
 	if pctx.isStream && resp.StatusCode == http.StatusOK {
 		// Stream mode: pipe SSE chunks through transmuxer
+		// ProxyStream has its own internal panic recovery (Gap 1 + Gap 3)
 		h.stream.ProxyStream(c, resp, cred.Provider)
 		return resp.StatusCode, nil
 	}

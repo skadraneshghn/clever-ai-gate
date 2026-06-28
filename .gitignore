@@ -24,3 +24,9 @@ docs/
 
 # Docker
 docker-compose.override.yml
+
+server
+
+.env.example
+
+./.env.example

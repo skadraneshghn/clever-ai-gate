@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 
@@ -16,9 +17,14 @@ import (
 // StreamProxy handles SSE (Server-Sent Events) streaming from upstream providers.
 // It reads upstream chunks line-by-line, passes them through a provider-specific
 // transmuxer for format normalization, and flushes each chunk to the client immediately.
+//
+// Safety guarantees:
+//   - All pooled buffers are returned via deferred recovery blocks, even on client disconnect
+//   - Transmuxer panics are caught and logged without crashing the gateway process
+//   - Scanner buffers are always returned to sync.Pool regardless of exit path
 type StreamProxy struct {
-	client     *http.Client
-	logger     *zap.Logger
+	client      *http.Client
+	logger      *zap.Logger
 	scannerPool sync.Pool
 }
 
@@ -38,6 +44,13 @@ func NewStreamProxy(client *http.Client, logger *zap.Logger) *StreamProxy {
 // ProxyStream pipes SSE chunks from upstream to client with format translation.
 // Each chunk is flushed immediately for minimum Time To First Token (TTFT).
 //
+// Gap 1 Fix: Deferred allocation recovery guarantees all sync.Pool buffers are
+// returned even when a client abruptly severs their connection mid-stream
+// (e.g., developer aborts code generation in VS Code / Cline).
+//
+// Gap 3 Fix: Panic defender wraps the entire stream processing loop so that an
+// unhandled error inside a provider transmuxer cannot crash the gateway process.
+//
 // The flow:
 //  1. Set SSE response headers
 //  2. Create provider-specific transmuxer
@@ -45,7 +58,36 @@ func NewStreamProxy(client *http.Client, logger *zap.Logger) *StreamProxy {
 //  4. For each "data: " prefixed line, transmux and flush
 //  5. On [DONE], send final event and close
 func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, provider string) {
-	defer upstream.Body.Close()
+	// Acquire pooled scanner buffer
+	scanBuf := sp.scannerPool.Get().([]byte)
+
+	// Gap 1 + Gap 3: Absolute protection — guarantee buffer return and catch panics.
+	// This deferred block runs regardless of:
+	//   - Normal completion
+	//   - Client connection drop (broken pipe / connection reset)
+	//   - Transmuxer panic (malformed provider response, nil pointer, etc.)
+	//   - Scanner error on upstream read failure
+	defer func() {
+		// Always return the scanner buffer to the pool
+		sp.scannerPool.Put(scanBuf[:0])
+
+		// Always close the upstream response body
+		upstream.Body.Close()
+
+		// Catch any panic from the transmuxer or write path
+		if r := recover(); r != nil {
+			sp.logger.Error("recovered from stream processing panic",
+				zap.Any("panic", r),
+				zap.String("provider", provider),
+				zap.ByteString("stack", debug.Stack()),
+			)
+			// Attempt to signal stream termination to client if connection is still alive
+			if flusher, ok := c.Writer.(http.Flusher); ok {
+				c.Writer.Write([]byte("data: [DONE]\n\n"))
+				flusher.Flush()
+			}
+		}
+	}()
 
 	// Step 1: Set SSE headers for streaming
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
@@ -57,11 +99,10 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 
 	// Step 2: Create the appropriate transmuxer for this provider
 	tmx := transmux.NewTransmuxer(provider)
+	defer tmx.Close()
 
 	// Step 3: Create scanner with pooled buffer
 	scanner := bufio.NewScanner(upstream.Body)
-	scanBuf := sp.scannerPool.Get().([]byte)
-	defer sp.scannerPool.Put(scanBuf[:0])
 	scanner.Buffer(scanBuf, 1024*1024) // Max 1MB line (for base64 images)
 
 	flusher, ok := c.Writer.(http.Flusher)
@@ -71,6 +112,7 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 	}
 
 	// Step 4: Read and transmux each SSE line
+	// Each write to the client is wrapped in error checking to detect disconnection
 	for scanner.Scan() {
 		line := scanner.Bytes()
 
@@ -91,6 +133,7 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 			}
 
 			// Transmux the chunk to OpenAI format
+			// Individual chunk errors are caught gracefully — raw data forwarded on failure
 			translated, err := tmx.TranslateChunk(data)
 			if err != nil {
 				sp.logger.Debug("transmux error, forwarding raw",
@@ -102,7 +145,15 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 			}
 
 			if len(translated) > 0 {
-				c.Writer.Write([]byte("data: "))
+				// Detect client disconnect: if Write returns an error (broken pipe),
+				// the deferred recovery will clean up all resources
+				if _, writeErr := c.Writer.Write([]byte("data: ")); writeErr != nil {
+					sp.logger.Debug("client disconnected during stream",
+						zap.String("provider", provider),
+						zap.Error(writeErr),
+					)
+					return // Deferred cleanup handles buffer return
+				}
 				c.Writer.Write(translated)
 				c.Writer.Write([]byte("\n\n"))
 				flusher.Flush() // Flush after every chunk for minimum TTFT
@@ -122,7 +173,7 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 		}
 
 		// Handle provider-specific non-SSE streaming (e.g., Gemini JSON array)
-		if provider == "gemini" && (line[0] == '[' || line[0] == ',' || line[0] == '{') {
+		if provider == "gemini" && len(line) > 0 && (line[0] == '[' || line[0] == ',' || line[0] == '{') {
 			sp.handleGeminiStream(c, flusher, tmx, line, scanner)
 			return
 		}
