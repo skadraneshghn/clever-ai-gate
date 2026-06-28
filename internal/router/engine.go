@@ -57,11 +57,18 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 	if err != nil {
 		panic("failed to read embedded playground dist: " + err.Error())
 	}
-	engine.GET("/playground", func(c *gin.Context) {
+	assetsFS, err := fs.Sub(playground.DistFS, "dist/assets")
+	if err != nil {
+		panic("failed to read embedded playground assets: " + err.Error())
+	}
+
+	// Serve Svelte client compiled CSS/JS from /assets/*
+	engine.StaticFS("/assets", http.FS(assetsFS))
+
+	// Serve Svelte index.html for all requests under /playground/*
+	// This handles client-side routing and page refresh 404 bugs cleanly.
+	engine.GET("/playground/*any", func(c *gin.Context) {
 		c.FileFromFS("index.html", http.FS(subFS))
-	})
-	engine.GET("/assets/*filepath", func(c *gin.Context) {
-		c.FileFromFS("assets/"+c.Param("filepath"), http.FS(subFS))
 	})
 
 	// --- Proxy routes (minimal middleware for maximum throughput) ---
