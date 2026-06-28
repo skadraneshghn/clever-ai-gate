@@ -39,6 +39,14 @@ type CredentialResponse struct {
 	CreatedAt string  `json:"created_at" example:"2024-01-15T10:30:00Z"`
 }
 
+// TenantInfoResponse represents detailed info about the tenant, returned on /playground/tenant.
+type TenantInfoResponse struct {
+	ID           string `json:"id" example:"550e8400-e29b-41d4-a716-446655440000"`
+	Name         string `json:"name" example:"Acme Corp"`
+	TokenBalance int64  `json:"token_balance" example:"1000000000"`
+	RateLimitRPM int    `json:"rate_limit_rpm" example:"60"`
+}
+
 // ErrorResponse represents an API error.
 type ErrorResponse struct {
 	Error   string `json:"error" example:"resource not found"`

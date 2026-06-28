@@ -1,6 +1,6 @@
 basePath: /
 definitions:
-  github_com_skadraneshghn_clever-ai-gate_api_dto.CreateCredentialRequest:
+  dto.CreateCredentialRequest:
     properties:
       api_key:
         example: sk-...
@@ -23,7 +23,7 @@ definitions:
     - pool_id
     - provider
     type: object
-  github_com_skadraneshghn_clever-ai-gate_api_dto.CreatePoolRequest:
+  dto.CreatePoolRequest:
     properties:
       fallback_pool_id:
         example: 2
@@ -37,7 +37,7 @@ definitions:
     required:
     - model_pattern
     type: object
-  github_com_skadraneshghn_clever-ai-gate_api_dto.CreateTenantRequest:
+  dto.CreateTenantRequest:
     properties:
       name:
         example: Acme Corp
@@ -51,7 +51,7 @@ definitions:
     required:
     - name
     type: object
-  github_com_skadraneshghn_clever-ai-gate_api_dto.CredentialResponse:
+  dto.CredentialResponse:
     properties:
       base_url:
         example: https://api.openai.com
@@ -80,7 +80,39 @@ definitions:
         example: 1
         type: integer
     type: object
-  github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse:
+  dto.DiscoverProviderRequest:
+    properties:
+      api_key:
+        example: nvapi-...
+        type: string
+      base_url:
+        example: https://integrate.api.nvidia.com/v1
+        type: string
+      provider:
+        example: nvidia
+        type: string
+      weight:
+        example: 1
+        type: integer
+    required:
+    - api_key
+    - base_url
+    - provider
+    type: object
+  dto.DiscoverProviderResponse:
+    properties:
+      discovered_models:
+        items:
+          type: string
+        type: array
+      message:
+        example: Successfully synchronized provider models
+        type: string
+      models_count:
+        example: 45
+        type: integer
+    type: object
+  dto.ErrorResponse:
     properties:
       details:
         example: tenant with id 'xxx' does not exist
@@ -89,7 +121,7 @@ definitions:
         example: resource not found
         type: string
     type: object
-  github_com_skadraneshghn_clever-ai-gate_api_dto.PoolResponse:
+  dto.PoolResponse:
     properties:
       created_at:
         example: "2024-01-15T10:30:00Z"
@@ -99,7 +131,7 @@ definitions:
         type: integer
       credentials:
         items:
-          $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CredentialResponse'
+          $ref: '#/definitions/dto.CredentialResponse'
         type: array
       fallback_pool_id:
         example: 2
@@ -114,13 +146,28 @@ definitions:
         example: round-robin
         type: string
     type: object
-  github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse:
+  dto.SuccessResponse:
     properties:
       message:
         example: resource deleted successfully
         type: string
     type: object
-  github_com_skadraneshghn_clever-ai-gate_api_dto.TenantResponse:
+  dto.TenantInfoResponse:
+    properties:
+      id:
+        example: 550e8400-e29b-41d4-a716-446655440000
+        type: string
+      name:
+        example: Acme Corp
+        type: string
+      rate_limit_rpm:
+        example: 60
+        type: integer
+      token_balance:
+        example: 1000000000
+        type: integer
+    type: object
+  dto.TenantResponse:
     properties:
       api_key:
         example: cag_xxxxxxxxxxxxxxxxxxxx
@@ -147,7 +194,7 @@ definitions:
         example: "2024-01-15T10:30:00Z"
         type: string
     type: object
-  github_com_skadraneshghn_clever-ai-gate_api_dto.UpdateCredentialRequest:
+  dto.UpdateCredentialRequest:
     properties:
       api_key:
         example: sk-...
@@ -168,7 +215,7 @@ definitions:
     - base_url
     - provider
     type: object
-  github_com_skadraneshghn_clever-ai-gate_api_dto.UpdatePoolRequest:
+  dto.UpdatePoolRequest:
     properties:
       fallback_pool_id:
         type: integer
@@ -181,7 +228,7 @@ definitions:
     required:
     - model_pattern
     type: object
-  github_com_skadraneshghn_clever-ai-gate_api_dto.UpdateTenantRequest:
+  dto.UpdateTenantRequest:
     properties:
       is_active:
         example: true
@@ -198,14 +245,14 @@ definitions:
     required:
     - name
     type: object
-  internal_health.LivenessResponse:
+  health.LivenessResponse:
     properties:
       status:
         type: string
       uptime:
         type: string
     type: object
-  internal_health.ReadinessResponse:
+  health.ReadinessResponse:
     properties:
       checks:
         additionalProperties:
@@ -242,22 +289,22 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CreateCredentialRequest'
+          $ref: '#/definitions/dto.CreateCredentialRequest'
       produces:
       - application/json
       responses:
         "201":
           description: Created
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CredentialResponse'
+            $ref: '#/definitions/dto.CredentialResponse'
         "400":
           description: Bad Request
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
       security:
       - BearerAuth: []
       summary: Add credential
@@ -278,11 +325,11 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse'
+            $ref: '#/definitions/dto.SuccessResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
       security:
       - BearerAuth: []
       summary: Delete credential
@@ -302,11 +349,11 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CredentialResponse'
+            $ref: '#/definitions/dto.CredentialResponse'
         "404":
           description: Not Found
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
       security:
       - BearerAuth: []
       summary: Get credential
@@ -327,22 +374,22 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.UpdateCredentialRequest'
+          $ref: '#/definitions/dto.UpdateCredentialRequest'
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse'
+            $ref: '#/definitions/dto.SuccessResponse'
         "400":
           description: Bad Request
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
       security:
       - BearerAuth: []
       summary: Update credential
@@ -358,12 +405,12 @@ paths:
           description: OK
           schema:
             items:
-              $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.PoolResponse'
+              $ref: '#/definitions/dto.PoolResponse'
             type: array
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
       security:
       - BearerAuth: []
       summary: List model pools
@@ -379,22 +426,22 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CreatePoolRequest'
+          $ref: '#/definitions/dto.CreatePoolRequest'
       produces:
       - application/json
       responses:
         "201":
           description: Created
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.PoolResponse'
+            $ref: '#/definitions/dto.PoolResponse'
         "400":
           description: Bad Request
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
       security:
       - BearerAuth: []
       summary: Create model pool
@@ -415,11 +462,11 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse'
+            $ref: '#/definitions/dto.SuccessResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
       security:
       - BearerAuth: []
       summary: Delete model pool
@@ -439,11 +486,11 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.PoolResponse'
+            $ref: '#/definitions/dto.PoolResponse'
         "404":
           description: Not Found
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
       security:
       - BearerAuth: []
       summary: Get model pool
@@ -464,27 +511,60 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.UpdatePoolRequest'
+          $ref: '#/definitions/dto.UpdatePoolRequest'
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse'
+            $ref: '#/definitions/dto.SuccessResponse'
         "400":
           description: Bad Request
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
       security:
       - BearerAuth: []
       summary: Update model pool
       tags:
       - Pools
+  /api/v1/admin/providers/nvidia:
+    post:
+      consumes:
+      - application/json
+      description: Submits an NVIDIA key, hits their /models endpoint, and registers
+        all active models automatically
+      parameters:
+      - description: NVIDIA provider details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/dto.DiscoverProviderRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.DiscoverProviderResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Auto-discover NVIDIA Models
+      tags:
+      - Credentials
   /api/v1/admin/tenants:
     get:
       description: Returns all registered tenants
@@ -495,12 +575,12 @@ paths:
           description: OK
           schema:
             items:
-              $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.TenantResponse'
+              $ref: '#/definitions/dto.TenantResponse'
             type: array
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
       security:
       - BearerAuth: []
       summary: List tenants
@@ -516,22 +596,22 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CreateTenantRequest'
+          $ref: '#/definitions/dto.CreateTenantRequest'
       produces:
       - application/json
       responses:
         "201":
           description: Created
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.TenantResponse'
+            $ref: '#/definitions/dto.TenantResponse'
         "400":
           description: Bad Request
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
       security:
       - BearerAuth: []
       summary: Create tenant
@@ -552,11 +632,11 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse'
+            $ref: '#/definitions/dto.SuccessResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
       security:
       - BearerAuth: []
       summary: Delete tenant
@@ -576,11 +656,11 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.TenantResponse'
+            $ref: '#/definitions/dto.TenantResponse'
         "404":
           description: Not Found
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
       security:
       - BearerAuth: []
       summary: Get tenant
@@ -601,27 +681,47 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.UpdateTenantRequest'
+          $ref: '#/definitions/dto.UpdateTenantRequest'
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse'
+            $ref: '#/definitions/dto.SuccessResponse'
         "400":
           description: Bad Request
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse'
+            $ref: '#/definitions/dto.ErrorResponse'
       security:
       - BearerAuth: []
       summary: Update tenant
       tags:
       - Tenants
+  /api/v1/playground/tenant:
+    get:
+      description: Returns active tenant details extracted from the authenticated
+        request context.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.TenantInfoResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get Tenant Info
+      tags:
+      - Playground
   /health:
     get:
       description: Returns 200 if the server process is running
@@ -631,7 +731,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/internal_health.LivenessResponse'
+            $ref: '#/definitions/health.LivenessResponse'
       summary: Liveness probe
       tags:
       - Health
@@ -644,11 +744,11 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/internal_health.ReadinessResponse'
+            $ref: '#/definitions/health.ReadinessResponse'
         "503":
           description: Service Unavailable
           schema:
-            $ref: '#/definitions/internal_health.ReadinessResponse'
+            $ref: '#/definitions/health.ReadinessResponse'
       summary: Readiness probe
       tags:
       - Health

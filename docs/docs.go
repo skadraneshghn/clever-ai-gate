@@ -49,7 +49,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CreateCredentialRequest"
+                            "$ref": "#/definitions/dto.CreateCredentialRequest"
                         }
                     }
                 ],
@@ -57,19 +57,19 @@ const docTemplate = `{
                     "201": {
                         "description": "Created",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CredentialResponse"
+                            "$ref": "#/definitions/dto.CredentialResponse"
                         }
                     },
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     }
                 }
@@ -103,13 +103,13 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CredentialResponse"
+                            "$ref": "#/definitions/dto.CredentialResponse"
                         }
                     },
                     "404": {
                         "description": "Not Found",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     }
                 }
@@ -145,7 +145,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.UpdateCredentialRequest"
+                            "$ref": "#/definitions/dto.UpdateCredentialRequest"
                         }
                     }
                 ],
@@ -153,19 +153,19 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse"
+                            "$ref": "#/definitions/dto.SuccessResponse"
                         }
                     },
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     }
                 }
@@ -197,13 +197,13 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse"
+                            "$ref": "#/definitions/dto.SuccessResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     }
                 }
@@ -230,14 +230,14 @@ const docTemplate = `{
                         "schema": {
                             "type": "array",
                             "items": {
-                                "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.PoolResponse"
+                                "$ref": "#/definitions/dto.PoolResponse"
                             }
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     }
                 }
@@ -266,7 +266,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CreatePoolRequest"
+                            "$ref": "#/definitions/dto.CreatePoolRequest"
                         }
                     }
                 ],
@@ -274,19 +274,19 @@ const docTemplate = `{
                     "201": {
                         "description": "Created",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.PoolResponse"
+                            "$ref": "#/definitions/dto.PoolResponse"
                         }
                     },
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     }
                 }
@@ -320,13 +320,13 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.PoolResponse"
+                            "$ref": "#/definitions/dto.PoolResponse"
                         }
                     },
                     "404": {
                         "description": "Not Found",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     }
                 }
@@ -362,7 +362,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.UpdatePoolRequest"
+                            "$ref": "#/definitions/dto.UpdatePoolRequest"
                         }
                     }
                 ],
@@ -370,19 +370,19 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse"
+                            "$ref": "#/definitions/dto.SuccessResponse"
                         }
                     },
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     }
                 }
@@ -414,13 +414,64 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse"
+                            "$ref": "#/definitions/dto.SuccessResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/providers/nvidia": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Submits an NVIDIA key, hits their /models endpoint, and registers all active models automatically",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Credentials"
+                ],
+                "summary": "Auto-discover NVIDIA Models",
+                "parameters": [
+                    {
+                        "description": "NVIDIA provider details",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/dto.DiscoverProviderRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/dto.DiscoverProviderResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/dto.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     }
                 }
@@ -447,14 +498,14 @@ const docTemplate = `{
                         "schema": {
                             "type": "array",
                             "items": {
-                                "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.TenantResponse"
+                                "$ref": "#/definitions/dto.TenantResponse"
                             }
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     }
                 }
@@ -483,7 +534,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CreateTenantRequest"
+                            "$ref": "#/definitions/dto.CreateTenantRequest"
                         }
                     }
                 ],
@@ -491,19 +542,19 @@ const docTemplate = `{
                     "201": {
                         "description": "Created",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.TenantResponse"
+                            "$ref": "#/definitions/dto.TenantResponse"
                         }
                     },
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     }
                 }
@@ -537,13 +588,13 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.TenantResponse"
+                            "$ref": "#/definitions/dto.TenantResponse"
                         }
                     },
                     "404": {
                         "description": "Not Found",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     }
                 }
@@ -579,7 +630,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.UpdateTenantRequest"
+                            "$ref": "#/definitions/dto.UpdateTenantRequest"
                         }
                     }
                 ],
@@ -587,19 +638,19 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse"
+                            "$ref": "#/definitions/dto.SuccessResponse"
                         }
                     },
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     }
                 }
@@ -631,13 +682,44 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse"
+                            "$ref": "#/definitions/dto.SuccessResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse"
+                            "$ref": "#/definitions/dto.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/playground/tenant": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns active tenant details extracted from the authenticated request context.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Playground"
+                ],
+                "summary": "Get Tenant Info",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/dto.TenantInfoResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/dto.ErrorResponse"
                         }
                     }
                 }
@@ -657,7 +739,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/internal_health.LivenessResponse"
+                            "$ref": "#/definitions/health.LivenessResponse"
                         }
                     }
                 }
@@ -677,13 +759,13 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/internal_health.ReadinessResponse"
+                            "$ref": "#/definitions/health.ReadinessResponse"
                         }
                     },
                     "503": {
                         "description": "Service Unavailable",
                         "schema": {
-                            "$ref": "#/definitions/internal_health.ReadinessResponse"
+                            "$ref": "#/definitions/health.ReadinessResponse"
                         }
                     }
                 }
@@ -725,7 +807,7 @@ const docTemplate = `{
         }
     },
     "definitions": {
-        "github_com_skadraneshghn_clever-ai-gate_api_dto.CreateCredentialRequest": {
+        "dto.CreateCredentialRequest": {
             "type": "object",
             "required": [
                 "api_key",
@@ -756,7 +838,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_skadraneshghn_clever-ai-gate_api_dto.CreatePoolRequest": {
+        "dto.CreatePoolRequest": {
             "type": "object",
             "required": [
                 "model_pattern"
@@ -776,7 +858,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_skadraneshghn_clever-ai-gate_api_dto.CreateTenantRequest": {
+        "dto.CreateTenantRequest": {
             "type": "object",
             "required": [
                 "name"
@@ -796,7 +878,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_skadraneshghn_clever-ai-gate_api_dto.CredentialResponse": {
+        "dto.CredentialResponse": {
             "type": "object",
             "properties": {
                 "base_url": {
@@ -836,7 +918,52 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_skadraneshghn_clever-ai-gate_api_dto.ErrorResponse": {
+        "dto.DiscoverProviderRequest": {
+            "type": "object",
+            "required": [
+                "api_key",
+                "base_url",
+                "provider"
+            ],
+            "properties": {
+                "api_key": {
+                    "type": "string",
+                    "example": "nvapi-..."
+                },
+                "base_url": {
+                    "type": "string",
+                    "example": "https://integrate.api.nvidia.com/v1"
+                },
+                "provider": {
+                    "type": "string",
+                    "example": "nvidia"
+                },
+                "weight": {
+                    "type": "integer",
+                    "example": 1
+                }
+            }
+        },
+        "dto.DiscoverProviderResponse": {
+            "type": "object",
+            "properties": {
+                "discovered_models": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "message": {
+                    "type": "string",
+                    "example": "Successfully synchronized provider models"
+                },
+                "models_count": {
+                    "type": "integer",
+                    "example": 45
+                }
+            }
+        },
+        "dto.ErrorResponse": {
             "type": "object",
             "properties": {
                 "details": {
@@ -849,7 +976,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_skadraneshghn_clever-ai-gate_api_dto.PoolResponse": {
+        "dto.PoolResponse": {
             "type": "object",
             "properties": {
                 "created_at": {
@@ -863,7 +990,7 @@ const docTemplate = `{
                 "credentials": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/github_com_skadraneshghn_clever-ai-gate_api_dto.CredentialResponse"
+                        "$ref": "#/definitions/dto.CredentialResponse"
                     }
                 },
                 "fallback_pool_id": {
@@ -884,7 +1011,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_skadraneshghn_clever-ai-gate_api_dto.SuccessResponse": {
+        "dto.SuccessResponse": {
             "type": "object",
             "properties": {
                 "message": {
@@ -893,7 +1020,28 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_skadraneshghn_clever-ai-gate_api_dto.TenantResponse": {
+        "dto.TenantInfoResponse": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "example": "550e8400-e29b-41d4-a716-446655440000"
+                },
+                "name": {
+                    "type": "string",
+                    "example": "Acme Corp"
+                },
+                "rate_limit_rpm": {
+                    "type": "integer",
+                    "example": 60
+                },
+                "token_balance": {
+                    "type": "integer",
+                    "example": 1000000000
+                }
+            }
+        },
+        "dto.TenantResponse": {
             "type": "object",
             "properties": {
                 "api_key": {
@@ -930,7 +1078,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_skadraneshghn_clever-ai-gate_api_dto.UpdateCredentialRequest": {
+        "dto.UpdateCredentialRequest": {
             "type": "object",
             "required": [
                 "base_url",
@@ -959,7 +1107,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_skadraneshghn_clever-ai-gate_api_dto.UpdatePoolRequest": {
+        "dto.UpdatePoolRequest": {
             "type": "object",
             "required": [
                 "model_pattern"
@@ -978,7 +1126,7 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_skadraneshghn_clever-ai-gate_api_dto.UpdateTenantRequest": {
+        "dto.UpdateTenantRequest": {
             "type": "object",
             "required": [
                 "name"
@@ -1002,7 +1150,7 @@ const docTemplate = `{
                 }
             }
         },
-        "internal_health.LivenessResponse": {
+        "health.LivenessResponse": {
             "type": "object",
             "properties": {
                 "status": {
@@ -1013,7 +1161,7 @@ const docTemplate = `{
                 }
             }
         },
-        "internal_health.ReadinessResponse": {
+        "health.ReadinessResponse": {
             "type": "object",
             "properties": {
                 "checks": {

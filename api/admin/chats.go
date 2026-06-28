@@ -183,6 +183,14 @@ func (h *ChatHandler) Delete(c *gin.Context) {
 }
 
 // GetTenantInfo returns active tenant details extracted from the authenticated request context.
+// @Summary      Get Tenant Info
+// @Description  Returns active tenant details extracted from the authenticated request context.
+// @Tags         Playground
+// @Produce      json
+// @Security     BearerAuth
+// @Success      200  {object}  dto.TenantInfoResponse
+// @Failure      401  {object}  dto.ErrorResponse
+// @Router       /api/v1/playground/tenant [get]
 func (h *ChatHandler) GetTenantInfo(c *gin.Context) {
 	tenantID, existsID := c.Get("tenant_id")
 	tenantName, _ := c.Get("tenant_name")
@@ -193,11 +201,16 @@ func (h *ChatHandler) GetTenantInfo(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"id":             tenantID,
-		"name":           tenantName,
-		"token_balance":  tenantBalance,
-		"rate_limit_rpm": tenantRateLimit,
+	idStr, _ := tenantID.(string)
+	nameStr, _ := tenantName.(string)
+	balanceInt, _ := tenantBalance.(int64)
+	rateLimitInt, _ := tenantRateLimit.(int)
+
+	c.JSON(http.StatusOK, dto.TenantInfoResponse{
+		ID:           idStr,
+		Name:         nameStr,
+		TokenBalance: balanceInt,
+		RateLimitRPM: rateLimitInt,
 	})
 }
 
