@@ -55,16 +55,11 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		rateLimiter := middleware.NewRateLimiter(deps.Config.DefaultRateLimitRPM)
 		proxyGroup.Use(rateLimiter.Middleware())
 
-		// OpenAI-compatible proxy endpoints
-		proxyGroup.POST("/v1/chat/completions", deps.Proxy.Handle)
-		proxyGroup.POST("/v1/completions", deps.Proxy.Handle)
-		proxyGroup.POST("/v1/embeddings", deps.Proxy.Handle)
-		proxyGroup.POST("/v1/images/generations", deps.Proxy.Handle)
-		proxyGroup.POST("/v1/audio/transcriptions", deps.Proxy.Handle)
-		proxyGroup.POST("/v1/audio/translations", deps.Proxy.Handle)
-		proxyGroup.POST("/v1/audio/speech", deps.Proxy.Handle)
-
-		// Wildcard catch-all for any other /v1/ path
+		// Single catch-all for all OpenAI-compatible endpoints:
+		// /v1/chat/completions, /v1/embeddings, /v1/images/generations,
+		// /v1/audio/transcriptions, /v1/audio/speech, etc.
+		// All routes use the same proxy handler — model-based routing
+		// is determined by the "model" field in the JSON body, not the URL path.
 		proxyGroup.POST("/v1/*proxyPath", deps.Proxy.Handle)
 	}
 
