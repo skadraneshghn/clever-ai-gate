@@ -544,9 +544,9 @@
     </aside>
 
     <!-- Main Workspace -->
-    <main class="main-panel flex flex-col flex-grow overflow-hidden">
+    <main class="main-panel flex flex-col flex-grow overflow-hidden relative">
       <!-- Top header bar -->
-      <header class="header flex items-center justify-between px-6 py-3 border-b">
+      <header class="header flex items-center justify-between px-6 py-3 border-b shrink-0">
         <div class="model-picker-container relative">
           <button class="model-picker-btn flex items-center gap-2 font-semibold text-sm" onclick={() => showModelDropdown = !showModelDropdown}>
             <span>{selectedModel || 'Configure Gateway'}</span>
@@ -573,7 +573,7 @@
       </header>
 
       <!-- Live telemetry HUD panel -->
-      <div class="telemetry-bar flex gap-6 px-6 py-2.5 border-b font-mono text-[10px] overflow-x-auto whitespace-nowrap">
+      <div class="telemetry-bar flex gap-6 px-6 py-2.5 border-b font-mono text-[10px] overflow-x-auto whitespace-nowrap shrink-0">
         <div>Status: <span class="hud-value">{statusHUD}</span></div>
         <div>Provider: <span class="hud-value text-[#f97316]">{providerHUD}</span></div>
         <div>Model: <span class="hud-value text-[#f97316]">{modelHUD}</span></div>
@@ -581,34 +581,28 @@
         <div>Latency: <span class="hud-value">{latencyHUD}</span></div>
         <div>Speed: <span class="hud-value">{speedHUD}</span></div>
       </div>
-      <!-- Chat Workspace Area -->
-      <div class="chat-container flex-grow overflow-y-auto p-6 flex flex-col">
+
+      <!-- Chat Scrollable Area -->
+      <div class="chat-scroll-area flex-grow overflow-y-auto">
         {#if messages.length === 0}
           <!-- Initial landing screen layout -->
-          <div class="flex-grow flex flex-col items-center justify-center gap-8 max-w-3xl mx-auto w-full text-center">
+          <div class="landing-container flex flex-col items-center justify-center text-center px-6">
             
-            <!-- Large central Cognivo orange SVG logo -->
-            <div class="center-logo flex items-center justify-center p-5 rounded-2xl bg-orange-light">
-              <svg class="w-16 h-16 text-[#f97316]" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-              </svg>
-            </div>
+            <h1 class="text-3xl font-extrabold tracking-tight mb-8">What's on your mind today?</h1>
 
-            <h1 class="text-3xl font-extrabold tracking-tight">Let's start a smart conversation</h1>
-
-            <!-- Bounded input form box -->
-            <div class="input-card flex flex-col w-full border rounded-xl p-3 shadow-md gap-3">
+            <!-- Prompt Card (Pill styled) -->
+            <div class="prompt-pill-card mb-6">
               <textarea 
                 class="prompt-textarea w-full text-sm outline-none resize-none" 
                 placeholder="Ask me anything..." 
-                rows="2"
+                rows="3"
                 bind:value={inputText}
                 onkeydown={(e) => { if(e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitPrompt(); } }}
               ></textarea>
               
               <div class="flex items-center justify-between pt-2 border-t">
                 <div class="flex items-center gap-2">
-                  <button class="deeper-btn flex items-center gap-1 text-[10px] font-bold uppercase px-2-5 py-1-5 rounded-lg border {isDeeperResearch ? 'active' : ''}" onclick={() => isDeeperResearch = !isDeeperResearch}>
+                  <button class="deeper-btn flex items-center gap-1 text-[10px] font-bold uppercase px-3 py-1.5 rounded-full border {isDeeperResearch ? 'active' : ''}" onclick={() => isDeeperResearch = !isDeeperResearch}>
                     <Globe size={11} />
                     Deeper Research
                   </button>
@@ -626,30 +620,27 @@
               </div>
             </div>
 
-            <!-- Bottom Cards Row -->
-            <div class="grid grid-cols-3 gap-4 w-full">
-              <button class="preset-card flex flex-col text-left p-4 rounded-xl border gap-2" onclick={() => applyPreset("Summarize this article for me:")}>
-                <FileText size={16} class="text-[#f97316]" />
-                <div class="font-bold text-xs">Summarize Text</div>
-                <div class="text-[10px] leading-relaxed">Turn long articles into easy summaries.</div>
+            <!-- Bottom Presets Row -->
+            <div class="presets-container flex gap-3 justify-center flex-wrap max-w-3xl">
+              <button class="preset-pill flex items-center gap-2 px-4 py-2.5 rounded-full border text-xs font-medium" onclick={() => applyPreset("Summarize this article for me:")}>
+                <FileText size={14} class="text-[#f97316]" />
+                <span>Summarize Text</span>
               </button>
               
-              <button class="preset-card flex flex-col text-left p-4 rounded-xl border gap-2" onclick={() => applyPreset("Write a blog post outline on: ")}>
-                <RefreshCw size={16} class="text-[#f97316]" />
-                <div class="font-bold text-xs">Creative Writing</div>
-                <div class="text-[10px] leading-relaxed">Generate stories, blog posts, or ideas in seconds.</div>
+              <button class="preset-pill flex items-center gap-2 px-4 py-2.5 rounded-full border text-xs font-medium" onclick={() => applyPreset("Write a blog post outline on: ")}>
+                <RefreshCw size={14} class="text-[#f97316]" />
+                <span>Creative Writing</span>
               </button>
               
-              <button class="preset-card flex flex-col text-left p-4 rounded-xl border gap-2" onclick={() => applyPreset("Answer this complex question: ")}>
-                <HelpCircle size={16} class="text-[#f97316]" />
-                <div class="font-bold text-xs">Answer Questions</div>
-                <div class="text-[10px] leading-relaxed">Ask anything—from facts to advice—and get answers.</div>
+              <button class="preset-pill flex items-center gap-2 px-4 py-2.5 rounded-full border text-xs font-medium" onclick={() => applyPreset("Answer this complex question: ")}>
+                <HelpCircle size={14} class="text-[#f97316]" />
+                <span>Answer Questions</span>
               </button>
             </div>
           </div>
         {:else}
           <!-- Chat flow display -->
-          <div class="flex flex-col gap-6 max-w-4xl mx-auto w-full flex-grow">
+          <div class="chat-content-container">
             {#each messages as msg}
               <div class="message-bubble flex flex-col gap-2 {msg.role === 'user' ? 'align-end' : ''}">
                 <div class="text-[10px] font-bold uppercase tracking-wider text-secondary">{msg.role === 'user' ? 'You' : 'Assistant'}</div>
@@ -666,35 +657,40 @@
               </div>
             {/each}
           </div>
-          
-          <!-- Bottom input bar for follow-ups -->
-          <div class="bottom-input-bar max-w-4xl mx-auto w-full pt-4 mt-auto">
-            <div class="input-card flex flex-col w-full border rounded-xl p-3 shadow-md gap-3">
-              <textarea 
-                class="prompt-textarea w-full text-sm outline-none resize-none" 
-                placeholder="Ask me anything..." 
-                rows="1"
-                bind:value={inputText}
-                onkeydown={(e) => { if(e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitPrompt(); } }}
-              ></textarea>
-              <div class="flex items-center justify-between pt-2 border-t">
-                <div class="flex items-center gap-2">
-                  <button class="action-icon-btn"><Paperclip size={14} /></button>
-                  <button class="action-icon-btn"><Mic size={14} /></button>
-                </div>
-                <button class="send-circle-btn flex items-center justify-center rounded-full w-8 h-8 text-white bg-[#f97316]" onclick={submitPrompt} disabled={!inputText.trim()}>
-                  <Send size={14} />
-                </button>
-              </div>
-            </div>
-          </div>
         {/if}
       </div>
 
-      <!-- Footer disclaimer -->
-      <footer class="footer text-center py-3 text-[10px] border-t">
-        Cognivo can make mistakes. Check important info. See Cookie Preferences.
-      </footer>
+      <!-- Floating bottom input bar (Fixed overlay at bottom) -->
+      {#if messages.length > 0}
+        <div class="bottom-input-container">
+          <div class="prompt-pill-card">
+            <textarea 
+              class="prompt-textarea w-full text-sm outline-none resize-none" 
+              placeholder="Ask me anything..." 
+              rows="1"
+              bind:value={inputText}
+              onkeydown={(e) => { if(e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitPrompt(); } }}
+            ></textarea>
+            <div class="flex items-center justify-between pt-2 border-t">
+              <div class="flex items-center gap-2">
+                <button class="action-icon-btn"><Paperclip size={14} /></button>
+                <button class="action-icon-btn"><Mic size={14} /></button>
+              </div>
+              <button class="send-circle-btn flex items-center justify-center rounded-full w-8 h-8 text-white bg-[#f97316]" onclick={submitPrompt} disabled={!inputText.trim() || isSending}>
+                <Send size={14} />
+              </button>
+            </div>
+          </div>
+          <div class="footer-disclaimer text-[10px] opacity-60 mt-2 text-center">
+            Cognivo can make mistakes. Check important info.
+          </div>
+        </div>
+      {:else}
+        <!-- Simple small footer when on landing screen -->
+        <footer class="footer text-center py-3 text-[10px] border-t shrink-0">
+          Cognivo can make mistakes. Check important info. See Cookie Preferences.
+        </footer>
+      {/if}
     </main>
 
     <!-- Side Code Panel (collapsible) -->
@@ -909,6 +905,11 @@
   /* Main Workspace styling */
   .main-panel {
     background-color: var(--main-bg);
+    height: 100%;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
   .header, .telemetry-bar, .footer {
     border-color: var(--border-color);
@@ -947,22 +948,68 @@
     font-weight: 600;
   }
 
-  /* Center UI layout elements */
-
-  .input-card {
-    background-color: var(--card-bg);
-    border-color: var(--border-color);
+  /* Chat Scrollable Area & Layout Centering */
+  .chat-scroll-area {
+    flex-grow: 1;
+    overflow-y: auto;
+    width: 100%;
+    position: relative;
   }
+
+  .landing-container {
+    width: 100%;
+    max-width: 768px;
+    margin: 0 auto;
+    padding: 6rem 1.5rem 2rem 1.5rem;
+    box-sizing: border-box;
+  }
+
+  .chat-content-container {
+    width: 100%;
+    max-width: 768px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    padding: 2rem 1.5rem 150px 1.5rem; /* Padding bottom to scroll past bottom floating input */
+    box-sizing: border-box;
+  }
+
+  /* Prompt Pill Card (ChatGPT input styling) */
+  .prompt-pill-card {
+    background-color: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 26px;
+    padding: 12px 18px;
+    box-shadow: 0 4px 24px var(--shadow-color);
+    width: 100%;
+    max-width: 768px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    box-sizing: border-box;
+  }
+
   .prompt-textarea {
     background: transparent;
     color: var(--text-primary);
+    border: none;
+    outline: none;
+    font-family: inherit;
+    resize: none;
+    font-size: 14px;
+    line-height: 1.5;
   }
 
   .action-icon-btn {
     color: var(--text-secondary);
     padding: 6px;
-    border-radius: 6px;
+    border-radius: 50%;
     transition: all 0.15s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
   .action-icon-btn:hover {
     color: var(--text-primary);
@@ -973,9 +1020,14 @@
     color: var(--text-secondary);
     border-color: var(--border-color);
     transition: all 0.2s;
+    background: transparent;
+    cursor: pointer;
+    font-size: 10px;
+    font-weight: 700;
   }
   .deeper-btn:hover {
     color: var(--text-primary);
+    border-color: var(--text-secondary);
   }
   .deeper-btn.active {
     color: #f97316;
@@ -983,15 +1035,46 @@
     background: rgba(249, 115, 22, 0.05);
   }
 
-
-  .preset-card {
-    background-color: var(--card-bg);
-    border-color: var(--border-color);
-    transition: all 0.2s;
+  /* Presets horizontal layout styling */
+  .presets-container {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    flex-wrap: wrap;
+    width: 100%;
   }
-  .preset-card:hover {
+
+  .preset-pill {
+    background-color: var(--card-bg);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    transition: all 0.2s;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+  .preset-pill:hover {
     border-color: #f97316;
+    color: var(--text-primary);
+    background-color: var(--item-hover);
     transform: translateY(-0.5px);
+  }
+
+  /* Floating Bottom Input Bar Container */
+  .bottom-input-container {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 1.5rem 1.5rem 1.5rem 1.5rem;
+    background: linear-gradient(to top, var(--main-bg) 60%, transparent 100%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    z-index: 10;
+    box-sizing: border-box;
   }
 
   /* Chat Bubble flow elements */
@@ -999,6 +1082,7 @@
     background-color: var(--card-bg);
     border-color: var(--border-color);
     color: var(--text-primary);
+    box-shadow: 0 2px 8px var(--shadow-color);
   }
   .reasoning-container {
     background-color: rgba(249, 115, 22, 0.03);
