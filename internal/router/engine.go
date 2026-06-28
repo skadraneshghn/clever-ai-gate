@@ -11,6 +11,7 @@ import (
 	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
 	"github.com/skadraneshghn/clever-ai-gate/internal/health"
 	"github.com/skadraneshghn/clever-ai-gate/internal/middleware"
+	"github.com/skadraneshghn/clever-ai-gate/internal/playground"
 	"github.com/skadraneshghn/clever-ai-gate/internal/proxy"
 	"go.uber.org/zap"
 )
@@ -47,6 +48,11 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 
 	// --- Swagger UI (no auth) ---
 	engine.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+
+	// --- Developer Playground (no auth) ---
+	engine.GET("/playground", func(c *gin.Context) {
+		c.Data(200, "text/html; charset=utf-8", playground.HTML)
+	})
 
 	// --- Proxy routes (minimal middleware for maximum throughput) ---
 	proxyGroup := engine.Group("")

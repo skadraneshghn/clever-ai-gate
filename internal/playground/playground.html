@@ -1,0 +1,1275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clever AI Gate — Developer Playground</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #080710;
+            --panel-bg: rgba(17, 16, 28, 0.7);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --border-hover: rgba(139, 92, 246, 0.4);
+            --text-primary: #f3f4f6;
+            --text-secondary: #9ca3af;
+            --accent-color: #8b5cf6;
+            --accent-glow: rgba(139, 92, 246, 0.25);
+            --success-color: #10b981;
+            --warning-color: #f59e0b;
+            --danger-color: #ef4444;
+            --reasoning-bg: rgba(139, 92, 246, 0.06);
+            --reasoning-border: rgba(139, 92, 246, 0.15);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow-x: hidden;
+        }
+
+        /* Subtle glowing background orbs */
+        body::before {
+            content: '';
+            position: absolute;
+            top: -200px;
+            left: -200px;
+            width: 600px;
+            height: 600px;
+            background: radial-gradient(circle, rgba(139, 92, 246, 0.15) 0%, rgba(0,0,0,0) 70%);
+            z-index: -1;
+            pointer-events: none;
+        }
+
+        body::after {
+            content: '';
+            position: absolute;
+            bottom: -200px;
+            right: -200px;
+            width: 600px;
+            height: 600px;
+            background: radial-gradient(circle, rgba(16, 185, 129, 0.08) 0%, rgba(0,0,0,0) 70%);
+            z-index: -1;
+            pointer-events: none;
+        }
+
+        /* Header */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1.25rem 2rem;
+            border-bottom: 1px solid var(--border-color);
+            background: rgba(8, 7, 16, 0.8);
+            backdrop-filter: blur(12px);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        .logo-container {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .logo-icon {
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(135deg, var(--accent-color), #6366f1);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            color: #fff;
+            box-shadow: 0 0 15px var(--accent-glow);
+        }
+
+        .logo-text {
+            font-size: 1.2rem;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            background: linear-gradient(to right, #fff, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .header-links {
+            display: flex;
+            gap: 1rem;
+        }
+
+        .header-btn {
+            background: transparent;
+            color: var(--text-secondary);
+            border: 1px solid var(--border-color);
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .header-btn:hover {
+            color: var(--text-primary);
+            border-color: var(--border-hover);
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        /* Main Layout */
+        .container {
+            display: grid;
+            grid-template-columns: 320px 1fr;
+            flex-grow: 1;
+            height: calc(100vh - 73px);
+            overflow: hidden;
+        }
+
+        /* Left Control Panel */
+        .control-panel {
+            border-right: 1px solid var(--border-color);
+            background: var(--panel-bg);
+            backdrop-filter: blur(16px);
+            padding: 1.5rem;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+
+        .section-title {
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: var(--text-secondary);
+            margin-bottom: 0.75rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            margin-bottom: 1.25rem;
+        }
+
+        label {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        input[type="text"],
+        input[type="password"],
+        input[type="number"],
+        select {
+            width: 100%;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+
+        input:focus, select:focus {
+            border-color: var(--accent-color);
+            box-shadow: 0 0 10px rgba(139, 92, 246, 0.15);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .input-with-icon {
+            position: relative;
+        }
+
+        .input-icon-btn {
+            position: absolute;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            padding: 0.25rem;
+        }
+
+        /* Ranges */
+        .range-container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .range-val {
+            font-size: 0.875rem;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--accent-color);
+            font-weight: 600;
+        }
+
+        input[type="range"] {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(255, 255, 255, 0.1);
+            outline: none;
+            margin-top: 0.5rem;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: var(--accent-color);
+            cursor: pointer;
+            box-shadow: 0 0 8px var(--accent-glow);
+            transition: transform 0.1s ease;
+        }
+
+        input[type="range"]::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+        }
+
+        /* Switches */
+        .switch-container {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 0.5rem;
+        }
+
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 44px;
+            height: 24px;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(255, 255, 255, 0.1);
+            transition: .3s;
+            border-radius: 24px;
+            border: 1px solid var(--border-color);
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .3s;
+            border-radius: 50%;
+        }
+
+        input:checked + .slider {
+            background-color: var(--accent-color);
+        }
+
+        input:checked + .slider:before {
+            transform: translateX(20px);
+        }
+
+        /* Action Buttons */
+        .btn-submit {
+            background: linear-gradient(135deg, var(--accent-color) 0%, #6366f1 100%);
+            color: white;
+            border: none;
+            padding: 0.85rem;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            box-shadow: 0 4px 15px rgba(139, 92, 246, 0.25);
+        }
+
+        .btn-submit:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 20px rgba(139, 92, 246, 0.35);
+        }
+
+        .btn-submit:active {
+            transform: translateY(1px);
+        }
+
+        .btn-submit:disabled {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-secondary);
+            cursor: not-allowed;
+            box-shadow: none;
+            transform: none;
+        }
+
+        /* Workspace Grid (Chat + Code) */
+        .workspace {
+            display: grid;
+            grid-template-rows: 1fr 220px;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        .workspace-split {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        /* Left: Message Builder */
+        .chat-builder {
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid var(--border-color);
+            background: rgba(10, 10, 18, 0.2);
+            height: 100%;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(8, 7, 16, 0.4);
+        }
+
+        .panel-header-title {
+            font-size: 0.95rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .panel-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .action-btn {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            padding: 0.4rem 0.75rem;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+        }
+
+        .action-btn:hover {
+            color: var(--text-primary);
+            border-color: var(--border-hover);
+            background: rgba(255, 255, 255, 0.06);
+        }
+
+        .message-list {
+            padding: 1.5rem;
+            overflow-y: auto;
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+        }
+
+        .message-card {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            position: relative;
+            animation: fadeIn 0.2s ease-out;
+            transition: border-color 0.2s ease;
+        }
+
+        .message-card:hover {
+            border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .message-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .message-role {
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            padding: 0.25rem 0.6rem;
+            border-radius: 4px;
+        }
+
+        .role-system {
+            background: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.25);
+        }
+
+        .role-user {
+            background: rgba(59, 130, 246, 0.15);
+            color: #60a5fa;
+            border: 1px solid rgba(59, 130, 246, 0.25);
+        }
+
+        .role-assistant {
+            background: rgba(16, 185, 129, 0.15);
+            color: #34d399;
+            border: 1px solid rgba(16, 185, 129, 0.25);
+        }
+
+        .btn-delete-msg {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            padding: 0.25rem;
+            border-radius: 4px;
+            transition: all 0.2s ease;
+        }
+
+        .btn-delete-msg:hover {
+            color: var(--danger-color);
+            background: rgba(239, 68, 68, 0.1);
+        }
+
+        .message-textarea {
+            width: 100%;
+            min-height: 80px;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+            resize: vertical;
+            line-height: 1.5;
+        }
+
+        /* Right: Streaming Output Panel */
+        .response-panel {
+            display: flex;
+            flex-direction: column;
+            background: rgba(8, 7, 16, 0.15);
+            height: 100%;
+            overflow: hidden;
+        }
+
+        /* Telemetry / Live Info HUD */
+        .telemetry-hud {
+            padding: 0.75rem 1.5rem;
+            background: rgba(255, 255, 255, 0.01);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            gap: 1.5rem;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            font-family: 'JetBrains Mono', monospace;
+            overflow-x: auto;
+            white-space: nowrap;
+        }
+
+        .hud-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .hud-val {
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+
+        .hud-val.success {
+            color: var(--success-color);
+        }
+
+        .hud-val.accent {
+            color: var(--accent-color);
+        }
+
+        .response-container {
+            flex-grow: 1;
+            padding: 1.5rem;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            scroll-behavior: smooth;
+        }
+
+        /* Styled Thinking block for reasoning models */
+        .reasoning-box {
+            background: var(--reasoning-bg);
+            border: 1px solid var(--reasoning-border);
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 0.5rem;
+            animation: slideDown 0.2s ease-out;
+        }
+
+        .reasoning-header {
+            font-size: 0.75rem;
+            font-weight: 700;
+            color: var(--accent-color);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .reasoning-header::before {
+            content: '🧠';
+        }
+
+        .reasoning-content {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+            line-height: 1.6;
+            font-style: italic;
+            border-left: 2px solid rgba(139, 92, 246, 0.3);
+            padding-left: 0.75rem;
+            white-space: pre-wrap;
+        }
+
+        /* Final model response output */
+        .response-content {
+            font-size: 0.95rem;
+            line-height: 1.6;
+            color: var(--text-primary);
+            white-space: pre-wrap;
+        }
+
+        .response-content code {
+            font-family: 'JetBrains Mono', monospace;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.85rem;
+        }
+
+        .response-content pre {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1rem;
+            overflow-x: auto;
+            margin: 0.75rem 0;
+        }
+
+        .response-content pre code {
+            background: transparent;
+            padding: 0;
+            border-radius: 0;
+            font-size: 0.875rem;
+        }
+
+        /* Bottom Pane: Code snippets */
+        .code-pane {
+            border-top: 1px solid var(--border-color);
+            background: rgba(5, 5, 10, 0.85);
+            display: grid;
+            grid-template-rows: 40px 1fr;
+            overflow: hidden;
+        }
+
+        .tab-bar {
+            display: flex;
+            border-bottom: 1px solid var(--border-color);
+            padding: 0 1rem;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .tab-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            padding: 0 1rem;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            position: relative;
+            height: 100%;
+            transition: all 0.2s ease;
+        }
+
+        .tab-btn:hover {
+            color: var(--text-primary);
+        }
+
+        .tab-btn.active {
+            color: var(--accent-color);
+        }
+
+        .tab-btn.active::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: var(--accent-color);
+            box-shadow: 0 -2px 10px var(--accent-glow);
+        }
+
+        .code-container {
+            padding: 1rem 1.5rem;
+            overflow: auto;
+            position: relative;
+        }
+
+        .code-block {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            color: #d1d5db;
+            white-space: pre;
+            line-height: 1.5;
+        }
+
+        .btn-copy-code {
+            position: absolute;
+            top: 12px;
+            right: 20px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            padding: 0.35rem 0.75rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .btn-copy-code:hover {
+            color: var(--text-primary);
+            border-color: var(--border-hover);
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        /* Animations */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes slideDown {
+            from { opacity: 0; transform: translateY(-8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Pulsing status circle */
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--success-color);
+            border-radius: 50%;
+            display: inline-block;
+            box-shadow: 0 0 8px var(--success-color);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.95); opacity: 0.8; }
+            50% { transform: scale(1.15); opacity: 1; box-shadow: 0 0 12px var(--success-color); }
+            100% { transform: scale(0.95); opacity: 0.8; }
+        }
+
+        /* Scrollbar styles */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="logo-container">
+            <div class="logo-icon">C</div>
+            <div>
+                <div class="logo-text">Clever AI Gate</div>
+                <div style="font-size: 0.65rem; color: var(--text-secondary); letter-spacing: 0.5px;">API ROUTER & ORCHESTRATION</div>
+            </div>
+        </div>
+        <div class="header-links">
+            <a href="/swagger/index.html" class="header-btn" target="_blank">
+                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.168.477 4 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4 1.253"></path></svg>
+                Swagger API Docs
+            </a>
+            <a href="/health" class="header-btn" target="_blank">
+                <span class="pulse-dot"></span>
+                System Health
+            </a>
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- Control Panel -->
+        <aside class="control-panel">
+            <div>
+                <h3 class="section-title">Gateway Settings</h3>
+                <div class="form-group">
+                    <label for="gw-url">Base URL</label>
+                    <input type="text" id="gw-url" placeholder="http://localhost:8080">
+                </div>
+                <div class="form-group">
+                    <label for="gw-key">Tenant API Key</label>
+                    <div class="input-with-icon">
+                        <input type="password" id="gw-key" placeholder="cag_xxxxxxxxxxxxxxxxxxxx">
+                        <button class="input-icon-btn" id="toggle-key-visibility" type="button">👁️</button>
+                    </div>
+                </div>
+            </div>
+
+            <div>
+                <h3 class="section-title">Model Configuration</h3>
+                <div class="form-group">
+                    <label for="model-preset">Model Preset</label>
+                    <select id="model-preset">
+                        <option value="gpt-4o" selected>GPT-4o (OpenAI)</option>
+                        <option value="claude-3-5-sonnet">Claude 3.5 Sonnet (Anthropic)</option>
+                        <option value="gemini-1.5-pro">Gemini 1.5 Pro (Google)</option>
+                        <option value="deepseek-chat">DeepSeek V3 (DeepSeek)</option>
+                        <option value="deepseek-reasoner">DeepSeek R1 (Reasoning)</option>
+                        <option value="custom">Custom Model...</option>
+                    </select>
+                </div>
+                <div class="form-group" id="custom-model-group" style="display: none;">
+                    <label for="custom-model">Model Pattern / Name</label>
+                    <input type="text" id="custom-model" placeholder="Enter target model key...">
+                </div>
+            </div>
+
+            <div>
+                <h3 class="section-title">Parameters</h3>
+                <div class="form-group">
+                    <div class="range-container">
+                        <label for="param-temp">Temperature</label>
+                        <span class="range-val" id="temp-display">0.7</span>
+                    </div>
+                    <input type="range" id="param-temp" min="0" max="2" step="0.1" value="0.7">
+                </div>
+                <div class="form-group">
+                    <label for="param-max-tokens">Max Tokens</label>
+                    <input type="number" id="param-max-tokens" placeholder="Default (e.g. 4096)" min="1">
+                </div>
+                <div class="switch-container">
+                    <label for="param-stream">Stream Tokens</label>
+                    <label class="switch">
+                        <input type="checkbox" id="param-stream" checked>
+                        <span class="slider"></span>
+                    </</label>
+                </div>
+            </div>
+
+            <button class="btn-submit" id="btn-send">
+                <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"></path></svg>
+                Dispatch AI Request
+            </button>
+        </aside>
+
+        <!-- Workspace Layout -->
+        <main class="workspace">
+            <div class="workspace-split">
+                <!-- Message Builder Panel -->
+                <section class="chat-builder">
+                    <div class="panel-header">
+                        <div class="panel-header-title">💬 Message Builder</div>
+                        <div class="panel-actions">
+                            <button class="action-btn" id="btn-add-msg">＋ Message</button>
+                            <button class="action-btn" id="btn-clear-chat">🧹 Clear</button>
+                        </div>
+                    </div>
+                    <div class="message-list" id="chat-messages">
+                        <!-- Prefilled with a System and User message -->
+                        <div class="message-card">
+                            <div class="message-card-header">
+                                <span class="message-role role-system">System</span>
+                            </div>
+                            <textarea class="message-textarea" placeholder="You are a helpful, extremely clever AI assistant...">You are a helpful, extremely clever AI assistant.</textarea>
+                        </div>
+                        <div class="message-card">
+                            <div class="message-card-header">
+                                <span class="message-role role-user">User</span>
+                                <button class="btn-delete-msg" onclick="deleteMessage(this)">✕</button>
+                            </div>
+                            <textarea class="message-textarea" placeholder="Explain the concept of quantum computing in one short paragraph...">Explain the concept of quantum computing in one short paragraph.</textarea>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Streaming Console Output -->
+                <section class="response-panel">
+                    <div class="panel-header">
+                        <div class="panel-header-title">📡 Live Response Console</div>
+                    </div>
+                    <div class="telemetry-hud">
+                        <div class="hud-item">Status: <span class="hud-val" id="hud-status">—</span></div>
+                        <div class="hud-item">Provider: <span class="hud-val accent" id="hud-provider">—</span></div>
+                        <div class="hud-item">Model: <span class="hud-val accent" id="hud-model">—</span></div>
+                        <div class="hud-item">TTFT: <span class="hud-val" id="hud-ttft">—</span></div>
+                        <div class="hud-item">Total Latency: <span class="hud-val" id="hud-latency">—</span></div>
+                        <div class="hud-item">Speed: <span class="hud-val" id="hud-speed">—</span></div>
+                    </div>
+                    <div class="response-container" id="response-container">
+                        <!-- Interactive output components get rendered here -->
+                        <div id="output-thinking-wrapper" style="display: none;">
+                            <div class="reasoning-box">
+                                <div class="reasoning-header">Reasoning Process</div>
+                                <div class="reasoning-content" id="output-reasoning"></div>
+                            </div>
+                        </div>
+                        <div class="response-content" id="output-content">Response output will stream here...</div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Code Generation Panel -->
+            <section class="code-pane">
+                <div class="tab-bar">
+                    <button class="tab-btn active" onclick="switchTab('curl')">cURL</button>
+                    <button class="tab-btn" onclick="switchTab('js')">JavaScript</button>
+                    <button class="tab-btn" onclick="switchTab('python')">Python</button>
+                    <button class="tab-btn" onclick="switchTab('go')">Go</button>
+                </div>
+                <div class="code-container">
+                    <button class="btn-copy-code" id="btn-copy">Copy</button>
+                    <pre class="code-block" id="code-snippet">Loading snippet...</pre>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script>
+        // Preset values
+        const modelPresetSelect = document.getElementById('model-preset');
+        const customModelGroup = document.getElementById('custom-model-group');
+        const customModelInput = document.getElementById('custom-model');
+        const gatewayUrlInput = document.getElementById('gw-url');
+        const gatewayKeyInput = document.getElementById('gw-key');
+        const tempSlider = document.getElementById('param-temp');
+        const tempDisplay = document.getElementById('temp-display');
+        const maxTokensInput = document.getElementById('param-max-tokens');
+        const streamCheckbox = document.getElementById('param-stream');
+        const toggleKeyVisibilityBtn = document.getElementById('toggle-key-visibility');
+
+        const btnSend = document.getElementById('btn-send');
+        const btnAddMsg = document.getElementById('btn-add-msg');
+        const btnClearChat = document.getElementById('btn-clear-chat');
+        const chatMessagesContainer = document.getElementById('chat-messages');
+
+        const outputThinkingWrapper = document.getElementById('output-thinking-wrapper');
+        const outputReasoning = document.getElementById('output-reasoning');
+        const outputContent = document.getElementById('output-content');
+        const codeSnippet = document.getElementById('code-snippet');
+        const btnCopy = document.getElementById('btn-copy');
+
+        // HUD Elements
+        const hudStatus = document.getElementById('hud-status');
+        const hudProvider = document.getElementById('hud-provider');
+        const hudModel = document.getElementById('hud-model');
+        const hudTtft = document.getElementById('hud-ttft');
+        const hudLatency = document.getElementById('hud-latency');
+        const hudSpeed = document.getElementById('hud-speed');
+
+        let activeTab = 'curl';
+
+        // Auto-configure base URL from window location on load
+        window.addEventListener('load', () => {
+            gatewayUrlInput.value = window.location.origin;
+            updateSnippets();
+        });
+
+        // Event Listeners
+        modelPresetSelect.addEventListener('change', () => {
+            if (modelPresetSelect.value === 'custom') {
+                customModelGroup.style.display = 'flex';
+            } else {
+                customModelGroup.style.display = 'none';
+            }
+            updateSnippets();
+        });
+
+        customModelInput.addEventListener('input', updateSnippets);
+        gatewayUrlInput.addEventListener('input', updateSnippets);
+        gatewayKeyInput.addEventListener('input', updateSnippets);
+        maxTokensInput.addEventListener('input', updateSnippets);
+        streamCheckbox.addEventListener('change', updateSnippets);
+
+        tempSlider.addEventListener('input', () => {
+            tempDisplay.innerText = tempSlider.value;
+            updateSnippets();
+        });
+
+        toggleKeyVisibilityBtn.addEventListener('click', () => {
+            if (gatewayKeyInput.type === 'password') {
+                gatewayKeyInput.type = 'text';
+                toggleKeyVisibilityBtn.innerText = '🔒';
+            } else {
+                gatewayKeyInput.type = 'password';
+                toggleKeyVisibilityBtn.innerText = '👁️';
+            }
+        });
+
+        // Add message card
+        btnAddMsg.addEventListener('click', () => {
+            const index = chatMessagesContainer.children.length;
+            const card = document.createElement('div');
+            card.className = 'message-card';
+            card.innerHTML = `
+                <div class="message-card-header">
+                    <select class="message-role" style="width: auto; padding: 0.2rem 0.5rem; height: auto;" onchange="updateRoleStyle(this)">
+                        <option value="user" selected>User</option>
+                        <option value="assistant">Assistant</option>
+                        <option value="system">System</option>
+                    </select>
+                    <button class="btn-delete-msg" onclick="deleteMessage(this)">✕</button>
+                </div>
+                <textarea class="message-textarea" placeholder="Type prompt contents..."></textarea>
+            `;
+            chatMessagesContainer.appendChild(card);
+            
+            // Focus new textarea
+            card.querySelector('textarea').focus();
+            
+            // Wire update trigger on typing
+            card.querySelector('textarea').addEventListener('input', updateSnippets);
+            updateSnippets();
+        });
+
+        // Bind initial textareas to dynamic update
+        document.querySelectorAll('.message-textarea').forEach(tx => {
+            tx.addEventListener('input', updateSnippets);
+        });
+
+        // Delete message card
+        function deleteMessage(btn) {
+            btn.closest('.message-card').remove();
+            updateSnippets();
+        }
+
+        // Update role colors inside dropdowns
+        function updateRoleStyle(select) {
+            const header = select.parentElement;
+            select.className = 'message-role';
+            if (select.value === 'system') select.classList.add('role-system');
+            if (select.value === 'user') select.classList.add('role-user');
+            if (select.value === 'assistant') select.classList.add('role-assistant');
+            updateSnippets();
+        }
+
+        // Clear Chat
+        btnClearChat.addEventListener('click', () => {
+            chatMessagesContainer.innerHTML = '';
+            updateSnippets();
+        });
+
+        // Get build schema helper
+        function getRequestPayload() {
+            const messages = [];
+            const cards = chatMessagesContainer.querySelectorAll('.message-card');
+            
+            cards.forEach(card => {
+                const select = card.querySelector('select');
+                const role = select ? select.value : (card.querySelector('.message-role').innerText.toLowerCase());
+                const content = card.querySelector('textarea').value;
+                messages.push({ role, content });
+            });
+
+            const model = modelPresetSelect.value === 'custom' ? customModelInput.value : modelPresetSelect.value;
+            
+            const payload = {
+                model: model || 'gpt-4o',
+                messages: messages,
+                temperature: parseFloat(tempSlider.value)
+            };
+
+            const maxTokens = parseInt(maxTokensInput.value);
+            if (maxTokens) {
+                payload.max_tokens = maxTokens;
+            }
+
+            if (streamCheckbox.checked) {
+                payload.stream = true;
+            }
+
+            return payload;
+        }
+
+        // Dynamic code templates
+        function updateSnippets() {
+            const url = gatewayUrlInput.value || window.location.origin;
+            const key = gatewayKeyInput.value || 'YOUR_VIRTUAL_KEY';
+            const payload = getRequestPayload();
+            const payloadStr = JSON.stringify(payload, null, 2);
+
+            let snippet = '';
+
+            if (activeTab === 'curl') {
+                snippet = `curl ${url}/v1/chat/completions \\\n  -H "Authorization: Bearer ${key}" \\\n  -H "Content-Type: application/json" \\\n  -d '${payloadStr}'`;
+            } else if (activeTab === 'js') {
+                snippet = `// Using standard fetch streaming\nconst response = await fetch("${url}/v1/chat/completions", {\n  method: "POST",\n  headers: {\n    "Authorization": "Bearer ${key}",\n    "Content-Type": "application/json"\n  },\n  body: JSON.stringify(${payloadStr.replace(/\n/g, '\n  ')})\n});\n\nif (${payload.stream ? 'true' : 'false'}) {\n  const reader = response.body.getReader();\n  const decoder = new TextDecoder("utf-8");\n  while (true) {\n    const { done, value } = await reader.read();\n    if (done) break;\n    console.log(decoder.decode(value));\n  }\n} else {\n  const result = await response.json();\n  console.log(result.choices[0].message.content);\n}`;
+            } else if (activeTab === 'python') {
+                snippet = `import openai\n\nclient = openai.OpenAI(\n    api_key="${key}",\n    base_url="${url}/v1"\n)\n\nresponse = client.chat.completions.create(\n    model="${payload.model}",\n    messages=${JSON.stringify(payload.messages, null, 4)},\n    temperature=${payload.temperature},\n    stream=${payload.stream ? 'True' : 'False'}\n)\n\nif ${payload.stream ? 'True' : 'False'}:\n    for chunk in response:\n        if chunk.choices[0].delta.content:\n            print(chunk.choices[0].delta.content, end="")\nelse:\n    print(response.choices[0].message.content)`;
+            } else if (activeTab === 'go') {
+                snippet = `package main\n\nimport (\n\t"context"\n\t"fmt"\n\t"io"\n\t"os"\n\t"github.com/sashabaranov/go-openai"\n)\n\nfunc main() {\n\tconfig := openai.DefaultConfig("${key}")\n\tconfig.BaseURL = "${url}/v1"\n\tclient := openai.NewClientWithConfig(config)\n\n\tctx := context.Background()\n\treq := openai.ChatCompletionRequest{\n\t\tModel: "${payload.model}",\n\t\tMessages: []openai.ChatCompletionMessage{\n`;
+                payload.messages.forEach(m => {
+                    snippet += `\t\t\t{Role: "${m.role}", Content: "${m.content.replace(/"/g, '\\"')}"},\n`;
+                });
+                snippet += `\t\t},\n\t\tTemperature: ${payload.temperature},\n\t\tStream: ${payload.stream ? 'true' : 'false'},\n\t}\n\n\tif req.Stream {\n\t\tstream, _ := client.CreateChatCompletionStream(ctx, req)\n\t\tdefer stream.Close()\n\t\tfor {\n\t\t\tresponse, err := stream.Recv()\n\t\t\tif err == io.EOF {\n\t\t\t\tbreak\n\t\t\t}\n\t\t\tfmt.Print(response.Choices[0].Delta.Content)\n\t\t}\n\t} else {\n\t\tresp, _ := client.CreateChatCompletion(ctx, req)\n\t\tfmt.Println(resp.Choices[0].Message.Content)\n\t}\n}`;
+            }
+
+            codeSnippet.innerText = snippet;
+        }
+
+        function switchTab(tab) {
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+            activeTab = tab;
+            updateSnippets();
+        }
+
+        // Copy button action
+        btnCopy.addEventListener('click', () => {
+            navigator.clipboard.writeText(codeSnippet.innerText).then(() => {
+                const originalText = btnCopy.innerText;
+                btnCopy.innerText = 'Copied! ✓';
+                btnCopy.style.borderColor = 'var(--success-color)';
+                btnCopy.style.color = 'var(--success-color)';
+                setTimeout(() => {
+                    btnCopy.innerText = originalText;
+                    btnCopy.style.borderColor = 'var(--border-color)';
+                    btnCopy.style.color = 'var(--text-secondary)';
+                }, 1500);
+            });
+        });
+
+        // --- Execute Request Call ---
+        btnSend.addEventListener('click', async () => {
+            const url = gatewayUrlInput.value || window.location.origin;
+            const key = gatewayKeyInput.value;
+            const payload = getRequestPayload();
+
+            if (!key) {
+                alert('Please enter your Tenant API Key to run requests.');
+                gatewayKeyInput.focus();
+                return;
+            }
+
+            // Reset UI Console elements
+            btnSend.disabled = true;
+            outputThinkingWrapper.style.display = 'none';
+            outputReasoning.innerText = '';
+            outputContent.innerHTML = 'Connecting to Gateway...';
+            
+            hudStatus.innerText = 'Pending...';
+            hudStatus.className = 'hud-val';
+            hudProvider.innerText = 'Detecting...';
+            hudModel.innerText = payload.model;
+            hudTtft.innerText = 'Calculating...';
+            hudLatency.innerText = 'Calculating...';
+            hudSpeed.innerText = 'Calculating...';
+
+            const startTime = performance.now();
+            let ttftTime = 0;
+            let firstTokenReceived = false;
+            let tokenCount = 0;
+
+            try {
+                const response = await fetch(`${url}/v1/chat/completions`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${key}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                hudStatus.innerText = response.status;
+                if (response.status === 200) {
+                    hudStatus.classList.add('success');
+                } else {
+                    hudStatus.classList.add('danger');
+                    const errorText = await response.text();
+                    outputContent.innerText = `Error [${response.status}]: ${errorText}`;
+                    btnSend.disabled = false;
+                    return;
+                }
+
+                // Extract Gateway specific metadata from custom response headers if available
+                const providerHeader = response.headers.get('X-Gateway-Provider');
+                const finalModelHeader = response.headers.get('X-Gateway-Model-Pattern');
+                if (providerHeader) hudProvider.innerText = providerHeader.toUpperCase();
+                if (finalModelHeader) hudModel.innerText = finalModelHeader;
+
+                if (payload.stream) {
+                    outputContent.innerText = '';
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder('utf-8');
+                    let buffer = '';
+                    let isThinking = false;
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+
+                        if (!firstTokenReceived) {
+                            firstTokenReceived = true;
+                            ttftTime = performance.now() - startTime;
+                            hudTtft.innerText = `${Math.round(ttftTime)}ms`;
+                        }
+
+                        buffer += decoder.decode(value, { stream: true });
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop(); // Hold partial line in buffer
+
+                        for (const line of lines) {
+                            const cleanedLine = line.trim();
+                            if (!cleanedLine) continue;
+
+                            if (cleanedLine.startsWith('data: ')) {
+                                const dataStr = cleanedLine.slice(6);
+                                if (dataStr === '[DONE]') continue;
+
+                                try {
+                                    const parsed = JSON.parse(dataStr);
+                                    const delta = parsed.choices[0].delta;
+                                    
+                                    // Handle reasoning_content / <think> tags from model chunk
+                                    const rContent = delta.reasoning_content || '';
+                                    const content = delta.content || '';
+
+                                    if (rContent) {
+                                        if (!isThinking) {
+                                            isThinking = true;
+                                            outputThinkingWrapper.style.display = 'block';
+                                        }
+                                        outputReasoning.innerText += rContent;
+                                        tokenCount++;
+                                    } else if (content) {
+                                        // Some models return <think> within content.
+                                        // Let's filter or let the state machine output normal content.
+                                        outputContent.innerText += content;
+                                        tokenCount++;
+                                    }
+                                } catch (e) {
+                                    // Non-critical parse warning
+                                }
+                            }
+                        }
+                        
+                        // Update dynamic metrics
+                        const elapsed = (performance.now() - startTime) / 1000;
+                        if (elapsed > 0) {
+                            hudSpeed.innerText = `${Math.round(tokenCount / elapsed)} tok/s`;
+                        }
+                    }
+                } else {
+                    // Non-streaming response parsing
+                    const result = await response.json();
+                    const choice = result.choices[0];
+                    const message = choice.message;
+                    
+                    const elapsed = performance.now() - startTime;
+                    hudTtft.innerText = 'N/A (Stream Only)';
+                    hudLatency.innerText = `${Math.round(elapsed)}ms`;
+
+                    if (message.reasoning_content) {
+                        outputThinkingWrapper.style.display = 'block';
+                        outputReasoning.innerText = message.reasoning_content;
+                    }
+                    outputContent.innerText = message.content;
+
+                    // Calculate speed if token metrics are available
+                    if (result.usage) {
+                        const totalTokens = result.usage.completion_tokens || 0;
+                        hudSpeed.innerText = `${Math.round(totalTokens / (elapsed / 1000))} tok/s`;
+                    }
+                }
+
+                const totalElapsed = performance.now() - startTime;
+                hudLatency.innerText = `${Math.round(totalElapsed)}ms`;
+
+            } catch (error) {
+                hudStatus.innerText = 'ERR';
+                hudStatus.classList.add('danger');
+                outputContent.innerText = `Network/Connection Failure: ${error.message}`;
+            } finally {
+                btnSend.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>

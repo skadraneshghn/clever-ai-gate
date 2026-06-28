@@ -254,6 +254,10 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	}
 
 	if pctx.isStream && resp.StatusCode == http.StatusOK {
+		// Set custom headers for developer playground telemetry
+		c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+		c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+
 		// Stream mode: pipe SSE chunks through transmuxer
 		// ProxyStream has its own internal panic recovery (Gap 1 + Gap 3)
 		h.stream.ProxyStream(c, resp, cred.Provider)
@@ -269,6 +273,10 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 			c.Writer.Header().Add(key, val)
 		}
 	}
+	// Add gateway custom headers
+	c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+	c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+
 	c.Writer.WriteHeader(resp.StatusCode)
 	io.Copy(c.Writer, resp.Body)
 
