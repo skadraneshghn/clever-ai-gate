@@ -1,6 +1,9 @@
 package router
 
 import (
+	"io/fs"
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 	swaggerFiles "github.com/swaggo/files"
@@ -50,8 +53,15 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 	engine.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
 	// --- Developer Playground (no auth) ---
+	subFS, err := fs.Sub(playground.DistFS, "dist")
+	if err != nil {
+		panic("failed to read embedded playground dist: " + err.Error())
+	}
 	engine.GET("/playground", func(c *gin.Context) {
-		c.Data(200, "text/html; charset=utf-8", playground.HTML)
+		c.FileFromFS("index.html", http.FS(subFS))
+	})
+	engine.GET("/assets/*filepath", func(c *gin.Context) {
+		c.FileFromFS("assets/"+c.Param("filepath"), http.FS(subFS))
 	})
 
 	// --- Proxy routes (minimal middleware for maximum throughput) ---
@@ -67,6 +77,15 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		// All routes use the same proxy handler — model-based routing
 		// is determined by the "model" field in the JSON body, not the URL path.
 		proxyGroup.POST("/v1/*proxyPath", deps.Proxy.Handle)
+		proxyGroup.GET("/v1/models", deps.Proxy.ListModels)
+
+		// Playground Chats CRUD (Tenant-isolated, requires tenant API Key)
+		chatHandler := admin.NewChatHandler(deps.DB)
+		proxyGroup.GET("/api/v1/playground/chats", chatHandler.List)
+		proxyGroup.GET("/api/v1/playground/chats/:id", chatHandler.Get)
+		proxyGroup.POST("/api/v1/playground/chats", chatHandler.Create)
+		proxyGroup.PUT("/api/v1/playground/chats/:id", chatHandler.Update)
+		proxyGroup.DELETE("/api/v1/playground/chats/:id", chatHandler.Delete)
 	}
 
 	// --- Admin API routes (full middleware stack) ---

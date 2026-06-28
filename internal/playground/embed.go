@@ -1,6 +1,6 @@
 package playground
 
-import _ "embed"
+import "embed"
 
-//go:embed playground.html
-var HTML []byte
+//go:embed dist/*
+var DistFS embed.FS

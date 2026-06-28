@@ -1,5 +1,19 @@
 # ==============================================================================
-# Stage 1: Build the Go binary
+# Stage 1: Build the Svelte Playground
+# ==============================================================================
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /web
+# Install dependencies first for better caching
+COPY playground/package*.json ./
+RUN npm ci
+
+# Copy the playground code and compile the Svelte client
+COPY playground/ ./
+RUN npm run build
+
+# ==============================================================================
+# Stage 2: Build the Go binary
 # ==============================================================================
 FROM golang:1.24-alpine AS builder
 
@@ -18,17 +32,17 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Compile with maximum optimizations:
-#   -s: strip symbol table
-#   -w: strip DWARF debug info
-#   CGO_ENABLED=0: pure Go binary (no C dependencies)
+# Copy the compiled Svelte dist folder from the frontend-builder stage
+COPY --from=frontend-builder /internal/playground/dist ./internal/playground/dist
+
+# Compile with maximum optimizations
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -ldflags="-s -w" \
     -o /bin/clever-ai-gate \
     ./cmd/server
 
 # ==============================================================================
-# Stage 2: Minimal production runtime
+# Stage 3: Minimal production runtime
 # ==============================================================================
 FROM alpine:3.19
 

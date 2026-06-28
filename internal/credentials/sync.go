@@ -114,6 +114,13 @@ func (sm *SyncManager) LoadInitialState(ctx context.Context) error {
 		}
 	}
 
+	// Cache active models list for /v1/models endpoint
+	var activeModels []string
+	for m := range poolMap {
+		activeModels = append(activeModels, m)
+	}
+	sm.cache.Set("system:active_models", activeModels, 1000)
+
 	sm.pools.Store(&poolMap)
 	sm.cache.Wait() // Ensure all cache writes are visible
 

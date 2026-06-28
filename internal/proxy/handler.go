@@ -335,3 +335,42 @@ func cooldownForStatus(status int) time.Duration {
 		return 5 * time.Second
 	}
 }
+
+// ModelDetail represents model information in OpenAI format.
+type ModelDetail struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created"`
+	OwnedBy string `json:"owned_by"`
+}
+
+// ModelListResponse represents the OpenAI list models response.
+type ModelListResponse struct {
+	Object string        `json:"object"`
+	Data   []ModelDetail `json:"data"`
+}
+
+// ListModels returns a list of configured active model pools.
+func (h *Handler) ListModels(c *gin.Context) {
+	val, found := h.cache.Get("system:active_models")
+	var models []string
+	if found {
+		models = val.([]string)
+	}
+
+	data := make([]ModelDetail, len(models))
+	now := time.Now().Unix()
+	for i, m := range models {
+		data[i] = ModelDetail{
+			ID:      m,
+			Object:  "model",
+			Created: now,
+			OwnedBy: "clever-ai-gate",
+		}
+	}
+
+	c.JSON(http.StatusOK, ModelListResponse{
+		Object: "list",
+		Data:   data,
+	})
+}

@@ -300,3 +300,92 @@ func LoadAllPoolsWithCredentials(ctx context.Context, pool *pgxpool.Pool) ([]*Mo
 
 	return pools, credsByPool, nil
 }
+
+// --- Playground Conversation Queries ---
+
+// ConversationRow represents a conversation history session stored in the database.
+type ConversationRow struct {
+	ID        string
+	TenantID  string
+	Title     string
+	Messages  []byte // Raw JSONB bytes
+	CreatedAt string
+	UpdatedAt string
+}
+
+// ListConversations returns all conversations for a tenant sorted by last updated.
+func ListConversations(ctx context.Context, pool *pgxpool.Pool, tenantID string) ([]*ConversationRow, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT id, tenant_id, title, messages, created_at::text, updated_at::text
+		FROM conversations 
+		WHERE tenant_id = $1
+		ORDER BY updated_at DESC
+	`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list conversations: %w", err)
+	}
+	defer rows.Close()
+
+	var list []*ConversationRow
+	for rows.Next() {
+		c := &ConversationRow{}
+		if err := rows.Scan(&c.ID, &c.TenantID, &c.Title, &c.Messages, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan conversation: %w", err)
+		}
+		list = append(list, c)
+	}
+	return list, nil
+}
+
+// GetConversation fetches a single conversation by UUID and validates tenant access.
+func GetConversation(ctx context.Context, pool *pgxpool.Pool, id string, tenantID string) (*ConversationRow, error) {
+	row := pool.QueryRow(ctx, `
+		SELECT id, tenant_id, title, messages, created_at::text, updated_at::text
+		FROM conversations WHERE id = $1 AND tenant_id = $2
+	`, id, tenantID)
+
+	c := &ConversationRow{}
+	err := row.Scan(&c.ID, &c.TenantID, &c.Title, &c.Messages, &c.CreatedAt, &c.UpdatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get conversation: %w", err)
+	}
+	return c, nil
+}
+
+// CreateConversation inserts a new conversation history session for a tenant.
+func CreateConversation(ctx context.Context, pool *pgxpool.Pool, tenantID string, title string, messages []byte) (string, error) {
+	var id string
+	err := pool.QueryRow(ctx, `
+		INSERT INTO conversations (tenant_id, title, messages)
+		VALUES ($1, $2, $3)
+		RETURNING id
+	`, tenantID, title, messages).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("failed to create conversation: %w", err)
+	}
+	return id, nil
+}
+
+// UpdateConversation updates the title and/or messages array of a conversation under tenant validation.
+func UpdateConversation(ctx context.Context, pool *pgxpool.Pool, id string, tenantID string, title string, messages []byte) error {
+	_, err := pool.Exec(ctx, `
+		UPDATE conversations SET title = $3, messages = $4, updated_at = NOW()
+		WHERE id = $1 AND tenant_id = $2
+	`, id, tenantID, title, messages)
+	if err != nil {
+		return fmt.Errorf("failed to update conversation: %w", err)
+	}
+	return nil
+}
+
+// DeleteConversation deletes a conversation session from the database under tenant validation.
+func DeleteConversation(ctx context.Context, pool *pgxpool.Pool, id string, tenantID string) error {
+	_, err := pool.Exec(ctx, `DELETE FROM conversations WHERE id = $1 AND tenant_id = $2`, id, tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to delete conversation: %w", err)
+	}
+	return nil
+}
