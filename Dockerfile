@@ -32,10 +32,6 @@ FROM alpine:3.19
 # Install runtime dependencies only
 RUN apk add --no-cache ca-certificates tzdata
 
-# Set up file descriptor limits for high-concurrency
-RUN echo "root soft nofile 65535" >> /etc/security/limits.conf && \
-    echo "root hard nofile 65535" >> /etc/security/limits.conf
-
 # Copy the compiled binary
 COPY --from=builder /bin/clever-ai-gate /usr/local/bin/clever-ai-gate
 
