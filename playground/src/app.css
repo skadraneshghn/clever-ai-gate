@@ -176,3 +176,21 @@ textarea {
   border: none;
   outline: none;
 }
+
+/* Escaped classes for Tailwind compatibility in Svelte */
+.text-\[\#f97316\] { color: #f97316 !important; }
+.bg-\[\#f97316\] { background-color: #f97316 !important; }
+.text-\[10px\] { font-size: 10px; }
+.text-\[9px\] { font-size: 9px; }
+.text-\[8px\] { font-size: 8px; }
+.min-w-\[120px\] { min-width: 120px; }
+
+/* Custom utility colors & opacity */
+.text-white { color: #ffffff !important; }
+.text-orange-500 { color: #f97316 !important; }
+.text-green-500 { color: #10b981 !important; }
+.text-primary { color: var(--text-primary); }
+.text-secondary { color: var(--text-secondary); }
+.opacity-60 { opacity: 0.6; }
+.opacity-75 { opacity: 0.75; }
+
