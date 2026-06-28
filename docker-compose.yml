@@ -1,0 +1,44 @@
+version: "3.8"
+
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: clever_ai_gate
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: localdevpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d clever_ai_gate"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Clever AI Gate application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      GIN_MODE: "debug"
+      DATABASE_URL: "postgres://gateway:localdevpassword@postgres:5432/clever_ai_gate?sslmode=disable"
+      MASTER_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      ADMIN_API_KEY: "admin_local_dev_key_1234567890"
+      LOG_LEVEL: "debug"
+      CACHE_MAX_SIZE_MB: "64"
+      TELEMETRY_FLUSH_INTERVAL: "5s"
+      TELEMETRY_BATCH_SIZE: "100"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

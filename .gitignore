@@ -1,0 +1,26 @@
+# .env
+*.env
+!.env.example
+
+# Binaries
+clever-ai-gate
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
+
+# Swagger generated docs
+docs/
+
+# Docker
+docker-compose.override.yml
