@@ -62,6 +62,13 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		panic("failed to read embedded playground assets: " + err.Error())
 	}
 
+	// Read index.html at startup to serve it directly
+	// This avoids http.FileServer's built-in redirect logic for "index.html" (which redirects to ./ and causes 404/redirection loops)
+	indexContent, err := fs.ReadFile(subFS, "index.html")
+	if err != nil {
+		panic("failed to read embedded playground index.html: " + err.Error())
+	}
+
 	// Serve Svelte client compiled CSS/JS from /assets/*
 	engine.StaticFS("/assets", http.FS(assetsFS))
 
@@ -69,10 +76,10 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 	// This explicitly serves the client on both paths to avoid Gin's automatic trailing slash
 	// HTTP redirects which fail behind Clever Cloud's reverse proxy, while also resolving SPA 404s.
 	engine.GET("/playground", func(c *gin.Context) {
-		c.FileFromFS("index.html", http.FS(subFS))
+		c.Data(200, "text/html; charset=utf-8", indexContent)
 	})
 	engine.GET("/playground/*any", func(c *gin.Context) {
-		c.FileFromFS("index.html", http.FS(subFS))
+		c.Data(200, "text/html; charset=utf-8", indexContent)
 	})
 
 	// --- Proxy routes (minimal middleware for maximum throughput) ---
