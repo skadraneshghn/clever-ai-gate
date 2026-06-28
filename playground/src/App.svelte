@@ -46,6 +46,7 @@
   let visibleApiKey = $state(false);
   let connectError = $state('');
   let isConnecting = $state(false);
+  let isInitializing = $state(true);
 
   // Settings modal tabs and admin registration state
   let activeSettingsTab = $state('tenant'); // 'tenant' or 'admin'
@@ -109,6 +110,7 @@
       theme = savedTheme;
       applyTheme(theme);
     }
+    isInitializing = false;
   });
 
   // Apply theme helper
@@ -197,6 +199,7 @@
 
   function handleModelPickerClick() {
     if (models.length === 0) {
+      activeSettingsTab = 'admin';
       showSettingsModal = true;
     } else {
       showModelDropdown = !showModelDropdown;
@@ -809,7 +812,7 @@
 </div>
 
 <!-- Settings Key Config Modal -->
-{#if showSettingsModal || !apiKey}
+{#if !isInitializing && (showSettingsModal || !apiKey)}
   <div class="modal-backdrop fixed inset-0 flex items-center justify-center p-4 z-50 bg-black-trans backdrop-blur-sm">
     <div class="modal-content w-full max-w-sm rounded-xl border p-6 shadow-2xl relative">
       <!-- Tabs Selector -->

@@ -62,6 +62,11 @@ func (r *Rewriter) RewriteURL(provider, baseURL, requestPath, model string) stri
 	// Remove trailing slash from base URL
 	baseURL = strings.TrimRight(baseURL, "/")
 
+	// Prevent duplicate /v1 in path (e.g. base_url/v1 + /v1/chat/completions)
+	if strings.HasSuffix(baseURL, "/v1") && strings.HasPrefix(requestPath, "/v1/") {
+		baseURL = strings.TrimSuffix(baseURL, "/v1")
+	}
+
 	transformer, ok := r.pathTransformers[provider]
 	if !ok {
 		// Unknown provider — assume OpenAI-compatible

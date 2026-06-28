@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -168,6 +169,7 @@ func (h *Handler) Handle(c *gin.Context) {
 	// This is transparent to the client (Cline/Kilo don't need to know).
 	if isNvidia {
 		body = injectNvidiaParams(body, scanSlice, h.logger)
+		body = rewriteModelField(body, model)
 	}
 
 	// Step 5-8: Attempt with automatic failover
@@ -466,3 +468,26 @@ func injectNvidiaParams(body, scanSlice []byte, logger *zap.Logger) []byte {
 
 	return newBody
 }
+
+// rewriteModelField modifies the JSON request body, stripping the leading "nvidia/" prefix
+// from the "model" field to match the native model ID expected by NVIDIA NIM.
+func rewriteModelField(body []byte, originalModel string) []byte {
+	if !strings.HasPrefix(originalModel, "nvidia/") {
+		return body
+	}
+	targetModel := strings.TrimPrefix(originalModel, "nvidia/")
+
+	var data map[string]interface{}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return body // fallback to unmodified body if JSON is malformed
+	}
+
+	data["model"] = targetModel
+
+	newBody, err := json.Marshal(data)
+	if err != nil {
+		return body
+	}
+	return newBody
+}
+
