@@ -65,8 +65,12 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 	// Serve Svelte client compiled CSS/JS from /assets/*
 	engine.StaticFS("/assets", http.FS(assetsFS))
 
-	// Serve Svelte index.html for all requests under /playground/*
-	// This handles client-side routing and page refresh 404 bugs cleanly.
+	// Serve Svelte index.html for requests to /playground and /playground/*any
+	// This explicitly serves the client on both paths to avoid Gin's automatic trailing slash
+	// HTTP redirects which fail behind Clever Cloud's reverse proxy, while also resolving SPA 404s.
+	engine.GET("/playground", func(c *gin.Context) {
+		c.FileFromFS("index.html", http.FS(subFS))
+	})
 	engine.GET("/playground/*any", func(c *gin.Context) {
 		c.FileFromFS("index.html", http.FS(subFS))
 	})
