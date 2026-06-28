@@ -36,6 +36,8 @@ func NewTransmuxer(provider string) Transmuxer {
 		return NewAnthropicTransmuxer()
 	case "gemini", "vertex":
 		return NewGeminiTransmuxer()
+	case "nvidia":
+		return NewNvidiaTransmuxer()
 	default:
 		// OpenAI-compatible providers (openai, deepseek, groq, together, etc.)
 		return NewOpenAITransmuxer()

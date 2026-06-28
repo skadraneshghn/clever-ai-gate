@@ -31,6 +31,9 @@ func NewRewriter() *Rewriter {
 	r.pathTransformers["fireworks"] = passthroughPath
 	r.pathTransformers["mistral"] = passthroughPath
 	r.pathTransformers["perplexity"] = passthroughPath
+
+	// NVIDIA NIM
+	r.pathTransformers["nvidia"] = passthroughPath
 	r.pathTransformers["xai"] = passthroughPath
 
 	// Anthropic
@@ -181,3 +184,7 @@ func coherePath(baseURL, requestPath, _ string) string {
 	}
 	return baseURL + requestPath
 }
+
+// Note: NVIDIA NIM uses passthroughPath since it is OpenAI-compatible.
+// Base URL should be configured as https://integrate.api.nvidia.com/v1
+// and the path /v1/chat/completions passes through directly.

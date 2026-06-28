@@ -99,6 +99,7 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 
 		// Playground Chats CRUD (Tenant-isolated, requires tenant API Key)
 		chatHandler := admin.NewChatHandler(deps.DB)
+		proxyGroup.GET("/api/v1/playground/tenant", chatHandler.GetTenantInfo)
 		proxyGroup.GET("/api/v1/playground/chats", chatHandler.List)
 		proxyGroup.GET("/api/v1/playground/chats/:id", chatHandler.Get)
 		proxyGroup.POST("/api/v1/playground/chats", chatHandler.Create)

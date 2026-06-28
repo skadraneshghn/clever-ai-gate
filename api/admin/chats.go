@@ -181,3 +181,24 @@ func (h *ChatHandler) Delete(c *gin.Context) {
 
 	c.JSON(http.StatusOK, dto.SuccessResponse{Message: "conversation deleted successfully"})
 }
+
+// GetTenantInfo returns active tenant details extracted from the authenticated request context.
+func (h *ChatHandler) GetTenantInfo(c *gin.Context) {
+	tenantID, existsID := c.Get("tenant_id")
+	tenantName, _ := c.Get("tenant_name")
+	tenantBalance, _ := c.Get("tenant_balance")
+	tenantRateLimit, _ := c.Get("tenant_rate_limit")
+	if !existsID {
+		c.JSON(http.StatusUnauthorized, dto.ErrorResponse{Error: "unauthorized", Details: "missing tenant context"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"id":             tenantID,
+		"name":           tenantName,
+		"token_balance":  tenantBalance,
+		"rate_limit_rpm": tenantRateLimit,
+	})
+}
+
+

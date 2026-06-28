@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -62,6 +63,7 @@ func NewHandler(client *http.Client, cacheStore *cache.Store, logger *zap.Logger
 type proxyContext struct {
 	model      string
 	isStream   bool
+	isNvidia   bool   // True when model uses nvidia/ prefix — triggers reasoning injection
 	body       []byte
 	credential *credentials.AcquireResult
 	pool       *credentials.BalancedChannelPool
@@ -129,6 +131,20 @@ func (h *Handler) Handle(c *gin.Context) {
 	}
 	model := string(modelBytes)
 
+	// --- NVIDIA Prefix Detection ---
+	// Models prefixed with "nvidia/" are routed through the NVIDIA NIM pipeline.
+	// The prefix is stripped for cache lookup but the isNvidia flag triggers
+	// reasoning parameter injection before forwarding to the upstream.
+	isNvidia := false
+	if strings.HasPrefix(model, "nvidia/") {
+		isNvidia = true
+		// Don't strip the prefix — the model_pattern in the pool already
+		// includes "nvidia/" (e.g., pool pattern = "nvidia/nvidia/nemotron-3-super-120b-a12b")
+		h.logger.Debug("nvidia model detected",
+			zap.String("model", model),
+		)
+	}
+
 	// Step 3: Detect streaming mode (also bounded to metadata segment)
 	isStream, _ := jsonparser.GetBoolean(scanSlice, "stream")
 
@@ -146,12 +162,21 @@ func (h *Handler) Handle(c *gin.Context) {
 	}
 	pool := poolVal.(*credentials.BalancedChannelPool)
 
+	// --- NVIDIA Reasoning Parameter Injection ---
+	// When the model is NVIDIA, inject reasoning_budget and chat_template_kwargs
+	// into the request body to enable the thinking/reasoning pipeline.
+	// This is transparent to the client (Cline/Kilo don't need to know).
+	if isNvidia {
+		body = injectNvidiaParams(body, scanSlice, h.logger)
+	}
+
 	// Step 5-8: Attempt with automatic failover
 	// Note: The FULL body (not scanSlice) is forwarded to the upstream provider.
 	// Only the metadata extraction was bounded — the binary payload is piped as-is.
 	pctx := &proxyContext{
 		model:    model,
 		isStream: isStream,
+		isNvidia: isNvidia,
 		body:     body,
 		pool:     pool,
 	}
@@ -285,8 +310,25 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 
 // findPoolByPrefix searches for a pool matching a model name prefix.
 // E.g., "gpt-4o-2024-05-13" matches pool "gpt-4o".
+// Also handles NVIDIA namespace (e.g., "nvidia/nvidia/nemotron-3-super-120b-a12b").
 func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
-	// Try progressively shorter prefixes
+	// Handle NVIDIA slash-separated model names (e.g., "nvidia/nvidia/nemotron-3-super-120b-a12b")
+	if strings.HasPrefix(model, "nvidia/") {
+		// Try progressively shorter slash-separated prefixes
+		slashParts := strings.Split(model, "/")
+		for i := len(slashParts) - 1; i >= 1; i-- {
+			prefix := strings.Join(slashParts[:i], "/")
+			if val, found := h.cache.Get(cache.PoolKey(prefix)); found {
+				return val, true
+			}
+		}
+		// Also try just the provider namespace key "nvidia"
+		if val, found := h.cache.Get(cache.PoolKey("nvidia")); found {
+			return val, true
+		}
+	}
+
+	// Try progressively shorter dash-separated prefixes
 	parts := strings.Split(model, "-")
 	for i := len(parts) - 1; i >= 1; i-- {
 		prefix := strings.Join(parts[:i], "-")
@@ -373,4 +415,54 @@ func (h *Handler) ListModels(c *gin.Context) {
 		Object: "list",
 		Data:   data,
 	})
+}
+
+// --- NVIDIA Reasoning Parameter Injection ---
+
+// injectNvidiaParams injects NVIDIA-specific reasoning parameters into the request body.
+//
+// Parameters injected:
+//   - reasoning_budget: Set to match max_tokens (default 4096 if absent)
+//   - chat_template_kwargs: {"enable_thinking": true}
+//
+// This enables NVIDIA models to return structured reasoning content
+// that the NvidiaTransmuxer can normalize into reasoning_content deltas.
+//
+// The injection uses byte-level manipulation to avoid JSON unmarshal/marshal overhead.
+// The caller receives a new byte slice — the original body is not modified.
+func injectNvidiaParams(body, scanSlice []byte, logger *zap.Logger) []byte {
+	// Check if reasoning_budget is already present (avoid double injection)
+	if bytes.Contains(scanSlice, []byte(`"reasoning_budget"`)) {
+		return body
+	}
+
+	// Extract max_tokens for reasoning_budget (default 4096)
+	reasoningBudget := 4096
+	if maxTokens, err := jsonparser.GetInt(scanSlice, "max_tokens"); err == nil && maxTokens > 0 {
+		reasoningBudget = int(maxTokens)
+	}
+
+	// Build the injection payload
+	injection := []byte(`,"reasoning_budget":` + strconv.Itoa(reasoningBudget) + `,"chat_template_kwargs":{"enable_thinking":true}`)
+
+	// Find the last '}' in the body (the closing brace of the root JSON object)
+	lastBrace := bytes.LastIndexByte(body, '}')
+	if lastBrace < 0 {
+		logger.Warn("nvidia param injection skipped: no closing brace found in body")
+		return body
+	}
+
+	// Build the new body: everything before '}' + injection + '}'
+	newBody := make([]byte, 0, len(body)+len(injection))
+	newBody = append(newBody, body[:lastBrace]...)
+	newBody = append(newBody, injection...)
+	newBody = append(newBody, body[lastBrace:]...)
+
+	logger.Debug("nvidia reasoning params injected",
+		zap.Int("reasoning_budget", reasoningBudget),
+		zap.Int("original_size", len(body)),
+		zap.Int("new_size", len(newBody)),
+	)
+
+	return newBody
 }

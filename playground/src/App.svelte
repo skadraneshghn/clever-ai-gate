@@ -15,6 +15,20 @@
   let currentChatId = $state(null);
   let messages = $state([]);
   
+  // Real Tenant info loaded from API
+  let tenantName = $state('');
+  let tenantBalance = $state(0);
+  let tenantRateLimit = $state(0);
+
+  // Compute initials from tenantName reactively
+  let tenantInitials = $derived.by(() => {
+    if (!tenantName) return 'T';
+    const cleanName = tenantName.replace(/[^a-zA-Z0-9\s-_]/g, '');
+    const parts = cleanName.split(/[\s\-_]+/);
+    const initials = parts.map(p => p[0]).filter(Boolean).join('');
+    return initials ? initials.substring(0, 2).toUpperCase() : 'T';
+  });
+  
   // HUD Telemetry stats
   let statusHUD = $state('Enter API Key');
   let providerHUD = $state('—');
@@ -64,6 +78,7 @@
     if (savedKey) {
       apiKey = savedKey;
       statusHUD = 'Ready';
+      loadTenantInfo();
       loadModels();
       loadChats();
     }
@@ -91,9 +106,44 @@
       localStorage.setItem('cag_playground_api_key', apiKey.trim());
       showSettingsModal = false;
       statusHUD = 'Loading...';
+      loadTenantInfo();
       loadModels();
       loadChats();
     }
+  }
+
+  // Load tenant details from GET /api/v1/playground/tenant
+  async function loadTenantInfo() {
+    if (!apiKey.trim()) return;
+    try {
+      const res = await fetch('/api/v1/playground/tenant', {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`
+        }
+      });
+      if (res.status === 200) {
+        const data = await res.json();
+        tenantName = data.name || 'Tenant';
+        tenantBalance = data.token_balance || 0;
+        tenantRateLimit = data.rate_limit_rpm || 0;
+      }
+    } catch (e) {
+      console.error('Failed to load tenant info', e);
+    }
+  }
+
+  // Format large numbers for token display (e.g. 1000000000 -> 1.0B)
+  function formatBalance(num) {
+    if (num >= 1e9) {
+      return (num / 1e9).toFixed(1) + 'B';
+    }
+    if (num >= 1e6) {
+      return (num / 1e6).toFixed(1) + 'M';
+    }
+    if (num >= 1e3) {
+      return (num / 1e3).toFixed(1) + 'K';
+    }
+    return num.toString();
   }
 
   // Load active models from the Go backend GET /v1/models route
@@ -351,9 +401,9 @@
   }
 </script>
 
-<div class="app-wrapper flex items-center justify-center p-6 min-h-screen">
+<div class="app-wrapper flex w-screen h-screen overflow-hidden">
   <!-- Desktop Frame Layout (Cognivo UI) -->
-  <div class="cognivo-frame flex w-full max-w-6xl rounded-2xl overflow-hidden border">
+  <div class="cognivo-frame flex w-full h-full overflow-hidden">
     
     <!-- Left Sidebar -->
     <aside class="sidebar flex flex-col w-sidebar shrink-0 border-r p-4 justify-between">
@@ -383,22 +433,6 @@
           </span>
           <span class="btn-shortcut">⌘ N</span>
         </button>
-
-        <!-- Sidebar Navigation links -->
-        <nav class="flex flex-col gap-1">
-          <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left">
-            <Globe size={18} class="text-[#f97316]" />
-            <span>Explore Cognivo AI</span>
-          </button>
-          <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left">
-            <BookOpen size={18} />
-            <span>Knowledge Base</span>
-          </button>
-          <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left">
-            <FileText size={18} />
-            <span>Templates</span>
-          </button>
-        </nav>
 
         <!-- Grouped Scrollable History -->
         <div class="history-section flex flex-col gap-4 overflow-y-auto pr-1">
@@ -456,13 +490,24 @@
         <!-- User profile panel -->
         <div class="profile-card flex items-center justify-between p-2-5 rounded-lg border">
           <div class="flex items-center gap-2 overflow-hidden">
-            <div class="avatar flex items-center justify-center w-8 h-8 rounded-full text-white bg-gradient-to-tr from-orange to-pink font-bold text-xs">JH</div>
+            <div class="avatar flex items-center justify-center w-8 h-8 rounded-full text-white bg-gradient-to-tr from-orange to-pink font-bold text-xs shrink-0">
+              {tenantInitials}
+            </div>
             <div class="flex flex-col overflow-hidden">
-              <span class="font-bold text-xs truncate">Joko Handoyo</span>
-              <span class="text-[9px] text-[#f97316] font-semibold uppercase">Free Plan</span>
+              <span class="font-bold text-xs truncate">{tenantName || 'Not Connected'}</span>
+              <span class="text-[9px] text-[#f97316] font-semibold uppercase">
+                {#if tenantRateLimit}
+                  Limit: {tenantRateLimit} RPM
+                {:else}
+                  No Limit
+                {/if}
+              </span>
+              {#if tenantBalance}
+                <span class="text-[8px] opacity-75">Bal: {formatBalance(tenantBalance)} tokens</span>
+              {/if}
             </div>
           </div>
-          <button class="icon-button" onclick={() => showSettingsModal = true}>
+          <button class="icon-button" onclick={() => showSettingsModal = true} title="Configure Key">
             <Settings size={14} />
           </button>
         </div>
@@ -507,18 +552,12 @@
         <div>Latency: <span class="hud-value">{latencyHUD}</span></div>
         <div>Speed: <span class="hud-value">{speedHUD}</span></div>
       </div>
-
       <!-- Chat Workspace Area -->
       <div class="chat-container flex-grow overflow-y-auto p-6 flex flex-col">
         {#if messages.length === 0}
-          <!-- Initial landing screen layout matching the screenshot exactly -->
-          <div class="flex-grow flex flex-col items-center justify-center gap-8 max-w-xl mx-auto w-full text-center">
+          <!-- Initial landing screen layout -->
+          <div class="flex-grow flex flex-col items-center justify-center gap-8 max-w-3xl mx-auto w-full text-center">
             
-            <button class="upgrade-pill flex items-center gap-1.5 text-[10px] font-bold uppercase px-3 py-1-5 rounded-full border">
-              <Sparkles size={11} class="text-[#f97316]" />
-              Upgrade free plan to full access
-            </button>
-
             <!-- Large central Cognivo orange SVG logo -->
             <div class="center-logo flex items-center justify-center p-5 rounded-2xl bg-orange-light">
               <svg class="w-16 h-16 text-[#f97316]" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
@@ -558,12 +597,6 @@
               </div>
             </div>
 
-            <!-- Connect tools upgrade link banner -->
-            <button class="connect-banner flex items-center justify-between w-full p-3 rounded-lg border text-xs">
-              <span class="text-[#f97316] font-semibold">Upgrade to connect all your tools to Cognivo</span>
-              <span class="text-[#f97316]">➔</span>
-            </button>
-
             <!-- Bottom Cards Row -->
             <div class="grid grid-cols-3 gap-4 w-full">
               <button class="preset-card flex flex-col text-left p-4 rounded-xl border gap-2" onclick={() => applyPreset("Summarize this article for me:")}>
@@ -587,7 +620,7 @@
           </div>
         {:else}
           <!-- Chat flow display -->
-          <div class="flex flex-col gap-6 max-w-2xl mx-auto w-full flex-grow">
+          <div class="flex flex-col gap-6 max-w-4xl mx-auto w-full flex-grow">
             {#each messages as msg}
               <div class="message-bubble flex flex-col gap-2 {msg.role === 'user' ? 'align-end' : ''}">
                 <div class="text-[10px] font-bold uppercase tracking-wider text-secondary">{msg.role === 'user' ? 'You' : 'Assistant'}</div>
@@ -606,7 +639,7 @@
           </div>
           
           <!-- Bottom input bar for follow-ups -->
-          <div class="bottom-input-bar max-w-2xl mx-auto w-full pt-4 mt-auto">
+          <div class="bottom-input-bar max-w-4xl mx-auto w-full pt-4 mt-auto">
             <div class="input-card flex flex-col w-full border rounded-xl p-3 shadow-md gap-3">
               <textarea 
                 class="prompt-textarea w-full text-sm outline-none resize-none" 
@@ -759,8 +792,9 @@
   .cognivo-frame {
     background-color: var(--frame-bg);
     border-color: var(--border-color);
-    box-shadow: 0 10px 40px var(--shadow-color);
-    height: calc(100vh - 48px);
+    box-shadow: none;
+    height: 100%;
+    width: 100%;
   }
 
   /* Sidebar styling */
@@ -871,15 +905,6 @@
   }
 
   /* Center UI layout elements */
-  .upgrade-pill {
-    color: var(--text-secondary);
-    border-color: var(--border-color);
-    transition: all 0.2s;
-  }
-  .upgrade-pill:hover {
-    color: var(--text-primary);
-    border-color: #f97316;
-  }
 
   .input-card {
     background-color: var(--card-bg);
@@ -915,10 +940,6 @@
     background: rgba(249, 115, 22, 0.05);
   }
 
-  .connect-banner {
-    background: rgba(249, 115, 22, 0.03);
-    border-color: rgba(249, 115, 22, 0.15);
-  }
 
   .preset-card {
     background-color: var(--card-bg);
