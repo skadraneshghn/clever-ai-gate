@@ -144,3 +144,45 @@ func (p *BalancedChannelPool) HealthyCount() int {
 	}
 	return count
 }
+
+// AcquireLeastPenalizedToken is a safety valve for single-key or small-pool
+// environments. It picks the credential with the lowest CooldownUntil timestamp
+// — i.e., the one that will become available soonest — even if it is still
+// technically on cooldown. The caller is responsible for sleeping until the
+// token is ready (if desired) before using the result.
+//
+// This prevents a single transient NVIDIA 500/503 from locking the gateway
+// out for a full 10–30 seconds when only one key is configured.
+func (p *BalancedChannelPool) AcquireLeastPenalizedToken() *AcquireResult {
+	if p == nil || p.TotalCount == 0 {
+		return nil
+	}
+
+	var bestCred *RuntimeCredential
+	var bestIdx int
+	bestCooldown := int64(1<<63 - 1) // max int64
+
+	for idx, cand := range p.Credentials {
+		cd := atomic.LoadInt64(&cand.CooldownUntil)
+		if cd < bestCooldown {
+			bestCooldown = cd
+			bestCred = cand
+			bestIdx = idx
+		}
+	}
+
+	if bestCred != nil {
+		return &AcquireResult{
+			Credential: bestCred,
+			Index:      bestIdx,
+			FromPool:   p,
+		}
+	}
+
+	if p.FallbackPool != nil {
+		return p.FallbackPool.AcquireLeastPenalizedToken()
+	}
+
+	return nil
+}
+
