@@ -291,6 +291,8 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestSt
 		if err == nil && !isRetryableStatus(statusCode) {
 			// Terminal outcome — success or a non-retryable client error (e.g. 400).
 			// forwardRequest has already written the response to c.Writer.
+			// Clear the cooldown on the token that just succeeded — it proved itself healthy.
+			pctx.pool.ResetCooldown(result.Index)
 			if statusCode >= 200 && statusCode < 400 {
 				h.logger.Info("proxy request completed",
 					zap.String("model", pctx.model),
