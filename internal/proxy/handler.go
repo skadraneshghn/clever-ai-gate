@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -163,14 +162,33 @@ func (h *Handler) Handle(c *gin.Context) {
 	}
 	pool := poolVal.(*credentials.BalancedChannelPool)
 
-	// --- NVIDIA Reasoning Parameter Injection ---
-	// When the model is NVIDIA and supports Nemotron reasoning, inject reasoning_budget 
-	// and chat_template_kwargs into the request body.
+	// --- NVIDIA Payload Sanitization ---
+	// For NVIDIA-prefixed models two transforms are applied:
+	//   1. Strip the "nvidia/" routing prefix from the JSON "model" field so
+	//      NVIDIA NIM receives the clean model ID (e.g. "z-ai/glm-5.1").
+	//   2. Inject reasoning params ONLY for architectures that support thinking
+	//      (Nemotron, DeepSeek-R1, etc.). Standard models like GLM reject these
+	//      params with a 500, so we gate them behind supportsNvidiaReasoning.
 	if isNvidia {
-		if strings.Contains(strings.ToLower(model), "nemotron") {
+		// Determine the clean upstream model ID (strip "nvidia/" prefix)
+		upstreamModel := strings.TrimPrefix(model, "nvidia/")
+
+		// Fix 2: Conditional reasoning injection — only for supported architectures
+		if supportsNvidiaReasoning(upstreamModel) {
 			body = injectNvidiaParams(body, scanSlice, h.logger)
+		} else {
+			h.logger.Debug("skipping reasoning injection for standard non-thinking model",
+				zap.String("model", upstreamModel),
+			)
 		}
-		body = rewriteModelField(body, model)
+
+		// Fix 1: Strip the routing prefix from the raw JSON bytes.
+		// bytes.Replace is a single-pass O(n) scan — no alloc overhead from
+		// json.Unmarshal/Marshal and no risk of key reordering.
+		// We replace the full quoted token to avoid partial matches.
+		oldToken := []byte(`"` + model + `"`)
+		newToken := []byte(`"` + upstreamModel + `"`)
+		body = bytes.Replace(body, oldToken, newToken, 1)
 	}
 
 	// Step 5-8: Attempt with automatic failover
@@ -470,25 +488,15 @@ func injectNvidiaParams(body, scanSlice []byte, logger *zap.Logger) []byte {
 	return newBody
 }
 
-// rewriteModelField modifies the JSON request body, stripping the leading "nvidia/" prefix
-// from the "model" field to match the native model ID expected by NVIDIA NIM.
-func rewriteModelField(body []byte, originalModel string) []byte {
-	if !strings.HasPrefix(originalModel, "nvidia/") {
-		return body
-	}
-	targetModel := strings.TrimPrefix(originalModel, "nvidia/")
-
-	var data map[string]interface{}
-	if err := json.Unmarshal(body, &data); err != nil {
-		return body // fallback to unmodified body if JSON is malformed
-	}
-
-	data["model"] = targetModel
-
-	newBody, err := json.Marshal(data)
-	if err != nil {
-		return body
-	}
-	return newBody
+// supportsNvidiaReasoning reports whether the upstream model (nvidia/ prefix already
+// stripped) supports NVIDIA's reasoning extensions (reasoning_budget,
+// chat_template_kwargs.enable_thinking). Standard models like GLM, Llama-base,
+// and Mistral reject these params with a 500, so they must be excluded.
+func supportsNvidiaReasoning(upstreamModel string) bool {
+	lower := strings.ToLower(upstreamModel)
+	return strings.Contains(lower, "nemotron") ||
+		strings.Contains(lower, "-r1") ||
+		strings.Contains(lower, "reasoning") ||
+		strings.Contains(lower, "think")
 }
 
