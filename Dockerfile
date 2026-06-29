@@ -65,6 +65,14 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 # Run as non-root for security
 RUN adduser -D -u 1000 appuser
+
+# Create a writable working directory and logs directory for the non-root user
+RUN mkdir -p /app/logs && chown -R appuser:appuser /app
+
+WORKDIR /app
 USER appuser
+
+# Default log directory inside the container (overridable via LOG_DIR env var)
+ENV LOG_DIR=/app/logs
 
 ENTRYPOINT ["/usr/local/bin/clever-ai-gate"]
