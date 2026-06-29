@@ -16,6 +16,7 @@ import (
 	"github.com/skadraneshghn/clever-ai-gate/internal/middleware"
 	"github.com/skadraneshghn/clever-ai-gate/internal/playground"
 	"github.com/skadraneshghn/clever-ai-gate/internal/proxy"
+	"github.com/skadraneshghn/clever-ai-gate/internal/telemetry"
 	"go.uber.org/zap"
 )
 
@@ -28,6 +29,7 @@ type Dependencies struct {
 	Logger     *zap.Logger
 	Health     *health.Handler
 	Proxy      *proxy.Handler
+	LogHub     *telemetry.LogHub // non-blocking log broadcaster for the admin log viewer
 }
 
 // NewEngine creates and configures the Gin engine with all routes.
@@ -140,6 +142,13 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 
 		// Provider auto-discovery (registers all models for a given provider key)
 		adminGroup.POST("/providers/nvidia", credHandler.RegisterNvidiaProvider)
+
+		// Live log streaming and daily log file download
+		if deps.LogHub != nil {
+			logCtrl := admin.NewLogAdminController(deps.LogHub)
+			adminGroup.GET("/logs/stream", logCtrl.StreamLiveCoreLogs)
+			adminGroup.GET("/logs/download", logCtrl.DownloadTodayLogFile)
+		}
 	}
 
 	return engine

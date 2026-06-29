@@ -53,8 +53,22 @@ func main() {
 	// Load configuration from environment
 	cfg := config.Load()
 
-	// Initialize structured logger
-	logger := initLogger(cfg.LogLevel)
+	// --- Initialize LogHub before the logger so the logger can write to it ---
+	// The log directory defaults to "logs/" relative to the working directory
+	// but can be overridden by the LOG_DIR environment variable.
+	logDir := os.Getenv("LOG_DIR")
+	if logDir == "" {
+		logDir = "logs"
+	}
+	logHub, err := telemetry.NewLogHub(logDir)
+	if err != nil {
+		// This is a startup-time error — we cannot log it yet, so panic.
+		panic("failed to initialize log hub: " + err.Error())
+	}
+	defer logHub.Sync()
+
+	// Initialize structured logger (dual-writes to stdout + daily log file)
+	logger := initLogger(cfg.LogLevel, logHub)
 	defer logger.Sync()
 
 	logger.Info("starting Clever AI Gate",
@@ -126,6 +140,7 @@ func main() {
 		Logger: logger,
 		Health: healthHandler,
 		Proxy:  proxyHandler,
+		LogHub: logHub,
 	})
 
 	// --- Step 11: Start HTTP server ---
@@ -170,8 +185,14 @@ func main() {
 	logger.Info("server stopped gracefully")
 }
 
-// initLogger creates a production-tuned zap logger.
-func initLogger(level string) *zap.Logger {
+// initLogger creates a production-tuned zap logger that dual-writes to:
+//  1. os.Stdout — for container log aggregators (unchanged behaviour)
+//  2. logHub — which fans out to the daily rotating file AND live SSE clients
+//
+// The JSON encoder uses ISO 8601 timestamps so the frontend can parse them
+// without any additional transformation. Caller info is included so log lines
+// carry the source file/line — invaluable when debugging Kilo Code edge cases.
+func initLogger(level string, logHub *telemetry.LogHub) *zap.Logger {
 	var zapLevel zapcore.Level
 	switch level {
 	case "debug":
@@ -184,19 +205,30 @@ func initLogger(level string) *zap.Logger {
 		zapLevel = zapcore.InfoLevel
 	}
 
-	config := zap.Config{
-		Level:            zap.NewAtomicLevelAt(zapLevel),
-		Development:      false,
-		Encoding:         "json",
-		EncoderConfig:    zap.NewProductionEncoderConfig(),
-		OutputPaths:      []string{"stdout"},
-		ErrorOutputPaths: []string{"stderr"},
-	}
+	encoderCfg := zap.NewProductionEncoderConfig()
+	encoderCfg.TimeKey = "timestamp"
+	encoderCfg.EncodeTime = zapcore.ISO8601TimeEncoder
+	encoderCfg.EncodeLevel = zapcore.LowercaseLevelEncoder
+	jsonEncoder := zapcore.NewJSONEncoder(encoderCfg)
 
-	logger, err := config.Build(zap.AddStacktrace(zapcore.ErrorLevel))
-	if err != nil {
-		panic("failed to initialize logger: " + err.Error())
-	}
+	// Core 1: stdout (for container log aggregators)
+	stdoutCore := zapcore.NewCore(
+		jsonEncoder,
+		zapcore.Lock(os.Stdout),
+		zapLevel,
+	)
 
-	return logger
+	// Core 2: LogHub (daily file + live SSE broadcast)
+	hubCore := zapcore.NewCore(
+		jsonEncoder,
+		logHub,
+		zapLevel,
+	)
+
+	core := zapcore.NewTee(stdoutCore, hubCore)
+
+	return zap.New(core,
+		zap.AddCaller(),
+		zap.AddStacktrace(zapcore.ErrorLevel),
+	)
 }

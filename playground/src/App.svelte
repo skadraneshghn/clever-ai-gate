@@ -1,9 +1,10 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { 
     Globe, BookOpen, FileText, Settings, Compass, Search, HelpCircle, 
     Send, Plus, Trash2, Sparkles, User, Sun, Moon, Cpu, Paperclip, Mic, 
-    ExternalLink, Check, Copy, ChevronDown, RefreshCw, LogIn
+    ExternalLink, Check, Copy, ChevronDown, RefreshCw, LogIn, Terminal,
+    Download, Play, Square, Eraser
   } from '@lucide/svelte';
 
   // State (using Svelte 5 Runes)
@@ -61,6 +62,18 @@
   let showCodePanel = $state(false);
   let activeCodeTab = $state('curl');
 
+  // Page routing: 'chat' | 'logs'
+  let activePage = $state('chat');
+
+  // ─── Logs Console State ──────────────────────────────────────────────────
+  let logLines = $state([]);
+  let logsStreaming = $state(false);
+  let logsAutoScroll = $state(true);
+  let logsAdminKey = $state('');
+  let logsError = $state('');
+  let logsAbortController = null;
+  let logsTerminalEl = $state(null);
+
   // Sidebar grouping computed state
   let sidebarChats = $derived.by(() => {
     const today = [];
@@ -110,7 +123,18 @@
       theme = savedTheme;
       applyTheme(theme);
     }
+
+    // Pre-populate admin key from localStorage if available
+    const savedAdminKey = localStorage.getItem('cag_admin_key');
+    if (savedAdminKey) {
+      logsAdminKey = savedAdminKey;
+    }
+
     isInitializing = false;
+  });
+
+  onDestroy(() => {
+    stopLogsStream();
   });
 
   // Apply theme helper
@@ -496,6 +520,134 @@
       console.error('Failed to auto-save conversation', e);
     }
   }
+  // ─── Logs Console Functions ───────────────────────────────────────────────
+
+  async function startLogsStream() {
+    if (logsStreaming) return;
+    const key = logsAdminKey.trim();
+    if (!key) {
+      logsError = 'Admin API key is required to stream logs.';
+      return;
+    }
+    // Persist admin key so the Logs page re-connects on reload
+    localStorage.setItem('cag_admin_key', key);
+    logsError = '';
+    logsStreaming = true;
+    logsAbortController = new AbortController();
+
+    try {
+      const resp = await fetch('/api/v1/admin/logs/stream', {
+        headers: { 'Authorization': `Bearer ${key}` },
+        signal: logsAbortController.signal,
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        logsError = `Server error ${resp.status}: ${errText}`;
+        logsStreaming = false;
+        return;
+      }
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+
+      while (logsStreaming) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const frames = buf.split('\n\n');
+        buf = frames.pop(); // keep trailing incomplete frame
+
+        for (const frame of frames) {
+          const trimmed = frame.trim();
+          if (!trimmed || trimmed.startsWith(': ')) continue; // SSE comment/ping
+          if (trimmed.startsWith('data: ')) {
+            const raw = trimmed.slice(6).trim();
+            try {
+              const parsed = JSON.parse(raw);
+              // Keep ring buffer at 500 entries max
+              logLines = [...logLines.slice(-499), parsed];
+              if (logsAutoScroll) scrollLogsToBottom();
+            } catch {
+              // Non-JSON SSE frame — skip
+            }
+          }
+        }
+      }
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        logsError = `Stream error: ${err.message}`;
+        // Auto-reconnect after 3 s
+        setTimeout(() => {
+          if (!logsStreaming) startLogsStream();
+        }, 3000);
+      }
+    } finally {
+      logsStreaming = false;
+    }
+  }
+
+  function stopLogsStream() {
+    logsStreaming = false;
+    logsAbortController?.abort();
+    logsAbortController = null;
+  }
+
+  function clearLogs() {
+    logLines = [];
+  }
+
+  async function downloadTodayLog() {
+    const key = logsAdminKey.trim();
+    if (!key) { logsError = 'Admin API key required.'; return; }
+    try {
+      const resp = await fetch('/api/v1/admin/logs/download', {
+        headers: { 'Authorization': `Bearer ${key}` },
+      });
+      if (!resp.ok) {
+        logsError = `Download failed: ${resp.status}`;
+        return;
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const today = new Date().toISOString().slice(0, 10);
+      a.href = url;
+      a.download = `gateway-${today}.log`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      logsError = `Download error: ${err.message}`;
+    }
+  }
+
+  function scrollLogsToBottom() {
+    setTimeout(() => {
+      if (logsTerminalEl) logsTerminalEl.scrollTop = logsTerminalEl.scrollHeight;
+    }, 16);
+  }
+
+  function logLevelClass(level) {
+    switch ((level || '').toLowerCase()) {
+      case 'debug': return 'lvl-debug';
+      case 'warn':  return 'lvl-warn';
+      case 'error': return 'lvl-error';
+      case 'fatal': return 'lvl-fatal';
+      default:      return 'lvl-info';
+    }
+  }
+
+  function formatLogTime(ts) {
+    if (!ts) return '';
+    // ISO 8601 → HH:MM:SS.mmm
+    try {
+      const d = new Date(ts);
+      return d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+    } catch { return ts; }
+  }
 </script>
 
 <div class="app-wrapper flex w-screen h-screen overflow-hidden">
@@ -579,6 +731,17 @@
 
       <!-- Bottom sidebar info -->
       <div class="flex flex-col gap-2 border-t pt-4">
+        <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left {activePage === 'chat' ? 'nav-link-active' : ''}" onclick={() => { activePage = 'chat'; }}>
+          <Sparkles size={18} />
+          <span>Chat</span>
+        </button>
+        <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left {activePage === 'logs' ? 'nav-link-active' : ''}" onclick={() => { activePage = 'logs'; if (!logsStreaming && logsAdminKey) startLogsStream(); }}>
+          <Terminal size={18} />
+          <span>Gateway Logs</span>
+          {#if logsStreaming}
+            <span class="logs-live-badge">LIVE</span>
+          {/if}
+        </button>
         <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left" onclick={() => showSettingsModal = true}>
           <Settings size={18} />
           <span>Settings</span>
@@ -613,32 +776,158 @@
 
     <!-- Main Workspace -->
     <main class="main-panel flex flex-col flex-grow overflow-hidden relative">
-      <!-- Top header bar -->
-      <header class="header flex items-center justify-between px-6 py-3 border-b shrink-0">
-        <div class="model-picker-container relative">
-          <button class="model-picker-btn flex items-center gap-2 font-semibold text-sm" onclick={handleModelPickerClick}>
-            <span>{selectedModel || 'Configure Gateway'}</span>
-            <ChevronDown size={14} />
-          </button>
-          
-          {#if showModelDropdown && models.length > 0}
-            <div class="model-dropdown absolute top-full left-0 mt-1 border rounded-lg shadow-xl z-20 w-56">
-              {#each models as model}
-                <button class="model-option flex items-center w-full px-4 py-2-5 text-left text-xs {selectedModel === model.id ? 'active' : ''}" onclick={() => { selectedModel = model.id; showModelDropdown = false; }}>
-                  {model.id}
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </div>
 
-        <div class="flex items-center gap-2">
-          <button class="icon-button" onclick={() => showCodePanel = !showCodePanel} title="Toggle Integration Snippets">
-            <ExternalLink size={16} />
-          </button>
-          <button class="share-btn text-xs font-semibold px-3 py-1-5 rounded-lg border">Share</button>
-        </div>
-      </header>
+      {#if activePage === 'logs'}
+        <!-- ═══════════════════════════════════════════════════════════════ -->
+        <!-- LOGS PAGE                                                       -->
+        <!-- ═══════════════════════════════════════════════════════════════ -->
+        <header class="header flex items-center justify-between px-6 py-3 border-b shrink-0">
+          <div class="flex items-center gap-3">
+            <Terminal size={18} class="text-[#f97316]" />
+            <span class="font-bold text-sm">Gateway Core Logs</span>
+            {#if logsStreaming}
+              <span class="flex items-center gap-1.5">
+                <span class="log-pulse-dot"></span>
+                <span class="text-[10px] font-bold text-green-500 uppercase">Live</span>
+              </span>
+            {:else}
+              <span class="text-[10px] font-bold text-secondary uppercase">Offline</span>
+            {/if}
+          </div>
+          <div class="flex items-center gap-2">
+            {#if logsStreaming}
+              <button class="log-action-btn log-btn-stop" onclick={stopLogsStream} title="Pause stream">
+                <Square size={12} />
+                Pause
+              </button>
+            {:else}
+              <button class="log-action-btn log-btn-start" onclick={startLogsStream} title="Start stream">
+                <Play size={12} />
+                Connect
+              </button>
+            {/if}
+            <button class="log-action-btn log-btn-clear" onclick={clearLogs} title="Clear buffer">
+              <Eraser size={12} />
+              Clear
+            </button>
+            <button class="log-action-btn log-btn-download" onclick={downloadTodayLog} title="Download today's log file">
+              <Download size={12} />
+              Download
+            </button>
+            <label class="flex items-center gap-1.5 text-[10px] font-medium cursor-pointer select-none">
+              <input type="checkbox" bind:checked={logsAutoScroll} class="log-checkbox" />
+              Auto-scroll
+            </label>
+          </div>
+        </header>
+
+        <!-- Admin key prompt if not set -->
+        {#if !logsAdminKey.trim()}
+          <div class="logs-key-prompt">
+            <div class="logs-key-card">
+              <Terminal size={32} class="text-[#f97316] mb-3" />
+              <h2 class="font-bold text-base mb-1">Admin Key Required</h2>
+              <p class="text-xs mb-4">The log stream is protected by your Admin API Key.</p>
+              <div class="flex gap-2 w-full max-w-sm">
+                <input
+                  type="password"
+                  class="input-box flex-grow p-2.5 rounded-lg border text-sm"
+                  placeholder="Enter Admin API Key..."
+                  bind:value={logsAdminKey}
+                  onkeydown={(e) => { if (e.key === 'Enter') startLogsStream(); }}
+                />
+                <button class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold text-xs" onclick={startLogsStream}>
+                  Connect
+                </button>
+              </div>
+              {#if logsError}
+                <p class="text-red-500 text-xs mt-3">{logsError}</p>
+              {/if}
+            </div>
+          </div>
+        {:else}
+          <!-- Log terminal -->
+          <div class="log-terminal-wrap">
+            <!-- Stats bar -->
+            <div class="log-stats-bar">
+              <span>Entries: <strong>{logLines.length}</strong></span>
+              <span>Buffer: <strong>{Math.min(logLines.length, 500)}/500</strong></span>
+              {#if logsError}
+                <span class="text-red-500 font-medium">{logsError}</span>
+              {/if}
+            </div>
+
+            <!-- Terminal body -->
+            <div
+              class="log-terminal"
+              bind:this={logsTerminalEl}
+              onscroll={() => {
+                if (!logsTerminalEl) return;
+                const atBottom = logsTerminalEl.scrollHeight - logsTerminalEl.scrollTop - logsTerminalEl.clientHeight < 40;
+                logsAutoScroll = atBottom;
+              }}
+            >
+              {#if logLines.length === 0}
+                <div class="log-empty">
+                  <Terminal size={40} class="opacity-20 mb-3" />
+                  <p class="opacity-40 text-xs">{logsStreaming ? 'Waiting for log entries…' : 'Click Connect to start streaming logs.'}</p>
+                </div>
+              {:else}
+                {#each logLines as log, i (i)}
+                  <div class="log-row {logLevelClass(log.level)}">
+                    <span class="log-time">{formatLogTime(log.timestamp)}</span>
+                    <span class="log-lvl">{(log.level || 'info').toUpperCase()}</span>
+                    <span class="log-msg">{log.msg || ''}</span>
+                    {#if log.caller}
+                      <span class="log-caller">{log.caller}</span>
+                    {/if}
+                    {#if log.model || log.provider}
+                      <span class="log-meta">
+                        {#if log.model}model={log.model}{/if}
+                        {#if log.model && log.provider} · {/if}
+                        {#if log.provider}provider={log.provider}{/if}
+                      </span>
+                    {/if}
+                    {#if log.error}
+                      <span class="log-err-detail">{log.error}</span>
+                    {/if}
+                  </div>
+                {/each}
+              {/if}
+            </div>
+          </div>
+        {/if}
+
+      {:else}
+        <!-- ═══════════════════════════════════════════════════════════════ -->
+        <!-- CHAT PAGE (original content)                                    -->
+        <!-- ═══════════════════════════════════════════════════════════════ -->
+        <!-- Top header bar -->
+        <header class="header flex items-center justify-between px-6 py-3 border-b shrink-0">
+          <div class="model-picker-container relative">
+            <button class="model-picker-btn flex items-center gap-2 font-semibold text-sm" onclick={handleModelPickerClick}>
+              <span>{selectedModel || 'Configure Gateway'}</span>
+              <ChevronDown size={14} />
+            </button>
+            
+            {#if showModelDropdown && models.length > 0}
+              <div class="model-dropdown absolute top-full left-0 mt-1 border rounded-lg shadow-xl z-20 w-56">
+                {#each models as model}
+                  <button class="model-option flex items-center w-full px-4 py-2-5 text-left text-xs {selectedModel === model.id ? 'active' : ''}" onclick={() => { selectedModel = model.id; showModelDropdown = false; }}>
+                    {model.id}
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+
+          <div class="flex items-center gap-2">
+            <button class="icon-button" onclick={() => showCodePanel = !showCodePanel} title="Toggle Integration Snippets">
+              <ExternalLink size={16} />
+            </button>
+            <button class="share-btn text-xs font-semibold px-3 py-1-5 rounded-lg border">Share</button>
+          </div>
+        </header>
 
       <!-- Live telemetry HUD panel -->
       <div class="telemetry-bar flex gap-6 px-6 py-2.5 border-b font-mono text-[10px] overflow-x-auto whitespace-nowrap shrink-0">
@@ -759,10 +1048,12 @@
           Cognivo can make mistakes. Check important info. See Cookie Preferences.
         </footer>
       {/if}
+
+      {/if}
     </main>
 
     <!-- Side Code Panel (collapsible) -->
-    {#if showCodePanel}
+    {#if showCodePanel && activePage === 'chat'}
       <aside class="code-panel flex flex-col w-code border-l">
         <header class="flex items-center justify-between px-4 py-3 border-b bg-gray-light">
           <span class="text-xs font-bold uppercase tracking-wider">Integrations</span>
@@ -1290,4 +1581,208 @@
     animation: spin 1s linear infinite;
     display: inline-block;
   }
+  /* ── Logs Page ──────────────────────────────────────────────────────────── */
+
+  .nav-link-active {
+    color: #f97316 !important;
+    background-color: rgba(249, 115, 22, 0.08);
+    font-weight: 600;
+  }
+
+  .logs-live-badge {
+    font-size: 8px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    color: #04d361;
+    background: rgba(4, 211, 97, 0.12);
+    border: 1px solid rgba(4, 211, 97, 0.3);
+    border-radius: 4px;
+    padding: 1px 5px;
+    margin-left: auto;
+    text-transform: uppercase;
+  }
+
+  /* Pulsing live indicator dot */
+  .log-pulse-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #04d361;
+    box-shadow: 0 0 0 0 rgba(4, 211, 97, 0.6);
+    animation: log-pulse 1.8s ease-in-out infinite;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+  @keyframes log-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(4, 211, 97, 0.6); }
+    60%  { box-shadow: 0 0 0 7px rgba(4, 211, 97, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(4, 211, 97, 0); }
+  }
+
+  /* Action buttons in log header */
+  .log-action-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid var(--border-color);
+    cursor: pointer;
+    transition: all 0.15s;
+    background: var(--item-hover);
+    color: var(--text-secondary);
+  }
+  .log-action-btn:hover { color: var(--text-primary); border-color: var(--text-secondary); }
+  .log-btn-start  { border-color: rgba(4, 211, 97, 0.4); color: #04d361; background: rgba(4, 211, 97, 0.06); }
+  .log-btn-start:hover { background: rgba(4, 211, 97, 0.12); }
+  .log-btn-stop   { border-color: rgba(247, 64, 64, 0.4); color: #f74040; background: rgba(247, 64, 64, 0.06); }
+  .log-btn-stop:hover  { background: rgba(247, 64, 64, 0.12); }
+  .log-btn-download { border-color: rgba(75, 163, 255, 0.4); color: #4ba3ff; background: rgba(75, 163, 255, 0.06); }
+  .log-btn-download:hover { background: rgba(75, 163, 255, 0.12); }
+  .log-btn-clear { }
+
+  .log-checkbox {
+    accent-color: #f97316;
+    width: 12px;
+    height: 12px;
+    cursor: pointer;
+  }
+
+  /* Log key prompt (shown when admin key is missing) */
+  .logs-key-prompt {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+  }
+  .logs-key-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: 2.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    background: var(--card-bg);
+    max-width: 420px;
+    width: 100%;
+    box-shadow: 0 8px 32px var(--shadow-color);
+  }
+
+  /* Terminal layout */
+  .log-terminal-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding: 0;
+  }
+  .log-stats-bar {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    padding: 6px 20px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 10px;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border-color);
+    background: var(--sidebar-bg);
+    flex-shrink: 0;
+  }
+  .log-terminal {
+    flex: 1;
+    overflow-y: auto;
+    background: #09090b;
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  :global(.dark) .log-terminal { background: #05050a; }
+
+  .log-empty {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: #a8a8b3;
+    margin-top: 6rem;
+  }
+
+  /* Log row base */
+  .log-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    padding: 1px 0;
+    border-radius: 3px;
+    word-break: break-all;
+    flex-wrap: wrap;
+  }
+  .log-row:hover { background: rgba(255,255,255,0.03); }
+
+  /* Timestamp */
+  .log-time {
+    color: #4a4a55;
+    font-size: 11px;
+    flex-shrink: 0;
+    min-width: 95px;
+  }
+
+  /* Level badge */
+  .log-lvl {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    flex-shrink: 0;
+    width: 40px;
+    text-align: center;
+    border-radius: 3px;
+    padding: 0 3px;
+  }
+  .lvl-info  .log-lvl { color: #4ba3ff; background: rgba(75, 163, 255, 0.1); }
+  .lvl-debug .log-lvl { color: #8257e5; background: rgba(130, 87, 229, 0.1); }
+  .lvl-warn  .log-lvl { color: #ffb84d; background: rgba(255, 184, 77, 0.1); }
+  .lvl-error .log-lvl { color: #f74040; background: rgba(247, 64, 64, 0.12); }
+  .lvl-fatal .log-lvl { color: #ff0000; background: rgba(255, 0, 0, 0.15); font-weight: 900; }
+
+  /* Main message */
+  .log-msg {
+    color: #c8c8d4;
+    flex: 1;
+    min-width: 120px;
+  }
+  .lvl-error .log-msg,
+  .lvl-fatal .log-msg { color: #ff9090; }
+  .lvl-warn  .log-msg { color: #ffd080; }
+
+  /* Caller (source file:line) */
+  .log-caller {
+    color: #3a3a48;
+    font-size: 10px;
+    flex-shrink: 0;
+  }
+
+  /* Meta fields (model, provider) */
+  .log-meta {
+    color: #404050;
+    font-size: 10px;
+  }
+
+  /* Error detail */
+  .log-err-detail {
+    color: #f74040;
+    font-size: 11px;
+    width: 100%;
+    padding-left: calc(95px + 40px + 16px); /* align under msg */
+    margin-top: 1px;
+  }
+
 </style>
