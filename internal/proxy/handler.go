@@ -91,6 +91,7 @@ type proxyContext struct {
 // @Param        body           body    object  true  "OpenAI-compatible request body"
 // @Router       /v1/{path} [post]
 func (h *Handler) Handle(c *gin.Context) {
+	requestStart := time.Now()
 	// Step 1: Read body into pooled buffer — zero heap allocation
 	buf := h.bufPool.Get().(*bytes.Buffer)
 	defer func() {
@@ -147,6 +148,23 @@ func (h *Handler) Handle(c *gin.Context) {
 
 	// Step 3: Detect streaming mode (also bounded to metadata segment)
 	isStream, _ := jsonparser.GetBoolean(scanSlice, "stream")
+
+	// --- Access log: first thing we know enough to emit a useful Info entry ---
+	// This fires for EVERY request and is the primary tool for diagnosing
+	// Kilo Code instability: you can see exactly what model/tenant/path was
+	// requested and whether it ever reached the retry loop.
+	requestID, _ := c.Get("request_id")
+	tenantName, _ := c.Get("tenant_name")
+	h.logger.Info("proxy request received",
+		zap.String("request_id", fmt.Sprintf("%v", requestID)),
+		zap.String("tenant", fmt.Sprintf("%v", tenantName)),
+		zap.String("model", model),
+		zap.String("path", c.Request.URL.Path),
+		zap.Bool("stream", isStream),
+		zap.Bool("is_nvidia", strings.HasPrefix(model, "nvidia/")),
+		zap.Int("body_bytes", len(body)),
+		zap.String("client_ip", c.ClientIP()),
+	)
 
 	// Step 4: Cache lookup for routing pool — ~200ns via Ristretto
 	poolVal, found := h.cache.Get(cache.PoolKey(model))
@@ -207,16 +225,21 @@ func (h *Handler) Handle(c *gin.Context) {
 		pctx.tenantID = tenantID.(string)
 	}
 
-	h.executeWithRetry(c, pctx, 3) // Max 3 attempts across different credentials
+	h.executeWithRetry(c, pctx, requestStart, 3) // Max 3 attempts across different credentials
 }
 
 // executeWithRetry attempts the proxy request, failing over to the next
 // credential on transient errors (429, 500, 502, 503).
-func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, maxAttempts int) {
+func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestStart time.Time, maxAttempts int) {
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		// Step 5: Lock-free credential acquisition
 		result := pctx.pool.AcquireActiveToken()
 		if result == nil {
+			h.logger.Error("no active credentials available",
+				zap.String("model", pctx.model),
+				zap.String("tenant_id", pctx.tenantID),
+				zap.Duration("elapsed", time.Since(requestStart)),
+			)
 			c.JSON(http.StatusServiceUnavailable, gin.H{
 				"error": "all upstream providers are temporarily unavailable",
 				"model": pctx.model,
@@ -226,26 +249,61 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, maxAttemp
 		pctx.credential = result
 
 		// Step 6-7: Build and execute the upstream request
-		statusCode, err := h.forwardRequest(c, pctx)
+		statusCode, upstreamURL, err := h.forwardRequest(c, pctx)
 
 		if err == nil && !isRetryableStatus(statusCode) {
-			return // Success or non-retryable client error
+			// Successful or non-retryable (e.g. 400 client error) — log the outcome
+			if statusCode >= 400 {
+				h.logger.Warn("upstream returned client error (not retrying)",
+					zap.String("model", pctx.model),
+					zap.String("provider", result.Credential.Provider),
+					zap.String("upstream_url", upstreamURL),
+					zap.String("tenant_id", pctx.tenantID),
+					zap.Int("status", statusCode),
+					zap.Duration("elapsed", time.Since(requestStart)),
+				)
+			} else {
+				h.logger.Info("proxy request completed",
+					zap.String("model", pctx.model),
+					zap.String("provider", result.Credential.Provider),
+					zap.String("upstream_url", upstreamURL),
+					zap.String("tenant_id", pctx.tenantID),
+					zap.Bool("stream", pctx.isStream),
+					zap.Int("status", statusCode),
+					zap.Int("attempt", attempt+1),
+					zap.Duration("elapsed", time.Since(requestStart)),
+				)
+			}
+			return
 		}
 
 		// Step 8: Penalize failed credential and retry
 		cooldownDuration := cooldownForStatus(statusCode)
 		result.FromPool.PenalizeToken(result.Index, cooldownDuration)
 
+		requestID, _ := c.Get("request_id")
 		h.logger.Warn("upstream request failed, retrying",
+			zap.String("request_id", fmt.Sprintf("%v", requestID)),
 			zap.String("model", pctx.model),
 			zap.String("provider", result.Credential.Provider),
+			zap.String("upstream_url", upstreamURL),
+			zap.String("tenant_id", pctx.tenantID),
 			zap.Int("status", statusCode),
 			zap.Int("attempt", attempt+1),
+			zap.Int("max_attempts", maxAttempts),
 			zap.Duration("cooldown", cooldownDuration),
+			zap.Duration("elapsed", time.Since(requestStart)),
+			zap.NamedError("transport_err", err),
 		)
 	}
 
 	// All attempts exhausted
+	h.logger.Error("all retry attempts exhausted",
+		zap.String("model", pctx.model),
+		zap.String("tenant_id", pctx.tenantID),
+		zap.Int("max_attempts", maxAttempts),
+		zap.Duration("total_elapsed", time.Since(requestStart)),
+	)
 	c.JSON(http.StatusBadGateway, gin.H{
 		"error": "all retry attempts exhausted",
 		"model": pctx.model,
@@ -253,11 +311,13 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, maxAttemp
 }
 
 // forwardRequest sends the request to the upstream provider and proxies the response.
+// It returns the HTTP status code, the full upstream URL that was called, and any
+// transport-level error. The URL is included so callers can log it for diagnostics.
 //
 // Gap 3 Fix: The streaming path is wrapped in a panic defender to prevent
 // transmuxer crashes (malformed provider data, nil pointers, etc.) from
 // taking down the entire gateway process on Clever Cloud.
-func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode int, err error) {
+func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode int, upstreamURL string, err error) {
 	// Gap 3: Top-level panic defender for the entire forward path.
 	// This catches panics from the stream transmuxer, URL rewriter,
 	// or any other component in the request pipeline.
@@ -267,6 +327,7 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 				zap.Any("panic", r),
 				zap.String("model", pctx.model),
 				zap.String("provider", pctx.credential.Credential.Provider),
+				zap.String("upstream_url", upstreamURL),
 				zap.ByteString("stack", debug.Stack()),
 			)
 			statusCode = http.StatusInternalServerError
@@ -277,17 +338,17 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	cred := pctx.credential.Credential
 
 	// Build upstream request
-	targetURL := h.rewriter.RewriteURL(cred.Provider, cred.BaseURL, c.Request.URL.Path, pctx.model)
+	upstreamURL = h.rewriter.RewriteURL(cred.Provider, cred.BaseURL, c.Request.URL.Path, pctx.model)
 
 	upstreamReq, err := http.NewRequestWithContext(
 		c.Request.Context(),
 		c.Request.Method,
-		targetURL,
+		upstreamURL,
 		bytes.NewReader(pctx.body),
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build upstream request"})
-		return 500, err
+		return 500, upstreamURL, err
 	}
 
 	// Rewrite headers for the target provider
@@ -296,7 +357,13 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	// Execute upstream request
 	resp, err := h.client.Do(upstreamReq)
 	if err != nil {
-		return 0, err
+		h.logger.Error("upstream transport error",
+			zap.String("model", pctx.model),
+			zap.String("provider", cred.Provider),
+			zap.String("upstream_url", upstreamURL),
+			zap.Error(err),
+		)
+		return 0, upstreamURL, err
 	}
 
 	if pctx.isStream && resp.StatusCode == http.StatusOK {
@@ -307,11 +374,41 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		// Stream mode: pipe SSE chunks through transmuxer
 		// ProxyStream has its own internal panic recovery (Gap 1 + Gap 3)
 		h.stream.ProxyStream(c, resp, cred.Provider)
-		return resp.StatusCode, nil
+		return resp.StatusCode, upstreamURL, nil
 	}
 
 	// Non-stream mode: read full response and forward
 	defer resp.Body.Close()
+
+	// For non-2xx responses, capture the upstream body before forwarding it.
+	// This is the most critical diagnostic: NVIDIA (and other providers) return
+	// structured error messages explaining exactly why they rejected the request
+	// (e.g. unknown model field, unsupported parameter). Without this we only
+	// know the status code, not the root cause.
+	if resp.StatusCode >= 400 {
+		const maxErrBodyBytes = 4096 // cap at 4KB — enough for any JSON error
+		errBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes))
+		if readErr == nil && len(errBodyBytes) > 0 {
+			h.logger.Error("upstream returned error response",
+				zap.String("model", pctx.model),
+				zap.String("provider", cred.Provider),
+				zap.String("upstream_url", upstreamURL),
+				zap.Int("status", resp.StatusCode),
+				zap.ByteString("upstream_error_body", errBodyBytes),
+			)
+			// Forward headers then replay the already-read body to the client
+			for key, vals := range resp.Header {
+				for _, val := range vals {
+					c.Writer.Header().Add(key, val)
+				}
+			}
+			c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+			c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+			c.Writer.WriteHeader(resp.StatusCode)
+			c.Writer.Write(errBodyBytes) //nolint:errcheck
+			return resp.StatusCode, upstreamURL, nil
+		}
+	}
 
 	// Copy response headers
 	for key, vals := range resp.Header {
@@ -324,9 +421,9 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
 
 	c.Writer.WriteHeader(resp.StatusCode)
-	io.Copy(c.Writer, resp.Body)
+	io.Copy(c.Writer, resp.Body) //nolint:errcheck
 
-	return resp.StatusCode, nil
+	return resp.StatusCode, upstreamURL, nil
 }
 
 // findPoolByPrefix searches for a pool matching a model name prefix.

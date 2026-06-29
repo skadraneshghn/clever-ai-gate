@@ -186,23 +186,31 @@ func main() {
 }
 
 // initLogger creates a production-tuned zap logger that dual-writes to:
-//  1. os.Stdout — for container log aggregators (unchanged behaviour)
-//  2. logHub — which fans out to the daily rotating file AND live SSE clients
+//  1. os.Stdout — respects LOG_LEVEL for container log aggregators
+//  2. logHub — always captures Info level minimum regardless of LOG_LEVEL,
+//     so the daily rotating log file always contains the full request audit
+//     trail needed to diagnose API instability (e.g. Kilo Code 500 loops).
 //
-// The JSON encoder uses ISO 8601 timestamps so the frontend can parse them
-// without any additional transformation. Caller info is included so log lines
-// carry the source file/line — invaluable when debugging Kilo Code edge cases.
+// The JSON encoder uses ISO 8601 timestamps. Caller info is included so every
+// log line carries its source file and line number.
 func initLogger(level string, logHub *telemetry.LogHub) *zap.Logger {
-	var zapLevel zapcore.Level
+	var stdoutLevel zapcore.Level
 	switch level {
 	case "debug":
-		zapLevel = zapcore.DebugLevel
+		stdoutLevel = zapcore.DebugLevel
 	case "warn":
-		zapLevel = zapcore.WarnLevel
+		stdoutLevel = zapcore.WarnLevel
 	case "error":
-		zapLevel = zapcore.ErrorLevel
+		stdoutLevel = zapcore.ErrorLevel
 	default:
-		zapLevel = zapcore.InfoLevel
+		stdoutLevel = zapcore.InfoLevel
+	}
+
+	// The file always captures Debug when LOG_LEVEL=debug, but is floored at
+	// Info otherwise — never silenced below Info even in production.
+	fileLevel := stdoutLevel
+	if fileLevel > zapcore.InfoLevel {
+		fileLevel = zapcore.InfoLevel
 	}
 
 	encoderCfg := zap.NewProductionEncoderConfig()
@@ -211,18 +219,19 @@ func initLogger(level string, logHub *telemetry.LogHub) *zap.Logger {
 	encoderCfg.EncodeLevel = zapcore.LowercaseLevelEncoder
 	jsonEncoder := zapcore.NewJSONEncoder(encoderCfg)
 
-	// Core 1: stdout (for container log aggregators)
+	// Core 1: stdout — uses LOG_LEVEL so operators control console noise
 	stdoutCore := zapcore.NewCore(
 		jsonEncoder,
 		zapcore.Lock(os.Stdout),
-		zapLevel,
+		stdoutLevel,
 	)
 
 	// Core 2: LogHub (daily file + live SSE broadcast)
+	// Always floored at Info so request/response logs are always on disk.
 	hubCore := zapcore.NewCore(
 		jsonEncoder,
 		logHub,
-		zapLevel,
+		fileLevel,
 	)
 
 	core := zapcore.NewTee(stdoutCore, hubCore)
