@@ -317,13 +317,37 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestSt
 			return
 		}
 
-		// Retryable failure — log, penalize, and loop.
+		// Retryable failure — penalize, log, and decide whether to loop.
 		lastErrBody = errBody
 		cooldownDuration := cooldownForStatus(statusCode)
 
-		// Flaw B: Scale cooldown for single-key pools so one transient error
-		// does not black out the gateway for 10–30 seconds.
-		if pctx.pool.TotalCount == 1 {
+		isSingleKey := pctx.pool.TotalCount == 1
+
+		if statusCode == http.StatusTooManyRequests && isSingleKey {
+			// 429 on a single-key pool: the rate-limit window is typically 30–60s.
+			// Retrying within the same request is pointless — there is no other
+			// key to fall back to and the window will not reset in milliseconds.
+			// Penalize with the full duration and break out immediately so the
+			// client gets a clean response and Kilo Code can back off.
+			result.FromPool.PenalizeToken(result.Index, cooldownDuration)
+			requestID, _ := c.Get("request_id")
+			h.logger.Warn("rate-limited on single-key pool, aborting retries",
+				zap.String("request_id", fmt.Sprintf("%v", requestID)),
+				zap.String("model", pctx.model),
+				zap.String("provider", result.Credential.Provider),
+				zap.String("upstream_url", upstreamURL),
+				zap.String("tenant_id", pctx.tenantID),
+				zap.Int("status", statusCode),
+				zap.Duration("cooldown", cooldownDuration),
+				zap.Duration("elapsed", time.Since(requestStart)),
+			)
+			break // jump to the "all attempts exhausted" response path
+		}
+
+		// For transient server errors (500/502/503/504) on a single-key pool,
+		// shorten the cooldown so one cold-start doesn't black out the key for
+		// 10–30 seconds. A short retry actually makes sense here.
+		if isSingleKey {
 			cooldownDuration = 300 * time.Millisecond
 		}
 		result.FromPool.PenalizeToken(result.Index, cooldownDuration)
