@@ -578,12 +578,15 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 func translateOllamaResponse(data []byte) ([]byte, bool) {
 	var content string
 
-	// Try /api/chat shape first
-	if msgContent, _, _, err := jsonparser.Get(data, "message", "content"); err == nil {
-		content = string(msgContent)
-	} else if response, _, _, err := jsonparser.Get(data, "response"); err == nil {
+	// Try /api/chat shape first.
+	// Use GetString (not Get) to avoid double-escaping: Get returns raw JSON bytes
+	// where \n is still 2 bytes (`\` + `n`). GetString returns a Go string with
+	// actual characters (real newline, >, etc.) which json.Marshal then encodes correctly.
+	if msgContent, err := jsonparser.GetString(data, "message", "content"); err == nil {
+		content = msgContent
+	} else if response, err := jsonparser.GetString(data, "response"); err == nil {
 		// /api/generate shape
-		content = string(response)
+		content = response
 	} else {
 		// Not a recognised Ollama native response — let it pass through unchanged
 		return nil, false

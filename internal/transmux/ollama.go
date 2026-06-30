@@ -30,24 +30,30 @@ func NewOllamaTransmuxer() *OllamaTransmuxer {
 
 // TranslateChunk converts a native Ollama NDJSON chunk into an OpenAI-compatible
 // SSE data payload. It handles both /api/chat and /api/generate response shapes.
+//
+// IMPORTANT: We use jsonparser.GetString (not Get) for string content fields.
+// jsonparser.Get returns raw JSON-escaped bytes (e.g. `\n` as 2 bytes: `\` + `n`).
+// Passing those into buildDelta → escapeJSONString would double-escape them
+// (backslash becomes `\\`, so `\n` → `\\n`), causing the client to see literal
+// `\n` instead of actual newlines. GetString returns a properly unescaped Go
+// string which escapeJSONString then re-encodes correctly.
 func (t *OllamaTransmuxer) TranslateChunk(data []byte) ([]byte, error) {
 	// --- /api/chat response: { "message": { "content": "..." }, "done": false }
-	if content, _, _, err := jsonparser.Get(data, "message", "content"); err == nil {
+	if content, err := jsonparser.GetString(data, "message", "content"); err == nil {
 		done, _ := jsonparser.GetBoolean(data, "done")
 		finishReason := ""
 		if done {
-			// Try to get the done_reason for a proper finish_reason
 			if reason, err := jsonparser.GetString(data, "done_reason"); err == nil && reason != "" {
 				finishReason = reason
 			} else {
 				finishReason = "stop"
 			}
 		}
-		return buildDelta(content, false, finishReason), nil
+		return buildDelta([]byte(content), false, finishReason), nil
 	}
 
 	// --- /api/generate response: { "response": "...", "done": false }
-	if response, _, _, err := jsonparser.Get(data, "response"); err == nil {
+	if response, err := jsonparser.GetString(data, "response"); err == nil {
 		done, _ := jsonparser.GetBoolean(data, "done")
 		finishReason := ""
 		if done {
@@ -57,13 +63,12 @@ func (t *OllamaTransmuxer) TranslateChunk(data []byte) ([]byte, error) {
 				finishReason = "stop"
 			}
 		}
-		return buildDelta(response, false, finishReason), nil
+		return buildDelta([]byte(response), false, finishReason), nil
 	}
 
 	// --- Final "done" chunk with no content (usage-only) ---
 	done, _ := jsonparser.GetBoolean(data, "done")
 	if done {
-		// Check for token usage fields (eval_count, prompt_eval_count)
 		promptTokens, _ := jsonparser.GetInt(data, "prompt_eval_count")
 		completionTokens, _ := jsonparser.GetInt(data, "eval_count")
 		finishReason := "stop"
@@ -73,11 +78,9 @@ func (t *OllamaTransmuxer) TranslateChunk(data []byte) ([]byte, error) {
 		if promptTokens > 0 || completionTokens > 0 {
 			return buildUsageDelta(finishReason, int(promptTokens), int(completionTokens)), nil
 		}
-		// Emit a stop chunk with no content
 		return buildDelta([]byte{}, false, finishReason), nil
 	}
 
-	// Unknown shape — try to pass through as a raw empty delta to avoid breaking the stream
 	return nil, nil
 }
 
