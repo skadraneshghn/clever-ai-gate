@@ -111,8 +111,24 @@
     return { today, yesterday, older };
   });
 
-  // Load configuration from localStorage on mount
+  // Load configuration from backend/localStorage on mount
   onMount(async () => {
+    // Attempt to load keys from default config route (accessible only with Basic Auth credentials)
+    try {
+      const res = await fetch('/api/v1/playground/config');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.tenant_key) {
+          localStorage.setItem('cag_playground_api_key', data.tenant_key);
+        }
+        if (data.admin_key) {
+          localStorage.setItem('cag_admin_key', data.admin_key);
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to load default config from backend:', e);
+    }
+
     const savedKey = localStorage.getItem('cag_playground_api_key');
     if (savedKey) {
       statusHUD = 'Verifying...';

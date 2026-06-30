@@ -87,6 +87,32 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		playgroundGroup.GET("/playground/*any", func(c *gin.Context) {
 			c.Data(200, "text/html; charset=utf-8", indexContent)
 		})
+
+		// Config endpoint to return admin key and default tenant key to Basic Auth logged-in user
+		playgroundGroup.GET("/api/v1/playground/config", func(c *gin.Context) {
+			var tenantKey string
+			err := deps.DB.QueryRow(c.Request.Context(), `
+				SELECT api_key FROM tenants WHERE is_active = true ORDER BY created_at LIMIT 1
+			`).Scan(&tenantKey)
+			if err != nil {
+				// No active tenant exists, let's create a default one
+				tenantKey = "cag_default_tenant_key_salman_136517"
+				_, err = deps.DB.Exec(c.Request.Context(), `
+					INSERT INTO tenants (name, api_key, token_balance, rate_limit_rpm)
+					VALUES ($1, $2, $3, $4)
+					ON CONFLICT (api_key) DO NOTHING
+				`, "Default Tenant", tenantKey, 1000000000, 120)
+				if err != nil {
+					c.JSON(500, gin.H{"error": "failed to seed default tenant", "details": err.Error()})
+					return
+				}
+			}
+
+			c.JSON(200, gin.H{
+				"admin_key":  deps.Config.AdminAPIKey,
+				"tenant_key": tenantKey,
+			})
+		})
 	}
 
 	// --- Proxy routes (minimal middleware for maximum throughput) ---
