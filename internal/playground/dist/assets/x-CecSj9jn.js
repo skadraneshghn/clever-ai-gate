@@ -1,0 +1,1 @@
+import{f as e,p as t,u as n}from"./index-CJHas1yZ.js";var r=new Set([`$$slots`,`$$events`,`$$legacy`]);function i(i,a){let o=e(a,r),s=[[`path`,{d:`M18 6 6 18`}],[`path`,{d:`m6 6 12 12`}]];n(i,t({name:`x`},()=>o,{get iconNode(){return s}}))}export{i as t};

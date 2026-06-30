@@ -1,5 +1,9 @@
 <script>
   import { KeyRound, RefreshCw, Plus, Shield, AlertTriangle, Server, Pencil, Trash2, X } from '@lucide/svelte';
+  import Button from './components/Button.svelte';
+  import Input from './components/Input.svelte';
+  import Card from './components/Card.svelte';
+  import Modal from './components/Modal.svelte';
 
   let { 
     adminKey = $bindable(''), 
@@ -133,7 +137,6 @@
         base_url: autoDiscoverForm.base_url,
         weight: autoDiscoverForm.weight || 1
       };
-      // Include label for custom providers
       if (autoDiscoverForm.provider === 'custom' && autoDiscoverForm.label) {
         payload.label = autoDiscoverForm.label;
       }
@@ -251,109 +254,113 @@
   }
 </script>
 
-<header class="header flex items-center justify-between px-6 py-3 border-b shrink-0">
+<header class="header flex items-center justify-between px-6 py-4 border-b shrink-0">
   <div class="flex items-center gap-3">
-    <KeyRound size={18} class="text-[#f97316]" />
-    <span class="font-bold text-sm">Provider Credentials</span>
-    <span class="text-[10px] font-bold text-secondary uppercase">{providerCredentials.length} registered</span>
-  </div>
-  <div class="flex items-center gap-2">
+    <KeyRound size={20} class="text-[#f97316]" />
+    <span class="font-bold text-base">Provider Credentials</span>
     {#if adminKey.trim()}
-      <button class="log-action-btn log-btn-start" onclick={() => { loadCredentials(); addToast('info', 'Refreshing credentials...'); }}>
-        <RefreshCw size={12} />
-        Refresh
-      </button>
-      <button class="log-action-btn" style="border-color: rgba(249,115,22,0.4); color: #f97316; background: rgba(249,115,22,0.06);" onclick={openAddProviderModal}>
-        <Plus size={12} />
-        Add Provider
-      </button>
+      <span class="text-xs font-bold text-secondary bg-gray-500/10 border border-gray-500/20 px-2.5 py-0.5 rounded-full uppercase">{providerCredentials.length} registered</span>
     {/if}
   </div>
+  
+  {#if adminKey.trim()}
+    <div class="flex items-center gap-2">
+      <Button variant="secondary" size="sm" onclick={() => { loadCredentials(); addToast('info', 'Refreshing credentials...'); }}>
+        <RefreshCw size={14} />
+        Refresh
+      </Button>
+      <Button variant="primary" size="sm" onclick={openAddProviderModal}>
+        <Plus size={14} />
+        Add Provider
+      </Button>
+    </div>
+  {/if}
 </header>
 
 {#if !adminKey.trim()}
   <!-- Admin key prompt -->
   <div class="logs-key-prompt">
-    <div class="logs-key-card">
-      <Shield size={32} class="text-[#f97316] mb-3" />
-      <h2 class="font-bold text-base mb-1">Admin Key Required</h2>
-      <p class="text-xs mb-4">Enter your Admin API Key to manage provider credentials, pools, and API keys.</p>
-      <div class="flex gap-2 w-full max-w-sm">
-        <input
+    <Card variant="filled" padding="lg" class="logs-key-card">
+      <Shield size={40} class="text-[#f97316] mb-4" />
+      <h2 class="font-bold text-lg mb-2 text-primary">Admin Key Required</h2>
+      <p class="text-sm mb-6 text-secondary max-w-sm">Enter your Admin API Key to manage provider credentials, pools, and API keys.</p>
+      
+      <div class="flex flex-col gap-3 w-full max-w-sm">
+        <Input
           type="password"
-          class="input-box flex-grow p-2.5 rounded-lg border text-sm"
           placeholder="Enter Admin API Key..."
           bind:value={adminKey}
           onkeydown={(e) => { if (e.key === 'Enter') connectAdminKey(); }}
         />
-        <button class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold text-xs" onclick={connectAdminKey}>
+        <Button variant="primary" size="md" onclick={connectAdminKey}>
           Connect
-        </button>
+        </Button>
       </div>
+      
       {#if providerError}
-        <p class="text-red-500 text-xs mt-3">{providerError}</p>
+        <p class="text-red-500 text-sm font-semibold mt-4">{providerError}</p>
       {/if}
-    </div>
+    </Card>
   </div>
 {:else}
   <!-- Providers data grid -->
   <div class="providers-grid-wrap">
     {#if providerLoading}
       <div class="providers-loading">
-        <div class="animate-spin text-[#f97316]" style="font-size:24px;">⟳</div>
-        <p class="text-xs mt-2">Loading credentials...</p>
+        <div class="animate-spin text-[#f97316] text-xl">⟳</div>
+        <p class="text-sm mt-2 text-secondary">Loading credentials...</p>
       </div>
     {:else if providerError}
       <div class="providers-loading">
-        <AlertTriangle size={32} class="text-red-500 mb-2" />
-        <p class="text-red-500 text-xs">{providerError}</p>
-        <button class="mt-3 px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold text-xs" onclick={loadCredentials}>Retry</button>
+        <AlertTriangle size={40} class="text-red-500 mb-2" />
+        <p class="text-red-500 text-sm font-semibold">{providerError}</p>
+        <Button variant="primary" class="mt-4" onclick={loadCredentials}>Retry</Button>
       </div>
     {:else if providerCredentials.length === 0}
       <div class="providers-loading">
-        <Server size={40} class="opacity-20 mb-3" />
-        <p class="opacity-40 text-xs">No credentials registered yet.</p>
-        <button class="mt-4 px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold text-xs" onclick={openAddProviderModal}>
-          <span class="flex items-center gap-1.5"><Plus size={12} /> Add First Provider</span>
-        </button>
+        <Server size={48} class="opacity-20 mb-4" />
+        <p class="opacity-50 text-sm text-secondary">No credentials registered yet.</p>
+        <Button variant="primary" class="mt-4" onclick={openAddProviderModal}>
+          <Plus size={14} /> Add First Provider
+        </Button>
       </div>
     {:else}
       <div class="providers-table-container">
         <table class="providers-table">
           <thead>
             <tr>
-              <th>ID</th>
-              <th>Provider</th>
-              <th>Model Pattern</th>
-              <th>Base URL</th>
-              <th>Weight</th>
-              <th>Health</th>
-              <th>Key</th>
-              <th>Actions</th>
+              <th style="font-size: 11px;">ID</th>
+              <th style="font-size: 11px;">Provider</th>
+              <th style="font-size: 11px;">Model Pattern</th>
+              <th style="font-size: 11px;">Base URL</th>
+              <th style="font-size: 11px; text-align: center;">Weight</th>
+              <th style="font-size: 11px; text-align: center;">Health</th>
+              <th style="font-size: 11px;">Key</th>
+              <th style="font-size: 11px; text-align: center;">Actions</th>
             </tr>
           </thead>
           <tbody>
             {#each providerCredentials as cred (cred.id)}
               <tr class="provider-row">
-                <td class="font-mono text-[10px] opacity-60">#{cred.id}</td>
+                <td class="font-mono text-xs opacity-60">#{cred.id}</td>
                 <td>
                   <span class="provider-badge {providerBadgeClass(cred.provider)}">{cred.provider}</span>
                 </td>
-                <td class="font-mono text-xs">{cred.model_pattern || '—'}</td>
-                <td class="text-xs truncate" style="max-width: 200px;" title={cred.base_url}>{cred.base_url}</td>
-                <td class="text-center font-mono text-xs">{cred.weight}</td>
+                <td class="font-mono text-sm">{cred.model_pattern || '—'}</td>
+                <td class="text-sm truncate" style="max-width: 250px;" title={cred.base_url}>{cred.base_url}</td>
+                <td class="text-center font-mono text-sm">{cred.weight}</td>
                 <td class="text-center">
                   <span class="health-dot {cred.is_healthy ? 'healthy' : 'unhealthy'}" title={cred.is_healthy ? 'Healthy' : (cred.last_error || 'Unhealthy')}></span>
                 </td>
-                <td class="font-mono text-[10px] opacity-50">{cred.key_mask}</td>
+                <td class="font-mono text-xs opacity-50">{cred.key_mask}</td>
                 <td>
-                  <div class="flex items-center gap-1">
-                    <button class="icon-button" onclick={() => openEditModal(cred)} title="Edit credential">
-                      <Pencil size={13} />
-                    </button>
-                    <button class="icon-button" onclick={() => confirmDelete(cred.id)} title="Delete credential">
-                      <Trash2 size={13} class="text-red-500" />
-                    </button>
+                  <div class="flex items-center justify-center gap-1">
+                    <Button variant="ghost" size="sm" onclick={() => openEditModal(cred)} title="Edit credential">
+                      <Pencil size={15} />
+                    </Button>
+                    <Button variant="ghost" size="sm" onclick={() => confirmDelete(cred.id)} title="Delete credential">
+                      <Trash2 size={15} class="text-red-500" />
+                    </Button>
                   </div>
                 </td>
               </tr>
@@ -365,206 +372,203 @@
   </div>
 {/if}
 
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-<!-- ADD PROVIDER MODAL                                                      -->
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-{#if showAddProviderModal}
-  <div class="modal-backdrop fixed inset-0 flex items-center justify-center p-4 z-50 bg-black-trans backdrop-blur-sm">
-    <div class="modal-content w-full max-w-md rounded-xl border p-6 shadow-2xl relative">
-      <div class="flex items-center justify-between mb-4">
-        <h3 class="font-bold text-lg">Add Provider</h3>
-        <button class="icon-button" onclick={() => showAddProviderModal = false}><X size={16} /></button>
-      </div>
+<!-- ─── ADD PROVIDER MODAL ────────────────────────────────────────────────── -->
+<Modal bind:show={showAddProviderModal}>
+  {#snippet header()}
+    <div class="flex border-b text-xs w-full">
+      <button 
+        class="tab-btn px-6 py-3 flex-grow font-semibold text-center {addProviderTab === 'standard' ? 'active' : ''}" 
+        onclick={() => addProviderTab = 'standard'}
+      >
+        Standard Provider
+      </button>
+      <button 
+        class="tab-btn px-6 py-3 flex-grow font-semibold text-center {addProviderTab === 'autodiscovery' ? 'active' : ''}" 
+        onclick={() => addProviderTab = 'autodiscovery'}
+      >
+        Auto-Discovery
+      </button>
+    </div>
+  {/snippet}
 
-      <!-- Tabs -->
-      <div class="flex border-b text-[10px] mb-4">
-        <button class="tab-btn px-4 py-2 flex-grow font-semibold text-center {addProviderTab === 'standard' ? 'active' : ''}" onclick={() => addProviderTab = 'standard'}>
-          Standard Provider
-        </button>
-        <button class="tab-btn px-4 py-2 flex-grow font-semibold text-center {addProviderTab === 'autodiscovery' ? 'active' : ''}" onclick={() => addProviderTab = 'autodiscovery'}>
-          Auto-Discovery
-        </button>
-      </div>
+  {#if addProviderTab === 'standard'}
+    <div class="flex flex-col gap-4">
+      <p class="text-sm text-secondary leading-relaxed">Add a single credential to an existing model pool.</p>
+      
+      <Input type="select" label="Pool" bind:value={addProviderForm.pool_id} placeholder="Select a pool...">
+        {#each providerPools as pool}
+          <option value={pool.id}>{pool.model_pattern} (ID: {pool.id})</option>
+        {/each}
+      </Input>
 
+      <Input type="select" label="Provider" bind:value={addProviderForm.provider}>
+        <option value="openai">OpenAI</option>
+        <option value="anthropic">Anthropic</option>
+        <option value="nvidia">NVIDIA</option>
+        <option value="ollama">Ollama</option>
+        <option value="google">Google</option>
+        <option value="custom">Custom</option>
+      </Input>
+
+      <Input type="password" label="API Key" placeholder="sk-..." bind:value={addProviderForm.api_key} />
+      
+      <Input type="text" label="Base URL" placeholder="https://api.openai.com" bind:value={addProviderForm.base_url} />
+      
+      <Input type="number" label="Weight" min="1" bind:value={addProviderForm.weight} />
+    </div>
+  {:else}
+    <div class="flex flex-col gap-4">
+      <p class="text-sm text-secondary leading-relaxed">Auto-discover all models from an NVIDIA NIM, Ollama Cloud, or any OpenAI-compatible provider. Pools are created automatically.</p>
+      
+      <Input type="select" label="Provider Type" bind:value={autoDiscoverForm.provider} onchange={() => {
+        if (autoDiscoverForm.provider === 'nvidia') {
+          autoDiscoverForm.base_url = 'https://integrate.api.nvidia.com/v1';
+        } else if (autoDiscoverForm.provider === 'ollama') {
+          autoDiscoverForm.base_url = 'https://ollama.com';
+        } else {
+          autoDiscoverForm.base_url = '';
+        }
+        autoDiscoverForm.label = '';
+      }}>
+        <option value="nvidia">NVIDIA NIM</option>
+        <option value="ollama">Ollama Cloud</option>
+        <option value="custom">OpenAI-Compatible (Custom)</option>
+      </Input>
+
+      {#if autoDiscoverForm.provider === 'custom'}
+        <Input type="text" label="Label (optional)" placeholder="e.g. Together AI, DeepInfra" bind:value={autoDiscoverForm.label} />
+      {/if}
+
+      <Input 
+        type="password" 
+        label="API Key" 
+        placeholder={autoDiscoverForm.provider === 'nvidia' ? 'nvapi-...' : autoDiscoverForm.provider === 'ollama' ? 'Ollama Cloud API key...' : 'Bearer API key...'} 
+        bind:value={autoDiscoverForm.api_key} 
+      />
+      
+      <Input type="text" label="Base URL" placeholder={autoDiscoverForm.provider === 'custom' ? 'https://api.together.xyz/v1' : ''} bind:value={autoDiscoverForm.base_url} />
+      
+      <Input type="number" label="Weight" min="1" bind:value={autoDiscoverForm.weight} />
+    </div>
+  {/if}
+
+  {#snippet footer()}
+    <div class="flex justify-end gap-3 w-full">
+      <Button variant="outline" onclick={() => showAddProviderModal = false}>Cancel</Button>
       {#if addProviderTab === 'standard'}
-        <p class="text-xs mb-4">Add a single credential to an existing model pool.</p>
-        <div class="flex flex-col gap-3 mb-5">
-          <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="pool-select">Pool</label>
-            <select id="pool-select" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={addProviderForm.pool_id}>
-              <option value="">Select a pool...</option>
-              {#each providerPools as pool}
-                <option value={pool.id}>{pool.model_pattern} (ID: {pool.id})</option>
-              {/each}
-            </select>
-          </div>
-          <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="provider-select">Provider</label>
-            <select id="provider-select" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={addProviderForm.provider}>
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="nvidia">NVIDIA</option>
-              <option value="ollama">Ollama</option>
-              <option value="google">Google</option>
-              <option value="custom">Custom</option>
-            </select>
-          </div>
-          <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="api-key-input">API Key</label>
-            <input type="password" id="api-key-input" class="input-box w-full p-2.5 rounded-lg border text-sm" placeholder="sk-..." bind:value={addProviderForm.api_key} />
-          </div>
-          <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="base-url-input">Base URL</label>
-            <input type="text" id="base-url-input" class="input-box w-full p-2.5 rounded-lg border text-sm" placeholder="https://api.openai.com" bind:value={addProviderForm.base_url} />
-          </div>
-          <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="weight-input">Weight</label>
-            <input type="number" id="weight-input" class="input-box w-full p-2.5 rounded-lg border text-sm" min="1" bind:value={addProviderForm.weight} />
-          </div>
-        </div>
-        <div class="flex justify-end gap-2 text-xs">
-          <button class="px-4 py-2 rounded-lg border" onclick={() => showAddProviderModal = false}>Cancel</button>
-          <button class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold flex items-center gap-1.5 min-w-[120px] justify-center" onclick={createCredential} disabled={addProviderLoading || !addProviderForm.pool_id}>
-            {#if addProviderLoading}
-              <span class="animate-spin">🔄</span> Creating...
-            {:else}
-              Create Credential
-            {/if}
-          </button>
-        </div>
-      {:else}
-        <p class="text-xs mb-4">Auto-discover all models from an NVIDIA NIM, Ollama Cloud, or any OpenAI-compatible provider. Pools are created automatically.</p>
-        <div class="flex flex-col gap-3 mb-5">
-          <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="auto-provider-select">Provider Type</label>
-            <select id="auto-provider-select" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={autoDiscoverForm.provider} onchange={() => {
-              if (autoDiscoverForm.provider === 'nvidia') {
-                autoDiscoverForm.base_url = 'https://integrate.api.nvidia.com/v1';
-              } else if (autoDiscoverForm.provider === 'ollama') {
-                autoDiscoverForm.base_url = 'https://ollama.com';
-              } else {
-                autoDiscoverForm.base_url = '';
-              }
-              autoDiscoverForm.label = '';
-            }}>
-              <option value="nvidia">NVIDIA NIM</option>
-              <option value="ollama">Ollama Cloud</option>
-              <option value="custom">OpenAI-Compatible (Custom)</option>
-            </select>
-          </div>
-          {#if autoDiscoverForm.provider === 'custom'}
-            <div class="form-group flex flex-col gap-1">
-              <label class="text-[10px] font-bold uppercase tracking-wider" for="auto-label-input">Label <span class="opacity-50">(optional — e.g. "Together AI", "DeepInfra")</span></label>
-              <input type="text" id="auto-label-input" class="input-box w-full p-2.5 rounded-lg border text-sm" placeholder="e.g. together-ai, deepinfra, vllm" bind:value={autoDiscoverForm.label} />
-            </div>
+        <Button variant="primary" onclick={createCredential} disabled={addProviderLoading || !addProviderForm.pool_id}>
+          {#if addProviderLoading}
+            <span class="animate-spin">⟳</span> Creating...
+          {:else}
+            Create Credential
           {/if}
-          <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="auto-api-key-input">API Key {autoDiscoverForm.provider === 'ollama' ? '(required for cloud)' : ''}</label>
-            <input type="password" id="auto-api-key-input" class="input-box w-full p-2.5 rounded-lg border text-sm" placeholder={autoDiscoverForm.provider === 'nvidia' ? 'nvapi-...' : autoDiscoverForm.provider === 'ollama' ? 'Ollama Cloud API key...' : 'Bearer API key...'} bind:value={autoDiscoverForm.api_key} />
-          </div>
-          <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="auto-base-url-input">Base URL</label>
-            <input type="text" id="auto-base-url-input" class="input-box w-full p-2.5 rounded-lg border text-sm" placeholder={autoDiscoverForm.provider === 'custom' ? 'https://api.together.xyz/v1' : ''} bind:value={autoDiscoverForm.base_url} />
-          </div>
-          <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="auto-weight-input">Weight</label>
-            <input type="number" id="auto-weight-input" class="input-box w-full p-2.5 rounded-lg border text-sm" min="1" bind:value={autoDiscoverForm.weight} />
-          </div>
-        </div>
-        <div class="flex justify-end gap-2 text-xs">
-          <button class="px-4 py-2 rounded-lg border" onclick={() => showAddProviderModal = false}>Cancel</button>
-          <button class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold flex items-center gap-1.5 min-w-[120px] justify-center" onclick={autoDiscoverProvider} disabled={autoDiscoverLoading}>
-            {#if autoDiscoverLoading}
-              <span class="animate-spin">🔄</span> Discovering...
-            {:else}
-              Discover & Register
-            {/if}
-          </button>
-        </div>
+        </Button>
+      {:else}
+        <Button variant="primary" onclick={autoDiscoverProvider} disabled={autoDiscoverLoading}>
+          {#if autoDiscoverLoading}
+            <span class="animate-spin">⟳</span> Discovering...
+          {:else}
+            Discover & Register
+          {/if}
+        </Button>
       {/if}
     </div>
-  </div>
-{/if}
+  {/snippet}
+</Modal>
 
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-<!-- EDIT CREDENTIAL MODAL                                                   -->
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-{#if showEditModal}
-  <div class="modal-backdrop fixed inset-0 flex items-center justify-center p-4 z-50 bg-black-trans backdrop-blur-sm">
-    <div class="modal-content w-full max-w-sm rounded-xl border p-6 shadow-2xl relative">
-      <div class="flex items-center justify-between mb-4">
-        <h3 class="font-bold text-lg">Edit Credential #{editForm.id}</h3>
-        <button class="icon-button" onclick={() => showEditModal = false}><X size={16} /></button>
+<!-- ─── EDIT CREDENTIAL MODAL ──────────────────────────────────────────────── -->
+<Modal bind:show={showEditModal} title="Edit Credential">
+  <div class="flex flex-col gap-4">
+    <Input type="select" label="Provider" bind:value={editForm.provider}>
+      <option value="openai">OpenAI</option>
+      <option value="anthropic">Anthropic</option>
+      <option value="nvidia">NVIDIA</option>
+      <option value="ollama">Ollama</option>
+      <option value="google">Google</option>
+      <option value="custom">Custom</option>
+    </Input>
+
+    <Input type="password" label="New API Key" placeholder="Leave blank to keep current key" bind:value={editForm.api_key} />
+    
+    <Input type="text" label="Base URL" bind:value={editForm.base_url} />
+    
+    <div class="flex gap-4 items-end">
+      <div class="flex-grow">
+        <Input type="number" label="Weight" min="1" bind:value={editForm.weight} />
       </div>
-
-      <div class="flex flex-col gap-3 mb-5">
-        <div class="form-group flex flex-col gap-1">
-          <label class="text-[10px] font-bold uppercase tracking-wider" for="edit-provider-select">Provider</label>
-          <select id="edit-provider-select" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={editForm.provider}>
-            <option value="openai">OpenAI</option>
-            <option value="anthropic">Anthropic</option>
-            <option value="nvidia">NVIDIA</option>
-            <option value="ollama">Ollama</option>
-            <option value="google">Google</option>
-            <option value="custom">Custom</option>
-          </select>
-        </div>
-        <div class="form-group flex flex-col gap-1">
-          <label class="text-[10px] font-bold uppercase tracking-wider" for="edit-api-key-input">New API Key <span class="opacity-50">(leave blank to keep current)</span></label>
-          <input type="password" id="edit-api-key-input" class="input-box w-full p-2.5 rounded-lg border text-sm" placeholder="Leave blank to keep current key" bind:value={editForm.api_key} />
-        </div>
-        <div class="form-group flex flex-col gap-1">
-          <label class="text-[10px] font-bold uppercase tracking-wider" for="edit-base-url-input">Base URL</label>
-          <input type="text" id="edit-base-url-input" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={editForm.base_url} />
-        </div>
-        <div class="flex gap-3">
-          <div class="form-group flex flex-col gap-1 flex-grow">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="edit-weight-input">Weight</label>
-            <input type="number" id="edit-weight-input" class="input-box w-full p-2.5 rounded-lg border text-sm" min="1" bind:value={editForm.weight} />
-          </div>
-          <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="edit-healthy-toggle">Healthy</label>
-            <label class="toggle-switch mt-1" id="edit-healthy-toggle">
-              <input type="checkbox" bind:checked={editForm.is_healthy} />
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
-        </div>
-      </div>
-
-      <div class="flex justify-end gap-2 text-xs">
-        <button class="px-4 py-2 rounded-lg border" onclick={() => showEditModal = false}>Cancel</button>
-        <button class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold flex items-center gap-1.5 min-w-[120px] justify-center" onclick={updateCredential} disabled={editLoading}>
-          {#if editLoading}
-            <span class="animate-spin">🔄</span> Saving...
-          {:else}
-            Save Changes
-          {/if}
-        </button>
+      <div class="flex flex-col gap-2 shrink-0">
+        <span class="text-xs font-bold uppercase tracking-wider text-secondary">Healthy</span>
+        <label class="toggle-switch" style="margin-bottom: 9px;">
+          <input type="checkbox" bind:checked={editForm.is_healthy} />
+          <span class="toggle-slider"></span>
+        </label>
       </div>
     </div>
   </div>
-{/if}
 
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-<!-- DELETE CONFIRMATION DIALOG                                              -->
-<!-- ═══════════════════════════════════════════════════════════════════════ -->
-{#if showDeleteConfirm}
-  <div class="modal-backdrop fixed inset-0 flex items-center justify-center p-4 z-50 bg-black-trans backdrop-blur-sm">
-    <div class="modal-content w-full max-w-xs rounded-xl border p-6 shadow-2xl relative text-center">
-      <AlertTriangle size={32} class="text-red-500 mx-auto mb-3" />
-      <h3 class="font-bold text-base mb-2">Delete Credential?</h3>
-      <p class="text-xs mb-5 opacity-75">This action is permanent and cannot be undone. The provider key will be removed from routing.</p>
-      <div class="flex justify-center gap-2 text-xs">
-        <button class="px-4 py-2 rounded-lg border" onclick={() => { showDeleteConfirm = false; deleteTargetId = null; }}>Cancel</button>
-        <button class="px-4 py-2 rounded-lg text-white bg-red-500 font-semibold flex items-center gap-1.5 min-w-[100px] justify-center" style="background-color: #ef4444;" onclick={deleteCredentialById} disabled={deleteLoading}>
-          {#if deleteLoading}
-            <span class="animate-spin">🔄</span>
-          {:else}
-            Delete
-          {/if}
-        </button>
-      </div>
+  {#snippet footer()}
+    <div class="flex justify-end gap-3 w-full">
+      <Button variant="outline" onclick={() => showEditModal = false}>Cancel</Button>
+      <Button variant="primary" onclick={updateCredential} disabled={editLoading}>
+        {#if editLoading}
+          <span class="animate-spin">⟳</span> Saving...
+        {:else}
+          Save Changes
+        {/if}
+      </Button>
     </div>
+  {/snippet}
+</Modal>
+
+<!-- ─── DELETE CONFIRMATION DIALOG ─────────────────────────────────────────── -->
+<Modal bind:show={showDeleteConfirm} title="Delete Credential?">
+  <div class="flex flex-col items-center gap-4 text-center">
+    <AlertTriangle size={48} class="text-red-500 mb-2" />
+    <p class="text-sm text-secondary">
+      This credential will be removed from gateway routing immediately. Traffic will be routed to other healthy keys in the pool.
+    </p>
+    <p class="text-xs text-red-500 font-bold">This action is permanent and cannot be undone.</p>
   </div>
-{/if}
+
+  {#snippet footer()}
+    <div class="flex justify-center gap-3 w-full">
+      <Button variant="outline" onclick={() => { showDeleteConfirm = false; deleteTargetId = null; }}>Cancel</Button>
+      <Button variant="danger" onclick={deleteCredentialById} disabled={deleteLoading}>
+        {#if deleteLoading}
+          <span class="animate-spin">⟳</span>
+        {:else}
+          Delete
+        {/if}
+      </Button>
+    </div>
+  {/snippet}
+</Modal>
+
+<style>
+  .tab-btn {
+    border: none;
+    color: var(--text-secondary);
+    background: transparent;
+    transition: all 0.2s;
+    font-weight: 600;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+  .tab-btn.active {
+    color: #f97316;
+    border-bottom: 2px solid #f97316;
+  }
+
+  .providers-table th {
+    padding: 14px 18px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 700;
+    color: var(--text-secondary);
+    border-bottom: 2px solid var(--border-color);
+  }
+  .providers-table td {
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border-color);
+  }
+</style>

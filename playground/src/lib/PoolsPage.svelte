@@ -3,6 +3,10 @@
     Cpu, Plus, RefreshCw, Shield, AlertTriangle, Trash2, Pencil, X, Sparkles,
     ArrowLeft, Search, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Heart
   } from '@lucide/svelte';
+  import Button from './components/Button.svelte';
+  import Input from './components/Input.svelte';
+  import Card from './components/Card.svelte';
+  import Modal from './components/Modal.svelte';
 
   // Capability badge config — colour + label for each flag
   const CAPABILITY_BADGES = {
@@ -341,40 +345,42 @@
   }
 </script>
 
-<header class="header flex items-center justify-between px-6 py-3 border-b shrink-0">
+<header class="header flex items-center justify-between px-6 py-4 border-b shrink-0">
   <div class="flex items-center gap-3">
     {#if selectedPool}
-      <button class="icon-button" onclick={() => { selectedPool = null; loadPools(); }} title="Back to pools list">
+      <Button variant="ghost" size="sm" onclick={() => { selectedPool = null; loadPools(); }} title="Back to pools list">
         <ArrowLeft size={16} />
-      </button>
-      <Cpu size={18} class="text-[#f97316]" />
-      <span class="font-bold text-sm">Pool Details: <span class="text-[#f97316] font-mono">{selectedPool.model_pattern}</span></span>
+      </Button>
+      <Cpu size={20} class="text-[#f97316]" />
+      <span class="font-bold text-base">Pool Details: <span class="text-[#f97316] font-mono">{selectedPool.model_pattern}</span></span>
     {:else}
-      <Cpu size={18} class="text-[#f97316]" />
-      <span class="font-bold text-sm">Model Routing Pools</span>
-      <span class="text-[10px] font-bold text-secondary uppercase">{pools.length} pools</span>
+      <Cpu size={20} class="text-[#f97316]" />
+      <span class="font-bold text-base">Model Routing Pools</span>
+      {#if adminKey.trim()}
+        <span class="text-xs font-bold text-secondary bg-gray-500/10 border border-gray-500/20 px-2.5 py-0.5 rounded-full uppercase">{pools.length} pools</span>
+      {/if}
     {/if}
   </div>
   <div class="flex items-center gap-2">
     {#if adminKey.trim()}
       {#if selectedPool}
-        <button class="log-action-btn log-btn-start" onclick={() => { loadPoolDetails(selectedPool.id); loadPoolLogs(selectedPool.id); addToast('success', 'Refreshed details and history logs'); }}>
-          <RefreshCw size={12} />
+        <Button variant="secondary" size="sm" onclick={() => { loadPoolDetails(selectedPool.id); loadPoolLogs(selectedPool.id); addToast('success', 'Refreshed details and history logs'); }}>
+          <RefreshCw size={14} />
           Refresh Details
-        </button>
+        </Button>
       {:else}
-        <button class="log-action-btn" style="border-color: rgba(167,139,250,0.4); color: #a78bfa; background: rgba(167,139,250,0.06);" onclick={() => { loadPools(); addToast('info', 'Refreshing capabilities...'); }} title="Re-classify all model capabilities">
-          <Sparkles size={12} />
+        <Button variant="secondary" size="sm" onclick={() => { loadPools(); addToast('info', 'Refreshing capabilities...'); }} title="Re-classify all model capabilities">
+          <Sparkles size={14} />
           Refresh Capabilities
-        </button>
-        <button class="log-action-btn log-btn-start" onclick={() => { loadPools(); addToast('info', 'Refreshing pools list...'); }}>
-          <RefreshCw size={12} />
+        </Button>
+        <Button variant="secondary" size="sm" onclick={() => { loadPools(); addToast('info', 'Refreshing pools list...'); }}>
+          <RefreshCw size={14} />
           Refresh
-        </button>
-        <button class="log-action-btn" style="border-color: rgba(249,115,22,0.4); color: #f97316; background: rgba(249,115,22,0.06);" onclick={openAddModal}>
-          <Plus size={12} />
+        </Button>
+        <Button variant="primary" size="sm" onclick={openAddModal}>
+          <Plus size={14} />
           Create Pool
-        </button>
+        </Button>
       {/if}
     {/if}
   </div>
@@ -383,42 +389,41 @@
 {#if !adminKey.trim()}
   <!-- Admin key prompt -->
   <div class="logs-key-prompt">
-    <div class="logs-key-card">
-      <Shield size={32} class="text-[#f97316] mb-3" />
-      <h2 class="font-bold text-base mb-1">Admin Key Required</h2>
-      <p class="text-xs mb-4">Enter your Admin API Key to manage model routing pools, load-balancing strategy patterns, and fallback systems.</p>
-      <div class="flex gap-2 w-full max-w-sm">
-        <input
+    <Card variant="filled" padding="lg" class="logs-key-card">
+      <Shield size={40} class="text-[#f97316] mb-4" />
+      <h2 class="font-bold text-lg mb-2 text-primary">Admin Key Required</h2>
+      <p class="text-sm mb-6 text-secondary max-w-sm">Enter your Admin API Key to manage model routing pools, load-balancing strategy patterns, and fallback systems.</p>
+      <div class="flex flex-col gap-3 w-full max-w-sm">
+        <Input
           type="password"
-          class="input-box flex-grow p-2.5 rounded-lg border text-sm"
           placeholder="Enter Admin API Key..."
           bind:value={adminKey}
           onkeydown={(e) => { if (e.key === 'Enter') connectAdminKey(); }}
         />
-        <button class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold text-xs" onclick={connectAdminKey}>
+        <Button variant="primary" size="md" onclick={connectAdminKey}>
           Connect
-        </button>
+        </Button>
       </div>
       {#if error}
-        <p class="text-red-500 text-xs mt-3">{error}</p>
+        <p class="text-red-500 text-sm font-semibold mt-4">{error}</p>
       {/if}
-    </div>
+    </Card>
   </div>
 {:else if selectedPool}
   <!-- POOL DETAILS & LOGS PAGE VIEW -->
   <div class="detail-page-container flex flex-col gap-6 p-6 overflow-y-auto w-full h-full">
     
     <!-- Row 1: Credentials / Pool Members Card -->
-    <div class="glass-card rounded-xl border p-5 flex flex-col gap-4">
-      <div class="flex items-center justify-between">
+    <Card variant="filled" padding="lg" class="glass-card">
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
         <div class="flex flex-col">
-          <h3 class="font-bold text-sm text-primary">Active Members ({poolDetails?.credentials?.length || 0})</h3>
-          <p class="text-[10px] text-secondary">Individual keys assigned to this routing pool. Strategy: <span class="font-bold text-[#f97316]">{selectedPool.strategy}</span></p>
+          <h3 class="font-bold text-base text-primary">Active Members ({poolDetails?.credentials?.length || 0})</h3>
+          <p class="text-xs text-secondary mt-0.5">Individual keys assigned to this routing pool. Strategy: <span class="font-bold text-[#f97316]">{selectedPool.strategy}</span></p>
         </div>
-        <div class="flex gap-1.5">
+        <div class="flex flex-wrap gap-1.5">
           {#each capabilityKeys(selectedPool.capabilities) as key}
             {@const badge = CAPABILITY_BADGES[key]}
-            <span style="display:inline-block; padding:1px 6px; border-radius:4px; font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; color:{badge.color}; background:{badge.bg}; border:1px solid {badge.border};">
+            <span style="display:inline-block; padding:3px 8px; border-radius:6px; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; color:{badge.color}; background:{badge.bg}; border:1px solid {badge.border};">
               {badge.label}
             </span>
           {/each}
@@ -426,32 +431,30 @@
       </div>
 
       {#if !poolDetails}
-        <div class="flex items-center justify-center py-6 text-xs text-secondary opacity-60">
-          <span class="animate-spin mr-2">🔄</span> Fetching pool keys...
+        <div class="flex items-center justify-center py-8 text-sm text-secondary opacity-60">
+          <span class="animate-spin mr-2">⟳</span> Fetching pool keys...
         </div>
       {:else if poolDetails.credentials?.length === 0}
-        <div class="flex flex-col items-center justify-center py-8 text-center border-2 border-dashed border-[var(--border-color)] rounded-lg">
-          <Cpu size={24} class="opacity-20 mb-2" />
-          <p class="text-xs font-semibold opacity-50">No API keys registered for this pool.</p>
-          <p class="text-[10px] text-secondary mt-1">Visit the "Credentials" tab to link keys to pool ID #{selectedPool.id}.</p>
+        <div class="flex flex-col items-center justify-center py-10 text-center border-2 border-dashed border-[var(--border-color)] rounded-xl">
+          <Cpu size={32} class="opacity-20 mb-3" />
+          <p class="text-sm font-semibold opacity-60">No API keys registered for this pool.</p>
+          <p class="text-xs text-secondary mt-1 max-w-xs">Visit the "Credentials" tab to link API keys to pool ID #{selectedPool.id}.</p>
         </div>
       {:else}
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {#each poolDetails.credentials as cred}
-            <div class="member-card rounded-lg border p-4 flex flex-col gap-2 relative bg-[var(--sidebar-bg)] hover:border-[#f97316] transition-all">
-              <div class="flex items-center justify-between">
-                <span class="provider-badge text-[10px] font-bold py-0.5 px-2 rounded {cred.provider === 'openai' ? 'badge-openai' : cred.provider === 'nvidia' ? 'badge-nvidia' : 'badge-default'}">
+            <Card variant="filled" padding="sm" class="member-card relative hover:border-[#f97316] transition-all">
+              <div class="flex items-center justify-between gap-4 mb-2">
+                <span class="provider-badge text-xs font-bold py-1 px-2.5 rounded-lg {cred.provider === 'openai' ? 'badge-openai' : cred.provider === 'nvidia' ? 'badge-nvidia' : 'badge-default'}">
                   {cred.provider}
                 </span>
                 
-                <div class="flex items-center gap-2">
-                  <!-- Health indicator dot -->
+                <div class="flex items-center gap-3">
                   <span 
                     class="health-dot {cred.is_healthy ? 'pulse-healthy' : 'health-unhealthy'}" 
                     title={cred.is_healthy ? 'Key status: Healthy' : `Unhealthy check: ${cred.last_error || 'No message'}`}
                   ></span>
                   
-                  <!-- Switch toggle -->
                   <label class="toggle-switch" title="Manually enable/disable key">
                     <input 
                       type="checkbox" 
@@ -464,228 +467,221 @@
               </div>
 
               <!-- Base URL and Weight -->
-              <div class="flex flex-col gap-0.5 mt-1 font-mono text-[10px] text-secondary">
-                <div class="truncate">Base URL: <span class="text-primary font-medium">{cred.base_url}</span></div>
-                <div>Routing Weight: <span class="text-primary font-bold">{cred.weight}</span></div>
+              <div class="flex flex-col gap-1 mt-2 font-mono text-xs text-secondary">
+                <div class="truncate">Base: <span class="text-primary font-medium">{cred.base_url}</span></div>
+                <div>Weight: <span class="text-primary font-bold">{cred.weight}</span></div>
               </div>
 
               <!-- Last Error Message if unhealthy -->
               {#if !cred.is_healthy && cred.last_error}
-                <div class="text-[10px] text-red-500 bg-red-500/10 border border-red-500/20 p-2 rounded leading-relaxed mt-1 flex items-start gap-1">
-                  <AlertTriangle size={12} class="shrink-0 mt-0.5" />
+                <div class="text-xs text-red-500 bg-red-500/10 border border-red-500/20 p-2.5 rounded-lg leading-relaxed mt-2.5 flex items-start gap-1.5">
+                  <AlertTriangle size={14} class="shrink-0 mt-0.5" />
                   <span class="break-all">{cred.last_error}</span>
                 </div>
               {/if}
 
-              <!-- Test health buttons -->
-              <div class="flex justify-end mt-2 pt-2 border-t border-[var(--border-color)]">
-                <button 
-                  class="test-health-btn flex items-center gap-1.5 text-[10px] font-bold text-[#f97316] py-1 px-2.5 rounded border border-[#f97316]/20 bg-[#f97316]/5 hover:bg-[#f97316]/15 transition-all"
+              <!-- Test health button -->
+              <div class="flex justify-end mt-3 pt-3 border-t border-[var(--border-color)]">
+                <Button 
+                  variant="outline" 
+                  size="sm"
                   onclick={() => testCredential(cred)}
                   disabled={testingCredId === cred.id}
                 >
                   {#if testingCredId === cred.id}
-                    <span class="animate-spin text-[10px]">⟳</span> Testing
+                    <span class="animate-spin text-xs">⟳</span> Testing
                   {:else}
-                    <Heart size={10} /> Test Health
+                    <Heart size={12} /> Test Health
                   {/if}
-                </button>
+                </Button>
               </div>
-            </div>
+            </Card>
           {/each}
         </div>
       {/if}
-    </div>
+    </Card>
 
     <!-- Row 2: Logs and History Viewer -->
-    <div class="glass-card rounded-xl border p-5 flex flex-col gap-4">
-      <div class="flex flex-col gap-1">
-        <h3 class="font-bold text-sm text-primary">Pool Request History & Telemetry</h3>
-        <p class="text-[10px] text-secondary">Audit and monitor incoming calls routed to this model pool. Features full-text semantic visualizer.</p>
+    <Card variant="filled" padding="lg" class="glass-card">
+      <div class="flex flex-col gap-1 mb-4">
+        <h3 class="font-bold text-base text-primary">Pool Request History & Telemetry</h3>
+        <p class="text-xs text-secondary">Audit and monitor incoming calls routed to this model pool. Features full-text semantic visualizer.</p>
       </div>
 
       <!-- Filters Toolbar -->
-      <div class="grid grid-cols-1 md:grid-cols-4 gap-3 bg-[var(--sidebar-bg)] p-3 border rounded-lg">
-        <div class="flex flex-col gap-1">
-          <label class="text-[9px] font-bold uppercase tracking-wider text-secondary" for="filter-tenant-input">Tenant Filter</label>
-          <input 
-            type="text" 
-            id="filter-tenant-input"
-            class="input-box p-2 text-xs rounded border w-full" 
-            placeholder="Tenant API key or UUID..."
-            bind:value={logsFilters.tenant_id}
-            onchange={handleFilterChange}
-          />
-        </div>
-        <div class="flex flex-col gap-1">
-          <label class="text-[9px] font-bold uppercase tracking-wider text-secondary" for="filter-status-select">Status Filter</label>
-          <select 
-            id="filter-status-select"
-            class="input-box p-2 text-xs rounded border w-full"
-            bind:value={logsFilters.status}
-            onchange={handleFilterChange}
-          >
-            <option value="">All Outcomes</option>
-            <option value="success">Success (2xx)</option>
-            <option value="error">Errors (4xx/5xx)</option>
-          </select>
-        </div>
-        <div class="flex flex-col gap-1">
-          <label class="text-[9px] font-bold uppercase tracking-wider text-secondary" for="filter-search-input">Keyword Search</label>
-          <input 
-            type="text" 
-            id="filter-search-input"
-            class="input-box p-2 text-xs rounded border w-full" 
-            placeholder="Query string match..."
-            bind:value={logsFilters.search}
-            onchange={handleFilterChange}
-          />
-        </div>
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-4 bg-[var(--sidebar-bg)] p-4 border rounded-xl mb-4">
+        <Input 
+          type="text" 
+          label="Tenant Filter"
+          placeholder="Tenant API key or UUID..."
+          bind:value={logsFilters.tenant_id}
+          onchange={handleFilterChange}
+        />
+        
+        <Input 
+          type="select" 
+          label="Status Filter"
+          bind:value={logsFilters.status}
+          onchange={handleFilterChange}
+        >
+          <option value="">All Outcomes</option>
+          <option value="success">Success (2xx)</option>
+          <option value="error">Errors (4xx/5xx)</option>
+        </Input>
+
+        <Input 
+          type="text" 
+          label="Keyword Search"
+          placeholder="Query string match..."
+          bind:value={logsFilters.search}
+          onchange={handleFilterChange}
+        />
         
         <!-- Semantic vector search toggle -->
         <div class="flex flex-col gap-1">
-          <div class="flex items-center justify-between">
-            <label class="text-[9px] font-bold uppercase tracking-wider text-secondary" for="filter-semantic-input">Semantic AI Search</label>
-            <label class="flex items-center gap-1 cursor-pointer">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-xs font-bold uppercase tracking-wider text-secondary">Semantic AI Search</span>
+            <label class="flex items-center gap-1.5 cursor-pointer">
               <input 
                 type="checkbox" 
-                class="log-checkbox w-3 h-3" 
+                class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500" 
                 bind:checked={logsFilters.use_semantic} 
                 onchange={handleFilterChange}
               />
-              <span class="text-[8px] font-bold uppercase tracking-wider text-[#a78bfa]">Enable</span>
+              <span class="text-xs font-bold uppercase tracking-wider text-[#a78bfa]">Enable</span>
             </label>
           </div>
           <div class="relative">
             <input 
               type="text" 
-              id="filter-semantic-input"
-              class="input-box p-2 pl-7 text-xs rounded border w-full {logsFilters.use_semantic ? 'border-[#a78bfa]' : ''}" 
+              class="input-box p-3 pl-9 text-sm rounded-xl border w-full {logsFilters.use_semantic ? 'border-[#a78bfa] focus:border-[#a78bfa]' : ''}" 
               placeholder="Search meaning..."
               bind:value={logsFilters.semantic_query}
               disabled={!logsFilters.use_semantic}
               onkeydown={(e) => { if (e.key === 'Enter') handleFilterChange(); }}
             />
-            <Sparkles size={11} class="absolute left-2.5 top-2.5 {logsFilters.use_semantic ? 'text-[#a78bfa]' : 'opacity-30'}" />
+            <Sparkles size={14} class="absolute left-3 top-3.5 {logsFilters.use_semantic ? 'text-[#a78bfa]' : 'opacity-30'}" />
           </div>
         </div>
       </div>
 
       <!-- Logs Data Table -->
-      <div class="logs-table-wrapper border rounded-lg overflow-x-auto">
+      <div class="logs-table-wrapper border rounded-xl overflow-x-auto">
         <table class="providers-table w-full">
           <thead>
             <tr>
-              <th class="w-16">Status</th>
-              <th>Time</th>
-              <th>Tenant</th>
-              <th>Provider Used</th>
-              <th>Model Version</th>
-              <th>Latency</th>
-              <th>Tokens (P/C)</th>
+              <th class="w-20" style="font-size: 11px;">Status</th>
+              <th style="font-size: 11px;">Time</th>
+              <th style="font-size: 11px;">Tenant</th>
+              <th style="font-size: 11px;">Provider Used</th>
+              <th style="font-size: 11px;">Model Version</th>
+              <th style="font-size: 11px;">Latency</th>
+              <th style="font-size: 11px;">Tokens (P/C)</th>
               {#if logsFilters.use_semantic}
-                <th class="w-24">Similarity</th>
+                <th class="w-28" style="font-size: 11px;">Similarity</th>
               {/if}
-              <th class="w-12 text-center">Inspect</th>
+              <th class="w-16 text-center" style="font-size: 11px;">Inspect</th>
             </tr>
           </thead>
           <tbody>
             {#if logsLoading && poolLogs.length === 0}
               <tr>
-                <td colspan={logsFilters.use_semantic ? 9 : 8} class="text-center py-8 text-xs text-secondary opacity-60">
+                <td colspan={logsFilters.use_semantic ? 9 : 8} class="text-center py-10 text-sm text-secondary opacity-60">
                   <span class="animate-spin inline-block mr-2">⟳</span> Fetching logs...
                 </td>
               </tr>
             {:else if poolLogs.length === 0}
               <tr>
-                <td colspan={logsFilters.use_semantic ? 9 : 8} class="text-center py-8 text-xs opacity-40">
+                <td colspan={logsFilters.use_semantic ? 9 : 8} class="text-center py-10 text-sm opacity-50">
                   No request history matched the active filters.
                 </td>
               </tr>
             {:else}
               {#each poolLogs as log (log.id)}
+                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
                 <tr 
                   class="provider-row cursor-pointer select-text {expandedLogId === log.id ? 'bg-[#f97316]/5 border-l-2 border-l-[#f97316]' : ''}"
                   onclick={() => expandedLogId = expandedLogId === log.id ? null : log.id}
                 >
                   <td>
                     {#if log.status_code >= 200 && log.status_code < 400}
-                      <span class="flex items-center gap-1 text-[#04d361] font-bold text-[10px]">
-                        <CheckCircle size={12} /> {log.status_code}
+                      <span class="flex items-center gap-1 text-[#10b981] font-bold text-xs">
+                        <CheckCircle size={14} /> {log.status_code}
                       </span>
                     {:else}
-                      <span class="flex items-center gap-1 text-[#f74040] font-bold text-[10px]">
-                        <XCircle size={12} /> {log.status_code}
+                      <span class="flex items-center gap-1 text-[#ef4444] font-bold text-xs">
+                        <XCircle size={14} /> {log.status_code}
                       </span>
                     {/if}
                   </td>
-                  <td class="font-mono text-[10px] opacity-60 whitespace-nowrap">
+                  <td class="font-mono text-xs opacity-60 whitespace-nowrap">
                     {new Date(log.created_at).toLocaleTimeString()} {new Date(log.created_at).toLocaleDateString()}
                   </td>
-                  <td class="font-medium text-xs truncate max-w-[120px]" title={log.tenant_id}>
+                  <td class="font-bold text-xs truncate max-w-[130px]" title={log.tenant_id}>
                     {log.tenant_name || log.tenant_id || 'System'}
                   </td>
                   <td>
-                    <span class="provider-badge text-[8px] py-0.5 px-1.5 rounded {log.provider === 'openai' ? 'badge-openai' : log.provider === 'nvidia' ? 'badge-nvidia' : 'badge-default'}">
+                    <span class="provider-badge text-[10px] font-bold py-1 px-2 rounded-lg {log.provider === 'openai' ? 'badge-openai' : log.provider === 'nvidia' ? 'badge-nvidia' : 'badge-default'}">
                       {log.provider}
                     </span>
                   </td>
-                  <td class="font-mono text-[10px] text-secondary truncate max-w-[150px]" title={log.model}>
+                  <td class="font-mono text-xs text-secondary truncate max-w-[160px]" title={log.model}>
                     {log.model}
                   </td>
-                  <td class="font-mono text-xs font-semibold text-primary">{log.latency_ms}ms</td>
-                  <td class="font-mono text-[10px] text-secondary">
+                  <td class="font-mono text-sm font-semibold text-primary">{log.latency_ms}ms</td>
+                  <td class="font-mono text-xs text-secondary">
                     {log.prompt_tokens} / <span class="text-primary">{log.completion_tokens}</span>
                   </td>
                   {#if logsFilters.use_semantic}
                     <td>
                       {#if log.similarity !== undefined && log.similarity !== 0}
-                        <span style="display:inline-block; padding:1px 6px; border-radius:4px; font-size:9px; font-weight:800; color:#a78bfa; background:rgba(167,139,250,0.1); border:1px solid rgba(167,139,250,0.3)">
+                        <span style="display:inline-block; padding:2px 8px; border-radius:6px; font-size:10px; font-weight:800; color:#a78bfa; background:rgba(167,139,250,0.1); border:1px solid rgba(167,139,250,0.3)">
                           {(log.similarity * 100).toFixed(1)}% match
                         </span>
                       {:else}
-                        <span class="text-[10px] opacity-25">—</span>
+                        <span class="text-xs opacity-25">—</span>
                       {/if}
                     </td>
                   {/if}
                   <td class="text-center">
-                    <button class="icon-button p-1">
+                    <Button variant="ghost" size="sm" class="p-1">
                       {#if expandedLogId === log.id}
-                        <ChevronUp size={14} />
+                        <ChevronUp size={16} />
                       {:else}
-                        <ChevronDown size={14} />
+                        <ChevronDown size={16} />
                       {/if}
-                    </button>
+                    </Button>
                   </td>
                 </tr>
 
                 <!-- Expanded Log disclosure box -->
                 {#if expandedLogId === log.id}
                   <tr class="bg-[var(--sidebar-bg)] border-b">
-                    <td colspan={logsFilters.use_semantic ? 9 : 8} class="p-4 select-text">
-                      <div class="flex flex-col gap-3 max-w-full text-xs">
+                    <td colspan={logsFilters.use_semantic ? 9 : 8} class="p-5 select-text">
+                      <div class="flex flex-col gap-4 max-w-full text-sm">
                         
                         <!-- Error block -->
                         {#if log.error_message}
-                          <div class="flex flex-col gap-1 border border-red-500/20 bg-red-500/5 p-3 rounded-lg">
-                            <span class="font-bold text-red-500 text-[10px] uppercase tracking-wider">Error Details</span>
-                            <pre class="font-mono text-[10px] text-red-400 whitespace-pre-wrap break-all leading-normal">{log.error_message}</pre>
+                          <div class="flex flex-col gap-1.5 border border-red-500/20 bg-red-500/5 p-4 rounded-xl">
+                            <span class="font-bold text-red-500 text-xs uppercase tracking-wider">Error Details</span>
+                            <pre class="font-mono text-xs text-red-400 whitespace-pre-wrap break-all leading-normal">{log.error_message}</pre>
                           </div>
                         {/if}
 
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                           <!-- Prompt Panel -->
-                          <div class="flex flex-col gap-1.5">
-                            <span class="font-bold text-secondary text-[9px] uppercase tracking-wider">Prompt Payload</span>
-                            <div class="bg-[var(--frame-bg)] border p-3 rounded-lg font-mono text-[11px] leading-relaxed break-words max-h-48 overflow-y-auto whitespace-pre-wrap">
+                          <div class="flex flex-col gap-2">
+                            <span class="font-bold text-secondary text-xs uppercase tracking-wider">Prompt Payload</span>
+                            <div class="bg-[var(--frame-bg)] border p-4 rounded-xl font-mono text-xs leading-relaxed break-words max-h-56 overflow-y-auto whitespace-pre-wrap">
                               {log.prompt_text || 'Empty prompt content / body.'}
                             </div>
                           </div>
 
                           <!-- Response Panel -->
-                          <div class="flex flex-col gap-1.5">
-                            <span class="font-bold text-secondary text-[9px] uppercase tracking-wider">Response Content</span>
-                            <div class="bg-[var(--frame-bg)] border p-3 rounded-lg font-mono text-[11px] leading-relaxed break-words max-h-48 overflow-y-auto whitespace-pre-wrap">
+                          <div class="flex flex-col gap-2">
+                            <span class="font-bold text-secondary text-xs uppercase tracking-wider">Response Content</span>
+                            <div class="bg-[var(--frame-bg)] border p-4 rounded-xl font-mono text-xs leading-relaxed break-words max-h-56 overflow-y-auto whitespace-pre-wrap">
                               {log.response_text || 'No response returned / streamed.'}
                             </div>
                           </div>
@@ -703,74 +699,76 @@
 
       <!-- Load more logs button -->
       {#if poolLogs.length > 0 && poolLogs.length % logsLimit === 0}
-        <div class="flex justify-center mt-2">
-          <button 
-            class="px-4 py-2 rounded-lg border text-xs font-semibold text-secondary hover:text-primary hover:border-primary transition-all flex items-center gap-1.5"
+        <div class="flex justify-center mt-3">
+          <Button 
+            variant="outline" 
             onclick={loadMoreLogs}
             disabled={logsLoading}
           >
             {#if logsLoading}
-              <span class="animate-spin text-xs">⟳</span> Loading
+              <span class="animate-spin text-sm">⟳</span> Loading
             {:else}
               Load More History Logs
             {/if}
-          </button>
+          </Button>
         </div>
       {/if}
 
-    </div>
+    </Card>
   </div>
 {:else}
   <!-- Pools data grid -->
   <div class="providers-grid-wrap">
     {#if loading}
       <div class="providers-loading">
-        <div class="animate-spin text-[#f97316]" style="font-size:24px;">⟳</div>
-        <p class="text-xs mt-2">Loading routing pools...</p>
+        <div class="animate-spin text-[#f97316] text-xl">⟳</div>
+        <p class="text-sm mt-2 text-secondary">Loading routing pools...</p>
       </div>
     {:else if error}
       <div class="providers-loading">
-        <AlertTriangle size={32} class="text-red-500 mb-2" />
-        <p class="text-red-500 text-xs">{error}</p>
-        <button class="mt-3 px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold text-xs" onclick={loadPools}>Retry</button>
+        <AlertTriangle size={40} class="text-red-500 mb-2" />
+        <p class="text-red-500 text-sm font-semibold">{error}</p>
+        <Button variant="primary" class="mt-4" onclick={loadPools}>Retry</Button>
       </div>
     {:else if pools.length === 0}
       <div class="providers-loading">
-        <Cpu size={40} class="opacity-20 mb-3" />
-        <p class="opacity-40 text-xs">No model pools registered yet.</p>
-        <button class="mt-4 px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold text-xs" onclick={openAddModal}>
-          <span class="flex items-center gap-1.5"><Plus size={12} /> Create First Pool</span>
-        </button>
+        <Cpu size={48} class="opacity-20 mb-4" />
+        <p class="opacity-50 text-sm text-secondary">No model pools registered yet.</p>
+        <Button variant="primary" class="mt-4" onclick={openAddModal}>
+          <Plus size={14} /> Create First Pool
+        </Button>
       </div>
     {:else}
       <div class="providers-table-container">
         <table class="providers-table">
           <thead>
             <tr>
-              <th>ID</th>
-              <th>Model Pattern</th>
-              <th>Capabilities</th>
-              <th>Strategy</th>
-              <th>Fallback Pool ID</th>
-              <th>Credentials</th>
-              <th>Actions</th>
+              <th style="font-size: 11px;">ID</th>
+              <th style="font-size: 11px;">Model Pattern</th>
+              <th style="font-size: 11px;">Capabilities</th>
+              <th style="font-size: 11px;">Strategy</th>
+              <th style="font-size: 11px;">Fallback Pool ID</th>
+              <th style="font-size: 11px; text-align: center;">Credentials</th>
+              <th style="font-size: 11px; text-align: center;">Actions</th>
             </tr>
           </thead>
           <tbody>
             {#each pools as pool (pool.id)}
+              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
               <tr class="provider-row cursor-pointer" onclick={() => openPoolDetails(pool)}>
-                <td class="font-mono text-[10px] opacity-60">#{pool.id}</td>
-                <td class="font-bold text-xs text-[#f97316]">{pool.model_pattern}</td>
+                <td class="font-mono text-xs opacity-60">#{pool.id}</td>
+                <td class="font-bold text-sm text-[#f97316]">{pool.model_pattern}</td>
                 <td>
                   <div class="flex flex-wrap gap-1">
                     {#each capabilityKeys(pool.capabilities) as key}
                       {@const badge = CAPABILITY_BADGES[key]}
-                      <span style="display:inline-block; padding:1px 6px; border-radius:4px; font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; color:{badge.color}; background:{badge.bg}; border:1px solid {badge.border};">
+                      <span style="display:inline-block; padding:2px 7px; border-radius:5px; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; color:{badge.color}; background:{badge.bg}; border:1px solid {badge.border};">
                         {badge.label}
                       </span>
                     {/each}
                     {#if capabilityKeys(pool.capabilities).length === 0}
-                      <span class="text-[10px] opacity-30">—</span>
+                      <span class="text-xs opacity-30">—</span>
                     {/if}
                   </div>
                 </td>
@@ -779,16 +777,16 @@
                     {pool.strategy}
                   </span>
                 </td>
-                <td class="font-mono text-xs">{pool.fallback_pool_id !== null && pool.fallback_pool_id !== undefined ? `#${pool.fallback_pool_id}` : '—'}</td>
-                <td class="font-mono text-xs text-center">{pool.credential_count || 0} keys</td>
+                <td class="font-mono text-sm">{pool.fallback_pool_id !== null && pool.fallback_pool_id !== undefined ? `#${pool.fallback_pool_id}` : '—'}</td>
+                <td class="font-mono text-sm text-center">{pool.credential_count || 0} keys</td>
                 <td>
-                  <div class="flex items-center gap-1">
-                    <button class="icon-button" onclick={(e) => openEditModal(pool, e)} title="Edit pool">
-                      <Pencil size={13} />
-                    </button>
-                    <button class="icon-button" onclick={(e) => confirmDelete(pool.id, e)} title="Delete pool">
-                      <Trash2 size={13} class="text-red-500" />
-                    </button>
+                  <div class="flex items-center justify-center gap-1">
+                    <Button variant="ghost" size="sm" onclick={(e) => openEditModal(pool, e)} title="Edit pool">
+                      <Pencil size={15} />
+                    </Button>
+                    <Button variant="ghost" size="sm" onclick={(e) => confirmDelete(pool.id, e)} title="Delete pool">
+                      <Trash2 size={15} class="text-red-500" />
+                    </Button>
                   </div>
                 </td>
               </tr>
@@ -801,144 +799,119 @@
 {/if}
 
 <!-- ─── CREATE POOL MODAL ──────────────────────────────────────────────────── -->
-{#if showAddModal}
-  <div class="modal-backdrop fixed inset-0 flex items-center justify-center p-4 z-50 bg-black-trans backdrop-blur-sm">
-    <div class="modal-content w-full max-w-sm rounded-xl border p-6 shadow-2xl relative">
-      <div class="flex items-center justify-between mb-4">
-        <h3 class="font-bold text-lg text-primary">Create Model Pool</h3>
-        <button class="icon-button" onclick={() => showAddModal = false}><X size={16} /></button>
-      </div>
+<Modal bind:show={showAddModal} title="Create Model Pool">
+  <div class="flex flex-col gap-4 text-primary">
+    <Input 
+      type="text" 
+      label="Model Pattern" 
+      placeholder="e.g. gpt-4o, claude-3-5-sonnet*" 
+      bind:value={addForm.model_pattern} 
+    />
+    
+    <Input type="select" label="Routing Strategy" bind:value={addForm.strategy}>
+      <option value="round-robin">round-robin</option>
+      <option value="weighted-round-robin">weighted-round-robin</option>
+      <option value="random">random</option>
+    </Input>
 
-      <div class="flex flex-col gap-3 mb-5 text-primary">
-        <div class="form-group flex flex-col gap-1">
-          <label class="text-[10px] font-bold uppercase tracking-wider text-secondary" for="add-model-input">Model Pattern</label>
-          <input 
-            type="text" 
-            id="add-model-input"
-            class="input-box w-full p-2.5 rounded-lg border text-sm" 
-            placeholder="e.g. gpt-4o, claude-3-5-sonnet*" 
-            bind:value={addForm.model_pattern} 
-          />
-        </div>
-        <div class="form-group flex flex-col gap-1">
-          <label class="text-[10px] font-bold uppercase tracking-wider text-secondary" for="add-strategy-select">Routing Strategy</label>
-          <select id="add-strategy-select" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={addForm.strategy}>
-            <option value="round-robin">round-robin</option>
-            <option value="weighted-round-robin">weighted-round-robin</option>
-            <option value="random">random</option>
-          </select>
-        </div>
-        <div class="form-group flex flex-col gap-1">
-          <label class="text-[10px] font-bold uppercase tracking-wider text-secondary" for="add-fallback-select">Fallback Pool (Optional)</label>
-          <select id="add-fallback-select" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={addForm.fallback_pool_id}>
-            <option value="">None</option>
-            {#each pools as otherPool}
-              <option value={otherPool.id}>{otherPool.model_pattern} (ID: {otherPool.id})</option>
-            {/each}
-          </select>
-        </div>
-      </div>
-
-      <div class="flex justify-end gap-2 text-xs">
-        <button class="px-4 py-2 rounded-lg border text-primary" onclick={() => showAddModal = false}>Cancel</button>
-        <button class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold flex items-center gap-1.5 min-w-[120px] justify-center" onclick={createPool} disabled={addLoading}>
-          {#if addLoading}
-            <span class="animate-spin">🔄</span> Creating...
-          {:else}
-            Create Pool
-          {/if}
-        </button>
-      </div>
-    </div>
+    <Input type="select" label="Fallback Pool (Optional)" bind:value={addForm.fallback_pool_id} placeholder="None">
+      {#each pools as otherPool}
+        <option value={otherPool.id}>{otherPool.model_pattern} (ID: {otherPool.id})</option>
+      {/each}
+    </Input>
   </div>
-{/if}
+
+  {#snippet footer()}
+    <div class="flex justify-end gap-3 w-full">
+      <Button variant="outline" onclick={() => showAddModal = false}>Cancel</Button>
+      <Button variant="primary" onclick={createPool} disabled={addLoading}>
+        {#if addLoading}
+          <span class="animate-spin">⟳</span> Creating...
+        {:else}
+          Create Pool
+        {/if}
+      </Button>
+    </div>
+  {/snippet}
+</Modal>
 
 <!-- ─── EDIT POOL MODAL ────────────────────────────────────────────────────── -->
-{#if showEditModal}
-  <div class="modal-backdrop fixed inset-0 flex items-center justify-center p-4 z-50 bg-black-trans backdrop-blur-sm">
-    <div class="modal-content w-full max-w-sm rounded-xl border p-6 shadow-2xl relative">
-      <div class="flex items-center justify-between mb-4">
-        <h3 class="font-bold text-lg text-primary">Edit Model Pool</h3>
-        <button class="icon-button" onclick={() => showEditModal = false}><X size={16} /></button>
-      </div>
+<Modal bind:show={showEditModal} title="Edit Model Pool">
+  <div class="flex flex-col gap-4 text-primary">
+    <Input 
+      type="text" 
+      label="Model Pattern" 
+      bind:value={editForm.model_pattern} 
+    />
+    
+    <Input type="select" label="Routing Strategy" bind:value={editForm.strategy}>
+      <option value="round-robin">round-robin</option>
+      <option value="weighted-round-robin">weighted-round-robin</option>
+      <option value="random">random</option>
+    </Input>
 
-      <div class="flex flex-col gap-3 mb-5 text-primary">
-        <div class="form-group flex flex-col gap-1">
-          <label class="text-[10px] font-bold uppercase tracking-wider text-secondary" for="edit-model-input">Model Pattern</label>
-          <input type="text" id="edit-model-input" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={editForm.model_pattern} />
-        </div>
-        <div class="form-group flex flex-col gap-1">
-          <label class="text-[10px] font-bold uppercase tracking-wider text-secondary" for="edit-strategy-select">Routing Strategy</label>
-          <select id="edit-strategy-select" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={editForm.strategy}>
-            <option value="round-robin">round-robin</option>
-            <option value="weighted-round-robin">weighted-round-robin</option>
-            <option value="random">random</option>
-          </select>
-        </div>
-        <div class="form-group flex flex-col gap-1">
-          <label class="text-[10px] font-bold uppercase tracking-wider text-secondary" for="edit-fallback-select">Fallback Pool (Optional)</label>
-          <select id="edit-fallback-select" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={editForm.fallback_pool_id}>
-            <option value="">None</option>
-            {#each pools as otherPool}
-              {#if otherPool.id !== editForm.id}
-                <option value={String(otherPool.id)}>{otherPool.model_pattern} (ID: {otherPool.id})</option>
-              {/if}
-            {/each}
-          </select>
-        </div>
-      </div>
-
-      <div class="flex justify-end gap-2 text-xs">
-        <button class="px-4 py-2 rounded-lg border text-primary" onclick={() => showEditModal = false}>Cancel</button>
-        <button class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold flex items-center gap-1.5 min-w-[120px] justify-center" onclick={updatePool} disabled={editLoading}>
-          {#if editLoading}
-            <span class="animate-spin">🔄</span> Saving...
-          {:else}
-            Save Changes
-          {/if}
-        </button>
-      </div>
-    </div>
+    <Input type="select" label="Fallback Pool (Optional)" bind:value={editForm.fallback_pool_id} placeholder="None">
+      {#each pools as otherPool}
+        {#if otherPool.id !== editForm.id}
+          <option value={String(otherPool.id)}>{otherPool.model_pattern} (ID: {otherPool.id})</option>
+        {/if}
+      {/each}
+    </Input>
   </div>
-{/if}
+
+  {#snippet footer()}
+    <div class="flex justify-end gap-3 w-full">
+      <Button variant="outline" onclick={() => showEditModal = false}>Cancel</Button>
+      <Button variant="primary" onclick={updatePool} disabled={editLoading}>
+        {#if editLoading}
+          <span class="animate-spin">⟳</span> Saving...
+        {:else}
+          Save Changes
+        {/if}
+      </Button>
+    </div>
+  {/snippet}
+</Modal>
 
 <!-- ─── DELETE CONFIRMATION DIALOG ─────────────────────────────────────────── -->
-{#if showDeleteConfirm}
-  <div class="modal-backdrop fixed inset-0 flex items-center justify-center p-4 z-50 bg-black-trans backdrop-blur-sm">
-    <div class="modal-content w-full max-w-xs rounded-xl border p-6 shadow-2xl relative text-center">
-      <AlertTriangle size={32} class="text-red-500 mx-auto mb-3" />
-      <h3 class="font-bold text-base mb-2 text-primary">Delete Model Pool?</h3>
-      <p class="text-xs mb-5 opacity-75 text-secondary">All routing configurations and associated provider keys assigned to this model pool will be deleted. Upstream traffic will fallback or fail.</p>
-      <div class="flex justify-center gap-2 text-xs">
-        <button class="px-4 py-2 rounded-lg border text-primary" onclick={() => { showDeleteConfirm = false; deleteTargetId = null; }}>Cancel</button>
-        <button class="px-4 py-2 rounded-lg text-white bg-red-500 font-semibold flex items-center gap-1.5 min-w-[100px] justify-center" style="background-color: #ef4444;" onclick={deletePoolById} disabled={deleteLoading}>
-          {#if deleteLoading}
-            <span class="animate-spin">🔄</span>
-          {:else}
-            Delete
-          {/if}
-        </button>
-      </div>
-    </div>
+<Modal bind:show={showDeleteConfirm} title="Delete Model Pool?">
+  <div class="flex flex-col items-center gap-4 text-center">
+    <AlertTriangle size={48} class="text-red-500 mb-2" />
+    <p class="text-sm text-secondary">
+      All routing configurations and associated provider keys assigned to this model pool will be deleted. Upstream traffic will fallback or fail.
+    </p>
+    <p class="text-xs text-red-500 font-bold">This action is permanent and cannot be undone.</p>
   </div>
-{/if}
+
+  {#snippet footer()}
+    <div class="flex justify-center gap-3 w-full">
+      <Button variant="outline" onclick={() => { showDeleteConfirm = false; deleteTargetId = null; }}>Cancel</Button>
+      <Button variant="danger" onclick={deletePoolById} disabled={deleteLoading}>
+        {#if deleteLoading}
+          <span class="animate-spin">⟳</span>
+        {:else}
+          Delete Pool
+        {/if}
+      </Button>
+    </div>
+  {/snippet}
+</Modal>
 
 <style>
-  /* Premium Glassmorphic Card Theme */
-  .glass-card {
-    background: var(--frame-bg);
-    border: 1px solid var(--border-color);
-    box-shadow: 0 4px 20px var(--shadow-color);
-    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  /* Upgraded Styling for Pools page */
+  .providers-table th {
+    padding: 14px 18px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 700;
+    color: var(--text-secondary);
+    border-bottom: 2px solid var(--border-color);
   }
-  
-  .member-card {
-    background: var(--card-bg);
-    border: 1px solid var(--border-color);
-    box-shadow: 0 2px 10px var(--shadow-color);
+  .providers-table td {
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border-color);
   }
 
-  /* Pulse animation for active pool keys check */
   .pulse-healthy {
     background-color: #10b981;
     box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
@@ -952,8 +925,8 @@
 
   .health-dot {
     display: inline-block;
-    width: 8px;
-    height: 8px;
+    width: 10px;
+    height: 10px;
     border-radius: 50%;
   }
 
@@ -964,7 +937,7 @@
     }
     70% {
       transform: scale(1);
-      box-shadow: 0 0 0 6px rgba(16, 185, 129, 0);
+      box-shadow: 0 0 0 8px rgba(16, 185, 129, 0);
     }
     100% {
       transform: scale(0.95);
@@ -972,9 +945,8 @@
     }
   }
 
-  /* Custom logs visualizer adjustments */
   .logs-table-wrapper {
-    max-height: 480px;
+    max-height: 520px;
     overflow-y: auto;
     border: 1px solid var(--border-color);
   }

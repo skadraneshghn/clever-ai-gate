@@ -3,6 +3,8 @@
   import { 
     Settings, Plus, Trash2, Sparkles, Sun, Moon, KeyRound, Terminal, Users, Cpu
   } from '@lucide/svelte';
+  import Button from './lib/components/Button.svelte';
+  import Card from './lib/components/Card.svelte';
 
   // State (using Svelte 5 Runes)
   let theme = $state('light');
@@ -653,39 +655,39 @@
         <!-- Logo -->
         <div class="flex items-center justify-between">
           <div class="logo flex items-center gap-2">
-            <svg class="w-7 h-7 text-[#f97316]" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3">
+            <svg class="w-8 h-8 text-[#f97316]" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3">
               <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16m-7 6h7" />
             </svg>
             <span class="font-bold text-lg tracking-tight select-none">Cognivo</span>
           </div>
-          <button class="icon-button" onclick={() => applyTheme(theme === 'dark' ? 'light' : 'dark')}>
+          <Button variant="ghost" size="sm" class="p-2" onclick={() => applyTheme(theme === 'dark' ? 'light' : 'dark')}>
             {#if theme === 'dark'}
               <Sun size={16} />
             {:else}
               <Moon size={16} />
             {/if}
-          </button>
+          </Button>
         </div>
 
         <!-- New Chat Button -->
-        <button class="new-chat-btn flex items-center justify-between w-full p-3 rounded-lg text-white font-medium" onclick={startNewChat}>
+        <Button variant="primary" class="new-chat-btn w-full justify-between" onclick={startNewChat}>
           <span class="flex items-center gap-2">
-            <Plus size={18} />
+            <Plus size={20} />
             New Chat
           </span>
           <span class="btn-shortcut">⌘ N</span>
-        </button>
+        </Button>
 
         <!-- Grouped Scrollable History -->
         <div class="history-section flex flex-col gap-4 overflow-y-auto pr-1">
           {#if sidebarChats.today.length > 0}
             <div>
-              <div class="history-label text-[10px] uppercase font-bold tracking-wider mb-2">Today</div>
+              <div class="history-label text-xs uppercase font-bold tracking-wider mb-2">Today</div>
               <div class="flex flex-col gap-1">
                 {#each sidebarChats.today as chat}
-                  <button class="history-item flex items-center justify-between p-2 rounded-md w-full text-left {currentChatId === chat.id ? 'active' : ''}" onclick={() => selectChat(chat.id)}>
+                  <button class="history-item flex items-center justify-between p-2.5 rounded-lg w-full text-left {currentChatId === chat.id ? 'active' : ''}" onclick={() => selectChat(chat.id)}>
                     <span class="truncate pr-2">{chat.title}</span>
-                    <Trash2 size={13} class="trash-icon hover:text-red-500" onclick={(e) => deleteChat(chat.id, e)} />
+                    <Trash2 size={14} class="trash-icon hover:text-red-500" onclick={(e) => deleteChat(chat.id, e)} />
                   </button>
                 {/each}
               </div>
@@ -694,12 +696,12 @@
 
           {#if sidebarChats.yesterday.length > 0}
             <div>
-              <div class="history-label text-[10px] uppercase font-bold tracking-wider mb-2">Yesterday</div>
+              <div class="history-label text-xs uppercase font-bold tracking-wider mb-2">Yesterday</div>
               <div class="flex flex-col gap-1">
                 {#each sidebarChats.yesterday as chat}
-                  <button class="history-item flex items-center justify-between p-2 rounded-md w-full text-left {currentChatId === chat.id ? 'active' : ''}" onclick={() => selectChat(chat.id)}>
+                  <button class="history-item flex items-center justify-between p-2.5 rounded-lg w-full text-left {currentChatId === chat.id ? 'active' : ''}" onclick={() => selectChat(chat.id)}>
                     <span class="truncate pr-2">{chat.title}</span>
-                    <Trash2 size={13} class="trash-icon hover:text-red-500" onclick={(e) => deleteChat(chat.id, e)} />
+                    <Trash2 size={14} class="trash-icon hover:text-red-500" onclick={(e) => deleteChat(chat.id, e)} />
                   </button>
                 {/each}
               </div>
@@ -708,12 +710,12 @@
 
           {#if sidebarChats.older.length > 0}
             <div>
-              <div class="history-label text-[10px] uppercase font-bold tracking-wider mb-2">Older</div>
+              <div class="history-label text-xs uppercase font-bold tracking-wider mb-2">Older</div>
               <div class="flex flex-col gap-1">
                 {#each sidebarChats.older as chat}
-                  <button class="history-item flex items-center justify-between p-2 rounded-md w-full text-left {currentChatId === chat.id ? 'active' : ''}" onclick={() => selectChat(chat.id)}>
+                  <button class="history-item flex items-center justify-between p-2.5 rounded-lg w-full text-left {currentChatId === chat.id ? 'active' : ''}" onclick={() => selectChat(chat.id)}>
                     <span class="truncate pr-2">{chat.title}</span>
-                    <Trash2 size={13} class="trash-icon hover:text-red-500" onclick={(e) => deleteChat(chat.id, e)} />
+                    <Trash2 size={14} class="trash-icon hover:text-red-500" onclick={(e) => deleteChat(chat.id, e)} />
                   </button>
                 {/each}
               </div>
@@ -724,43 +726,67 @@
 
       <!-- Bottom sidebar info -->
       <div class="flex flex-col gap-2 border-t pt-4">
-        <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left {activePage === 'chat' ? 'nav-link-active' : ''}" onclick={() => { activePage = 'chat'; }}>
+        <Button
+          variant={activePage === 'chat' ? 'secondary' : 'ghost'}
+          class="nav-link w-full justify-start {activePage === 'chat' ? 'nav-link-active' : ''}"
+          onclick={() => { activePage = 'chat'; }}
+        >
           <Sparkles size={18} />
           <span>Chat</span>
-        </button>
-        <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left {activePage === 'providers' ? 'nav-link-active' : ''}" onclick={() => { activePage = 'providers'; }}>
+        </Button>
+        <Button
+          variant={activePage === 'providers' ? 'secondary' : 'ghost'}
+          class="nav-link w-full justify-start {activePage === 'providers' ? 'nav-link-active' : ''}"
+          onclick={() => { activePage = 'providers'; }}
+        >
           <KeyRound size={18} />
           <span>Providers</span>
-        </button>
-        <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left {activePage === 'tenants' ? 'nav-link-active' : ''}" onclick={() => { activePage = 'tenants'; }}>
+        </Button>
+        <Button
+          variant={activePage === 'tenants' ? 'secondary' : 'ghost'}
+          class="nav-link w-full justify-start {activePage === 'tenants' ? 'nav-link-active' : ''}"
+          onclick={() => { activePage = 'tenants'; }}
+        >
           <Users size={18} />
           <span>Tenants</span>
-        </button>
-        <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left {activePage === 'pools' ? 'nav-link-active' : ''}" onclick={() => { activePage = 'pools'; }}>
+        </Button>
+        <Button
+          variant={activePage === 'pools' ? 'secondary' : 'ghost'}
+          class="nav-link w-full justify-start {activePage === 'pools' ? 'nav-link-active' : ''}"
+          onclick={() => { activePage = 'pools'; }}
+        >
           <Cpu size={18} />
           <span>Model Pools</span>
-        </button>
-        <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left {activePage === 'logs' ? 'nav-link-active' : ''}" onclick={() => { activePage = 'logs'; if (!logsStreaming && adminKey) startLogsStream(); }}>
+        </Button>
+        <Button
+          variant={activePage === 'logs' ? 'secondary' : 'ghost'}
+          class="nav-link w-full justify-start {activePage === 'logs' ? 'nav-link-active' : ''}"
+          onclick={() => { activePage = 'logs'; if (!logsStreaming && adminKey) startLogsStream(); }}
+        >
           <Terminal size={18} />
           <span>Gateway Logs</span>
           {#if logsStreaming}
             <span class="logs-live-badge">LIVE</span>
           {/if}
-        </button>
-        <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left" onclick={() => showSettingsModal = true}>
+        </Button>
+        <Button
+          variant="ghost"
+          class="nav-link w-full justify-start"
+          onclick={() => showSettingsModal = true}
+        >
           <Settings size={18} />
           <span>Settings</span>
-        </button>
+        </Button>
 
         <!-- User profile panel -->
-        <div class="profile-card flex items-center justify-between p-2-5 rounded-lg border">
-          <div class="flex items-center gap-2 overflow-hidden">
-            <div class="avatar flex items-center justify-center w-8 h-8 rounded-full text-white bg-gradient-to-tr from-orange to-pink font-bold text-xs shrink-0">
+        <Card variant="filled" padding="sm" class="profile-card flex-row items-center justify-between">
+          <div class="flex items-center gap-3 overflow-hidden">
+            <div class="avatar flex items-center justify-center w-9 h-9 rounded-full text-white bg-gradient-to-tr from-orange to-pink font-bold text-xs shrink-0">
               {tenantInitials}
             </div>
-            <div class="flex flex-col overflow-hidden">
+            <div class="flex flex-col overflow-hidden text-left">
               <span class="font-bold text-xs truncate">{tenantName || 'Not Connected'}</span>
-              <span class="text-[9px] text-[#f97316] font-semibold uppercase">
+              <span class="text-[10px] text-[#f97316] font-bold uppercase tracking-wider mt-0.5">
                 {#if tenantRateLimit}
                   Limit: {tenantRateLimit} RPM
                 {:else}
@@ -768,14 +794,14 @@
                 {/if}
               </span>
               {#if tenantBalance}
-                <span class="text-[8px] opacity-75">Bal: {formatBalance(tenantBalance)} tokens</span>
+                <span class="text-[10px] opacity-75 mt-0.5">Bal: {formatBalance(tenantBalance)} tokens</span>
               {/if}
             </div>
           </div>
-          <button class="icon-button" onclick={() => showSettingsModal = true} title="Configure Key">
+          <Button variant="ghost" size="sm" class="p-1 shrink-0" onclick={() => showSettingsModal = true} title="Configure Key">
             <Settings size={14} />
-          </button>
-        </div>
+          </Button>
+        </Card>
       </div>
     </aside>
 
@@ -872,16 +898,16 @@
       <aside class="code-panel flex flex-col w-code border-l">
         <header class="flex items-center justify-between px-4 py-3 border-b bg-gray-light">
           <span class="text-xs font-bold uppercase tracking-wider">Integrations</span>
-          <button class="text-xs text-orange-500 font-semibold" onclick={() => showCodePanel = false}>Close</button>
+          <Button variant="ghost" size="sm" class="text-orange-500 font-bold" onclick={() => showCodePanel = false}>Close</Button>
         </header>
         
-        <div class="flex border-b text-[10px]">
-          <button class="tab-btn px-3 py-2 flex-grow {activeCodeTab === 'curl' ? 'active' : ''}" onclick={() => activeCodeTab = 'curl'}>cURL</button>
-          <button class="tab-btn px-3 py-2 flex-grow {activeCodeTab === 'js' ? 'active' : ''}" onclick={() => activeCodeTab = 'js'}>JS</button>
-          <button class="tab-btn px-3 py-2 flex-grow {activeCodeTab === 'python' ? 'active' : ''}" onclick={() => activeCodeTab = 'python'}>Python</button>
+        <div class="flex border-b text-xs">
+          <Button variant={activeCodeTab === 'curl' ? 'secondary' : 'ghost'} class="flex-grow rounded-none border-b-2 {activeCodeTab === 'curl' ? 'active' : ''}" style="height:36px; border-radius:0;" onclick={() => activeCodeTab = 'curl'}>cURL</Button>
+          <Button variant={activeCodeTab === 'js' ? 'secondary' : 'ghost'} class="flex-grow rounded-none border-b-2 {activeCodeTab === 'js' ? 'active' : ''}" style="height:36px; border-radius:0;" onclick={() => activeCodeTab = 'js'}>JS</Button>
+          <Button variant={activeCodeTab === 'python' ? 'secondary' : 'ghost'} class="flex-grow rounded-none border-b-2 {activeCodeTab === 'python' ? 'active' : ''}" style="height:36px; border-radius:0;" onclick={() => activeCodeTab = 'python'}>Python</Button>
         </div>
 
-        <div class="p-4 flex-grow overflow-auto font-mono text-[10px] bg-black-light leading-relaxed whitespace-pre-wrap select-text">
+        <div class="p-4 flex-grow overflow-auto font-mono text-xs bg-black-light leading-relaxed whitespace-pre-wrap select-text">
           {#if activeCodeTab === 'curl'}
             curl {window.location.origin}/v1/chat/completions \
               -H "Authorization: Bearer {apiKey || 'YOUR_KEY'}" \

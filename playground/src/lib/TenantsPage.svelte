@@ -3,6 +3,10 @@
     Users, Plus, RefreshCw, Shield, AlertTriangle, Trash2, 
     Pencil, Copy, Check, X, Activity 
   } from '@lucide/svelte';
+  import Button from './components/Button.svelte';
+  import Input from './components/Input.svelte';
+  import Card from './components/Card.svelte';
+  import Modal from './components/Modal.svelte';
 
   let { 
     adminKey = $bindable(''), 
@@ -199,107 +203,111 @@
   }
 </script>
 
-<header class="header flex items-center justify-between px-6 py-3 border-b shrink-0">
+<header class="header flex items-center justify-between px-6 py-4 border-b shrink-0">
   <div class="flex items-center gap-3">
-    <Users size={18} class="text-[#f97316]" />
-    <span class="font-bold text-sm">Tenant Accounts</span>
-    <span class="text-[10px] font-bold text-secondary uppercase">{tenants.length} tenants</span>
-  </div>
-  <div class="flex items-center gap-2">
+    <Users size={20} class="text-[#f97316]" />
+    <span class="font-bold text-base">Tenant Accounts</span>
     {#if adminKey.trim()}
-      <button class="log-action-btn log-btn-start" onclick={() => { loadTenants(); addToast('info', 'Refreshing tenants...'); }}>
-        <RefreshCw size={12} />
-        Refresh
-      </button>
-      <button class="log-action-btn" style="border-color: rgba(249,115,22,0.4); color: #f97316; background: rgba(249,115,22,0.06);" onclick={openAddModal}>
-        <Plus size={12} />
-        Create Tenant
-      </button>
+      <span class="text-xs font-bold text-secondary bg-gray-500/10 border border-gray-500/20 px-2.5 py-0.5 rounded-full uppercase">{tenants.length} tenants</span>
     {/if}
   </div>
+  
+  {#if adminKey.trim()}
+    <div class="flex items-center gap-2">
+      <Button variant="secondary" size="sm" onclick={() => { loadTenants(); addToast('info', 'Refreshing tenants...'); }}>
+        <RefreshCw size={14} />
+        Refresh
+      </Button>
+      <Button variant="primary" size="sm" onclick={openAddModal}>
+        <Plus size={14} />
+        Create Tenant
+      </Button>
+    </div>
+  {/if}
 </header>
 
 {#if !adminKey.trim()}
   <!-- Admin key prompt -->
   <div class="logs-key-prompt">
-    <div class="logs-key-card">
-      <Shield size={32} class="text-[#f97316] mb-3" />
-      <h2 class="font-bold text-base mb-1">Admin Key Required</h2>
-      <p class="text-xs mb-4">Enter your Admin API Key to manage tenant accounts, virtual routing keys, and usage statistics.</p>
-      <div class="flex gap-2 w-full max-w-sm">
-        <input
+    <Card variant="filled" padding="lg" class="logs-key-card">
+      <Shield size={40} class="text-[#f97316] mb-4" />
+      <h2 class="font-bold text-lg mb-2 text-primary">Admin Key Required</h2>
+      <p class="text-sm mb-6 text-secondary max-w-sm">Enter your Admin API Key to manage tenant accounts, virtual routing keys, and usage statistics.</p>
+      
+      <div class="flex flex-col gap-3 w-full max-w-sm">
+        <Input
           type="password"
-          class="input-box flex-grow p-2.5 rounded-lg border text-sm"
           placeholder="Enter Admin API Key..."
           bind:value={adminKey}
           onkeydown={(e) => { if (e.key === 'Enter') connectAdminKey(); }}
         />
-        <button class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold text-xs" onclick={connectAdminKey}>
+        <Button variant="primary" size="md" onclick={connectAdminKey}>
           Connect
-        </button>
+        </Button>
       </div>
+      
       {#if error}
-        <p class="text-red-500 text-xs mt-3">{error}</p>
+        <p class="text-red-500 text-sm font-semibold mt-4">{error}</p>
       {/if}
-    </div>
+    </Card>
   </div>
 {:else}
   <!-- Tenants data grid -->
   <div class="providers-grid-wrap">
     {#if loading}
       <div class="providers-loading">
-        <div class="animate-spin text-[#f97316]" style="font-size:24px;">⟳</div>
-        <p class="text-xs mt-2">Loading tenant accounts...</p>
+        <div class="animate-spin text-[#f97316] text-xl">⟳</div>
+        <p class="text-sm mt-2 text-secondary">Loading tenant accounts...</p>
       </div>
     {:else if error}
       <div class="providers-loading">
-        <AlertTriangle size={32} class="text-red-500 mb-2" />
-        <p class="text-red-500 text-xs">{error}</p>
-        <button class="mt-3 px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold text-xs" onclick={loadTenants}>Retry</button>
+        <AlertTriangle size={40} class="text-red-500 mb-2" />
+        <p class="text-red-500 text-sm font-semibold">{error}</p>
+        <Button variant="primary" class="mt-4" onclick={loadTenants}>Retry</Button>
       </div>
     {:else if tenants.length === 0}
       <div class="providers-loading">
-        <Users size={40} class="opacity-20 mb-3" />
-        <p class="opacity-40 text-xs">No tenants registered yet.</p>
-        <button class="mt-4 px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold text-xs" onclick={openAddModal}>
-          <span class="flex items-center gap-1.5"><Plus size={12} /> Create First Tenant</span>
-        </button>
+        <Users size={48} class="opacity-20 mb-4" />
+        <p class="opacity-50 text-sm text-secondary">No tenants registered yet.</p>
+        <Button variant="primary" class="mt-4" onclick={openAddModal}>
+          <Plus size={14} /> Create First Tenant
+        </Button>
       </div>
     {:else}
       <div class="providers-table-container">
         <table class="providers-table">
           <thead>
             <tr>
-              <th>ID</th>
-              <th>Name</th>
-              <th>Token Balance</th>
-              <th>Rate Limit (RPM)</th>
-              <th>Status</th>
-              <th>API Key</th>
-              <th>Actions</th>
+              <th style="font-size: 11px;">ID</th>
+              <th style="font-size: 11px;">Name</th>
+              <th style="font-size: 11px;">Token Balance</th>
+              <th style="font-size: 11px;">Rate Limit (RPM)</th>
+              <th style="font-size: 11px;">Status</th>
+              <th style="font-size: 11px;">API Key</th>
+              <th style="font-size: 11px; text-align: center;">Actions</th>
             </tr>
           </thead>
           <tbody>
             {#each tenants as tenant (tenant.id)}
               <tr class="provider-row">
-                <td class="font-mono text-[9px] opacity-60" title={tenant.id}>#{tenant.id.slice(0, 8)}...</td>
-                <td class="font-bold text-xs">{tenant.name}</td>
-                <td class="font-mono text-xs">{formatBalance(tenant.token_balance)}</td>
-                <td class="font-mono text-xs">{tenant.rate_limit_rpm || 'No Limit'}</td>
+                <td class="font-mono text-xs opacity-60" title={tenant.id}>#{tenant.id.slice(0, 8)}...</td>
+                <td class="font-bold text-sm">{tenant.name}</td>
+                <td class="font-mono text-sm">{formatBalance(tenant.token_balance)}</td>
+                <td class="font-mono text-sm">{tenant.rate_limit_rpm || 'No Limit'}</td>
                 <td>
                   <span class="provider-badge {tenant.is_active ? 'badge-openai' : 'badge-default'}">
                     {tenant.is_active ? 'Active' : 'Suspended'}
                   </span>
                 </td>
-                <td class="font-mono text-[10px] opacity-60">{tenant.api_key}</td>
+                <td class="font-mono text-xs opacity-60">{tenant.api_key}</td>
                 <td>
-                  <div class="flex items-center gap-1">
-                    <button class="icon-button" onclick={() => openEditModal(tenant)} title="Edit tenant">
-                      <Pencil size={13} />
-                    </button>
-                    <button class="icon-button" onclick={() => confirmDelete(tenant.id)} title="Delete tenant">
-                      <Trash2 size={13} class="text-red-500" />
-                    </button>
+                  <div class="flex items-center justify-center gap-1">
+                    <Button variant="ghost" size="sm" onclick={() => openEditModal(tenant)} title="Edit tenant">
+                      <Pencil size={15} />
+                    </Button>
+                    <Button variant="ghost" size="sm" onclick={() => confirmDelete(tenant.id)} title="Delete tenant">
+                      <Trash2 size={15} class="text-red-500" />
+                    </Button>
                   </div>
                 </td>
               </tr>
@@ -312,151 +320,154 @@
 {/if}
 
 <!-- ─── CREATE TENANT MODAL ────────────────────────────────────────────────── -->
-{#if showAddModal}
-  <div class="modal-backdrop fixed inset-0 flex items-center justify-center p-4 z-50 bg-black-trans backdrop-blur-sm">
-    <div class="modal-content w-full max-w-sm rounded-xl border p-6 shadow-2xl relative">
-      <div class="flex items-center justify-between mb-4">
-        <h3 class="font-bold text-lg">Create Tenant</h3>
-        <button class="icon-button" onclick={() => showAddModal = false}><X size={16} /></button>
-      </div>
-
-      <div class="flex flex-col gap-3 mb-5">
-        <div class="form-group flex flex-col gap-1">
-          <label class="text-[10px] font-bold uppercase tracking-wider" for="tenant-name-input">Tenant Name</label>
-          <input 
-            type="text" 
-            id="tenant-name-input" 
-            class="input-box w-full p-2.5 rounded-lg border text-sm" 
-            placeholder="Acme Corp, Mobile Client..." 
-            bind:value={addForm.name} 
-          />
-        </div>
-        <div class="form-group flex flex-col gap-1">
-          <label class="text-[10px] font-bold uppercase tracking-wider" for="tenant-balance-input">Token Balance</label>
-          <input 
-            type="number" 
-            id="tenant-balance-input" 
-            class="input-box w-full p-2.5 rounded-lg border text-sm" 
-            bind:value={addForm.token_balance} 
-          />
-        </div>
-        <div class="form-group flex flex-col gap-1">
-          <label class="text-[10px] font-bold uppercase tracking-wider" for="tenant-rpm-input">Rate Limit (RPM)</label>
-          <input 
-            type="number" 
-            id="tenant-rpm-input" 
-            class="input-box w-full p-2.5 rounded-lg border text-sm" 
-            bind:value={addForm.rate_limit_rpm} 
-          />
-        </div>
-      </div>
-
-      <div class="flex justify-end gap-2 text-xs">
-        <button class="px-4 py-2 rounded-lg border" onclick={() => showAddModal = false}>Cancel</button>
-        <button class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold flex items-center gap-1.5 min-w-[120px] justify-center" onclick={createTenant} disabled={addLoading}>
-          {#if addLoading}
-            <span class="animate-spin">🔄</span> Creating...
-          {:else}
-            Create Tenant
-          {/if}
-        </button>
-      </div>
-    </div>
+<Modal bind:show={showAddModal} title="Create Tenant">
+  <div class="flex flex-col gap-4">
+    <Input 
+      type="text" 
+      label="Tenant Name" 
+      placeholder="Acme Corp, Mobile Client..." 
+      bind:value={addForm.name} 
+    />
+    <Input 
+      type="number" 
+      label="Token Balance" 
+      bind:value={addForm.token_balance} 
+    />
+    <Input 
+      type="number" 
+      label="Rate Limit (RPM)" 
+      bind:value={addForm.rate_limit_rpm} 
+    />
   </div>
-{/if}
+
+  {#snippet footer()}
+    <div class="flex justify-end gap-3 w-full">
+      <Button variant="outline" onclick={() => showAddModal = false}>Cancel</Button>
+      <Button variant="primary" onclick={createTenant} disabled={addLoading}>
+        {#if addLoading}
+          <span class="animate-spin">⟳</span> Creating...
+        {:else}
+          Create Tenant
+        {/if}
+      </Button>
+    </div>
+  {/snippet}
+</Modal>
 
 <!-- ─── SUCCESS KEY MODAL ──────────────────────────────────────────────────── -->
-{#if showKeyModal}
-  <div class="modal-backdrop fixed inset-0 flex items-center justify-center p-4 z-50 bg-black-trans backdrop-blur-sm">
-    <div class="modal-content w-full max-w-sm rounded-xl border p-6 shadow-2xl relative text-center">
-      <Users size={32} class="text-[#04d361] mx-auto mb-3" />
-      <h3 class="font-bold text-lg mb-1">Tenant Created!</h3>
-      <p class="text-xs mb-4 opacity-75">Tenant <strong>{createdTenant.name}</strong> was created. Copy their API Key below. You will not be able to see it again.</p>
+<Modal bind:show={showKeyModal} title="Tenant Created!">
+  <div class="flex flex-col items-center gap-4 text-center">
+    <div class="w-12 h-12 rounded-full bg-green-500/10 border border-green-500/30 flex items-center justify-center text-green-500">
+      <Check size={24} />
+    </div>
+    <p class="text-sm text-secondary">
+      Tenant <strong>{createdTenant.name}</strong> was created successfully. Copy their API Key below. You will not be able to see it again.
+    </p>
 
-      <div class="flex gap-2 p-3 bg-zinc-900 border border-zinc-800 rounded-lg font-mono text-xs select-text justify-between items-center mb-5" style="background-color: #0c0c0f;">
-        <span class="truncate text-green-500 font-bold pr-2">{createdTenant.api_key}</span>
-        <button class="icon-button shrink-0 hover:bg-zinc-800" onclick={copyTenantKey}>
-          {#if keyCopied}
-            <Check size={14} class="text-green-500" />
-          {:else}
-            <Copy size={14} />
-          {/if}
-        </button>
-      </div>
-
-      <div class="flex justify-center text-xs">
-        <button class="px-5 py-2 rounded-lg text-white bg-[#f97316] font-semibold" onclick={() => showKeyModal = false}>
-          Done
-        </button>
-      </div>
+    <div class="flex w-full gap-3 p-4 bg-zinc-900 border border-zinc-800 rounded-xl font-mono text-sm select-text justify-between items-center my-2" style="background-color: #0c0c0f;">
+      <span class="truncate text-green-500 font-bold text-left flex-grow pr-2">{createdTenant.api_key}</span>
+      <Button variant="secondary" size="sm" onclick={copyTenantKey} class="shrink-0">
+        {#if keyCopied}
+          <Check size={16} class="text-green-500" />
+        {:else}
+          <Copy size={16} />
+        {/if}
+      </Button>
     </div>
   </div>
-{/if}
+
+  {#snippet footer()}
+    <div class="flex justify-center w-full">
+      <Button variant="primary" onclick={() => showKeyModal = false}>
+        Done
+      </Button>
+    </div>
+  {/snippet}
+</Modal>
 
 <!-- ─── EDIT TENANT MODAL ──────────────────────────────────────────────────── -->
-{#if showEditModal}
-  <div class="modal-backdrop fixed inset-0 flex items-center justify-center p-4 z-50 bg-black-trans backdrop-blur-sm">
-    <div class="modal-content w-full max-w-sm rounded-xl border p-6 shadow-2xl relative">
-      <div class="flex items-center justify-between mb-4">
-        <h3 class="font-bold text-lg">Edit Tenant</h3>
-        <button class="icon-button" onclick={() => showEditModal = false}><X size={16} /></button>
+<Modal bind:show={showEditModal} title="Edit Tenant">
+  <div class="flex flex-col gap-4">
+    <Input 
+      type="text" 
+      label="Tenant Name" 
+      bind:value={editForm.name} 
+    />
+    <Input 
+      type="number" 
+      label="Token Balance" 
+      bind:value={editForm.token_balance} 
+    />
+    
+    <div class="flex gap-4 items-end">
+      <div class="flex-grow">
+        <Input 
+          type="number" 
+          label="Rate Limit (RPM)" 
+          bind:value={editForm.rate_limit_rpm} 
+        />
       </div>
-
-      <div class="flex flex-col gap-3 mb-5">
-        <div class="form-group flex flex-col gap-1">
-          <label class="text-[10px] font-bold uppercase tracking-wider" for="edit-name-input">Tenant Name</label>
-          <input type="text" id="edit-name-input" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={editForm.name} />
-        </div>
-        <div class="form-group flex flex-col gap-1">
-          <label class="text-[10px] font-bold uppercase tracking-wider" for="edit-balance-input">Token Balance</label>
-          <input type="number" id="edit-balance-input" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={editForm.token_balance} />
-        </div>
-        <div class="flex gap-3">
-          <div class="form-group flex flex-col gap-1 flex-grow">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="edit-rpm-input">Rate Limit (RPM)</label>
-            <input type="number" id="edit-rpm-input" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={editForm.rate_limit_rpm} />
-          </div>
-          <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="edit-status-toggle">Status</label>
-            <label class="toggle-switch mt-1" id="edit-status-toggle">
-              <input type="checkbox" bind:checked={editForm.is_active} />
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
-        </div>
-      </div>
-
-      <div class="flex justify-end gap-2 text-xs">
-        <button class="px-4 py-2 rounded-lg border" onclick={() => showEditModal = false}>Cancel</button>
-        <button class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold flex items-center gap-1.5 min-w-[120px] justify-center" onclick={updateTenant} disabled={editLoading}>
-          {#if editLoading}
-            <span class="animate-spin">🔄</span> Saving...
-          {:else}
-            Save Changes
-          {/if}
-        </button>
+      
+      <div class="flex flex-col gap-2 shrink-0">
+        <span class="text-xs font-bold uppercase tracking-wider text-secondary">Status</span>
+        <label class="toggle-switch" style="margin-bottom: 9px;">
+          <input type="checkbox" bind:checked={editForm.is_active} />
+          <span class="toggle-slider"></span>
+        </label>
       </div>
     </div>
   </div>
-{/if}
+
+  {#snippet footer()}
+    <div class="flex justify-end gap-3 w-full">
+      <Button variant="outline" onclick={() => showEditModal = false}>Cancel</Button>
+      <Button variant="primary" onclick={updateTenant} disabled={editLoading}>
+        {#if editLoading}
+          <span class="animate-spin">⟳</span> Saving...
+        {:else}
+          Save Changes
+        {/if}
+      </Button>
+    </div>
+  {/snippet}
+</Modal>
 
 <!-- ─── DELETE CONFIRMATION DIALOG ─────────────────────────────────────────── -->
-{#if showDeleteConfirm}
-  <div class="modal-backdrop fixed inset-0 flex items-center justify-center p-4 z-50 bg-black-trans backdrop-blur-sm">
-    <div class="modal-content w-full max-w-xs rounded-xl border p-6 shadow-2xl relative text-center">
-      <AlertTriangle size={32} class="text-red-500 mx-auto mb-3" />
-      <h3 class="font-bold text-base mb-2">Delete Tenant?</h3>
-      <p class="text-xs mb-5 opacity-75">All access virtual routing credentials, statistics, and playground histories associated with this tenant account will be deleted permanently.</p>
-      <div class="flex justify-center gap-2 text-xs">
-        <button class="px-4 py-2 rounded-lg border" onclick={() => { showDeleteConfirm = false; deleteTargetId = null; }}>Cancel</button>
-        <button class="px-4 py-2 rounded-lg text-white bg-red-500 font-semibold flex items-center gap-1.5 min-w-[100px] justify-center" style="background-color: #ef4444;" onclick={deleteTenantById} disabled={deleteLoading}>
-          {#if deleteLoading}
-            <span class="animate-spin">🔄</span>
-          {:else}
-            Delete
-          {/if}
-        </button>
-      </div>
-    </div>
+<Modal bind:show={showDeleteConfirm} title="Delete Tenant?">
+  <div class="flex flex-col items-center gap-4 text-center">
+    <AlertTriangle size={48} class="text-red-500 mb-2" />
+    <p class="text-sm text-secondary">
+      All virtual routing credentials, statistics, and playground histories associated with this tenant account will be deleted permanently.
+    </p>
+    <p class="text-xs text-red-500 font-bold">This action is permanent and cannot be undone.</p>
   </div>
-{/if}
+
+  {#snippet footer()}
+    <div class="flex justify-center gap-3 w-full">
+      <Button variant="outline" onclick={() => { showDeleteConfirm = false; deleteTargetId = null; }}>Cancel</Button>
+      <Button variant="danger" onclick={deleteTenantById} disabled={deleteLoading}>
+        {#if deleteLoading}
+          <span class="animate-spin">⟳</span>
+        {:else}
+          Delete Permanently
+        {/if}
+      </Button>
+    </div>
+  {/snippet}
+</Modal>
+
+<style>
+  /* Spacious and modern styling for tables */
+  .providers-table th {
+    padding: 14px 18px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 700;
+    color: var(--text-secondary);
+    border-bottom: 2px solid var(--border-color);
+  }
+  .providers-table td {
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border-color);
+  }
+</style>

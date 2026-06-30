@@ -1,4 +1,8 @@
 <script>
+  import Modal from './components/Modal.svelte';
+  import Input from './components/Input.svelte';
+  import Button from './components/Button.svelte';
+
   let {
     showSettingsModal = $bindable(false),
     apiKey = $bindable(''),
@@ -19,128 +23,141 @@
 </script>
 
 {#if !isInitializing && (showSettingsModal || !apiKey)}
-  <div class="modal-backdrop fixed inset-0 flex items-center justify-center p-4 z-50 bg-black-trans backdrop-blur-sm">
-    <div class="modal-content w-full max-w-sm rounded-xl border p-6 shadow-2xl relative">
+  <Modal bind:show={showSettingsModal} maxWidth="md">
+    {#snippet header()}
       <!-- Tabs Selector -->
-      <div class="flex border-b text-[10px] mb-4">
+      <div class="flex border-b text-xs w-full">
         <button 
-          class="tab-btn px-4 py-2 flex-grow font-semibold text-center {activeSettingsTab === 'tenant' ? 'active' : ''}" 
+          class="tab-btn px-6 py-3 flex-grow font-semibold text-center {activeSettingsTab === 'tenant' ? 'active' : ''}" 
           onclick={() => { activeSettingsTab = 'tenant'; }}
         >
           Tenant Key
         </button>
         <button 
-          class="tab-btn px-4 py-2 flex-grow font-semibold text-center {activeSettingsTab === 'admin' ? 'active' : ''}" 
+          class="tab-btn px-6 py-3 flex-grow font-semibold text-center {activeSettingsTab === 'admin' ? 'active' : ''}" 
           onclick={() => { activeSettingsTab = 'admin'; }}
         >
           Admin: NVIDIA Key
         </button>
       </div>
+    {/snippet}
 
-      {#if activeSettingsTab === 'tenant'}
-        <h3 class="font-bold text-lg mb-2">Connect Gateway</h3>
-        <p class="text-xs mb-4">Please input your Clever AI Gate Tenant API key (e.g. <code>cag_xxxx</code>) to load your chat sessions and start calling active routing models.</p>
+    {#if activeSettingsTab === 'tenant'}
+      <div class="flex flex-col gap-3">
+        <h3 class="font-bold text-lg text-primary">Connect Gateway</h3>
+        <p class="text-sm text-secondary leading-relaxed">
+          Please input your Clever AI Gate Tenant API key (e.g. <code>cag_xxxx</code>) to load your chat sessions and start calling active routing models.
+        </p>
         
-        <div class="form-group flex flex-col gap-2 mb-5">
-          <label class="text-xs font-bold uppercase tracking-wider" for="gw-api-key">Tenant API Key</label>
-          <div class="relative flex items-center">
-            <input 
-              type={visibleApiKey ? 'text' : 'password'} 
-              id="gw-api-key" 
-              class="input-box w-full p-2.5 rounded-lg border text-sm" 
-              placeholder="cag_xxxx..." 
-              bind:value={apiKey} 
-              onkeydown={(e) => { if(e.key === 'Enter') { e.preventDefault(); handleSaveKey(); } }}
-            />
-            <button class="absolute right-3" onclick={() => visibleApiKey = !visibleApiKey}>
-              {#if visibleApiKey}🔒{:else}👁️{/if}
-            </button>
-          </div>
-        </div>
+        <Input 
+          type={visibleApiKey ? 'text' : 'password'} 
+          label="Tenant API Key"
+          placeholder="cag_xxxx..." 
+          bind:value={apiKey} 
+          onkeydown={(e) => { if(e.key === 'Enter') { e.preventDefault(); handleSaveKey(); } }}
+        >
+          <button 
+            type="button"
+            class="absolute right-3 top-[10px] text-base p-1 hover:bg-black/5 dark:hover:bg-white/5 rounded-md" 
+            onclick={() => visibleApiKey = !visibleApiKey}
+          >
+            {#if visibleApiKey}🔒{:else}👁️{/if}
+          </button>
+        </Input>
 
         {#if connectError}
-          <div class="text-red-500 text-xs mb-4 font-medium">{connectError}</div>
+          <div class="text-red-500 text-sm font-semibold mt-1">{connectError}</div>
         {/if}
+      </div>
+    {:else}
+      <div class="flex flex-col gap-4">
+        <h3 class="font-bold text-lg text-primary">Register NVIDIA NIM</h3>
+        <p class="text-sm text-secondary leading-relaxed">
+          Register your NVIDIA API key to auto-discover all active model configurations and synchronize them to Clever AI Gate.
+        </p>
+        
+        <div class="flex flex-col gap-3">
+          <Input 
+            type="password" 
+            label="Admin API Key" 
+            placeholder="Enter Admin API Key..." 
+            bind:value={adminApiKey} 
+          />
 
-        <div class="flex justify-end gap-2 text-xs">
+          <Input 
+            type="password" 
+            label="NVIDIA API Key" 
+            placeholder="nvapi-..." 
+            bind:value={nvidiaApiKey} 
+          />
+
+          <Input 
+            type="text" 
+            label="Base URL" 
+            placeholder="https://integrate.api.nvidia.com/v1" 
+            bind:value={nvidiaBaseUrl} 
+          />
+        </div>
+
+        {#if adminConnectError}
+          <div class="text-red-500 text-sm font-semibold mt-1">{adminConnectError}</div>
+        {/if}
+        {#if adminConnectSuccess}
+          <div class="text-green-500 text-sm font-semibold mt-1">{adminConnectSuccess}</div>
+        {/if}
+      </div>
+    {/if}
+
+    {#snippet footer()}
+      <div class="flex justify-end gap-3 w-full">
+        {#if activeSettingsTab === 'tenant'}
           {#if apiKey.trim() && localStorage.getItem('cag_playground_api_key') && !isConnecting}
-            <button class="px-4 py-2 rounded-lg border" onclick={() => { showSettingsModal = false; connectError = ''; }}>Cancel</button>
+            <Button variant="outline" onclick={() => { showSettingsModal = false; connectError = ''; }}>Cancel</Button>
           {/if}
-          <button 
-            class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold flex items-center justify-center gap-1.5 min-w-[120px]" 
+          <Button 
+            variant="primary" 
             onclick={handleSaveKey} 
             disabled={!apiKey.trim() || isConnecting}
           >
             {#if isConnecting}
-              <span class="animate-spin">🔄</span> Connecting...
+              <span class="animate-spin">⟳</span> Connecting...
             {:else}
               Save & Connect
             {/if}
-          </button>
-        </div>
-      {:else}
-        <h3 class="font-bold text-lg mb-2">Register NVIDIA NIM</h3>
-        <p class="text-xs mb-4">Register NVIDIA key. This auto-discovers all active model configurations and synchronizes them to our AI Gateway.</p>
-        
-        <div class="flex flex-col gap-3 mb-5">
-          <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="admin-key">Admin API Key</label>
-            <input 
-              type="password" 
-              id="admin-key" 
-              class="input-box w-full p-2.5 rounded-lg border text-sm" 
-              placeholder="Enter Admin API Key..." 
-              bind:value={adminApiKey} 
-            />
-          </div>
-
-          <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="nv-key">NVIDIA API Key</label>
-            <input 
-              type="password" 
-              id="nv-key" 
-              class="input-box w-full p-2.5 rounded-lg border text-sm" 
-              placeholder="nvapi-..." 
-              bind:value={nvidiaApiKey} 
-            />
-          </div>
-
-          <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="nv-url">Base URL</label>
-            <input 
-              type="text" 
-              id="nv-url" 
-              class="input-box w-full p-2.5 rounded-lg border text-sm" 
-              placeholder="https://integrate.api.nvidia.com/v1" 
-              bind:value={nvidiaBaseUrl} 
-            />
-          </div>
-        </div>
-
-        {#if adminConnectError}
-          <div class="text-red-500 text-xs mb-4 font-medium">{adminConnectError}</div>
-        {/if}
-        {#if adminConnectSuccess}
-          <div class="text-green-500 text-xs mb-4 font-medium">{adminConnectSuccess}</div>
-        {/if}
-
-        <div class="flex justify-end gap-2 text-xs">
+          </Button>
+        {:else}
           {#if apiKey.trim() && localStorage.getItem('cag_playground_api_key')}
-            <button class="px-4 py-2 rounded-lg border" onclick={() => { showSettingsModal = false; adminConnectError = ''; adminConnectSuccess = ''; }}>Close</button>
+            <Button variant="outline" onclick={() => { showSettingsModal = false; adminConnectError = ''; adminConnectSuccess = ''; }}>Close</Button>
           {/if}
-          <button 
-            class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold flex items-center justify-center gap-1.5 min-w-[120px]" 
+          <Button 
+            variant="primary" 
             onclick={handleRegisterNvidia} 
             disabled={isAdminConnecting}
           >
             {#if isAdminConnecting}
-              <span class="animate-spin">🔄</span> Registering...
+              <span class="animate-spin">⟳</span> Registering...
             {:else}
               Register Provider
             {/if}
-          </button>
-        </div>
-      {/if}
-    </div>
-  </div>
+          </Button>
+        {/if}
+      </div>
+    {/snippet}
+  </Modal>
 {/if}
+
+<style>
+  .tab-btn {
+    border: none;
+    color: var(--text-secondary);
+    background: transparent;
+    transition: all 0.2s;
+    font-weight: 600;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+  .tab-btn.active {
+    color: #f97316;
+    border-bottom: 2px solid #f97316;
+  }
+</style>
