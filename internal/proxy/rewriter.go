@@ -36,6 +36,9 @@ func NewRewriter() *Rewriter {
 	r.pathTransformers["nvidia"] = passthroughPath
 	r.pathTransformers["xai"] = passthroughPath
 
+	// Ollama (OpenAI-compatible at /v1/chat/completions)
+	r.pathTransformers["ollama"] = passthroughPath
+
 	// Anthropic
 	r.pathTransformers["anthropic"] = anthropicPath
 
