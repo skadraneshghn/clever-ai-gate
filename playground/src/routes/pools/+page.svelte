@@ -431,7 +431,7 @@
   </div>
 {:else if selectedPool}
   <!-- POOL DETAILS & LOGS PAGE VIEW -->
-  <div class="detail-page-container flex flex-col gap-6 p-6 overflow-y-auto w-full h-full">
+  <div class="detail-page-container flex flex-col gap-6 p-6 overflow-y-auto w-full flex-grow">
     
     <!-- Row 1: Credentials / Pool Members Card -->
     <Card variant="filled" padding="lg" class="glass-card">
@@ -918,7 +918,9 @@
 </Modal>
 
 <style>
-
+  .detail-page-container {
+    min-height: 0;
+  }
 
   .pulse-healthy {
     background-color: #10b981;
