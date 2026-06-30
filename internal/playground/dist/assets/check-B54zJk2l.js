@@ -1,0 +1,1 @@
+import{a as e,i as t}from"./disclose-version-Bi6N1TTY.js";import{s as n}from"./index-Bis_jACw.js";var r=new Set([`$$slots`,`$$events`,`$$legacy`]);function i(i,a){let o=t(a,r),s=[[`path`,{d:`M20 6 9 17l-5-5`}]];n(i,e({name:`check`},()=>o,{get iconNode(){return s}}))}export{i as t};

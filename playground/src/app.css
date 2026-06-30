@@ -80,6 +80,7 @@ body {
 .max-w-2xl { max-width: 42rem; }
 .max-w-6xl { max-width: 72rem; }
 .max-w-sm { max-width: 24rem; }
+.max-w-md { max-width: 28rem; }
 
 /* Borders & Radius */
 .border { border: 1px solid var(--border-color); }

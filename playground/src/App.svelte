@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { 
-    Settings, Plus, Trash2, Sparkles, Sun, Moon, KeyRound, Terminal
+    Settings, Plus, Trash2, Sparkles, Sun, Moon, KeyRound, Terminal, Users, Cpu
   } from '@lucide/svelte';
 
   // State (using Svelte 5 Runes)
@@ -732,6 +732,14 @@
           <KeyRound size={18} />
           <span>Providers</span>
         </button>
+        <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left {activePage === 'tenants' ? 'nav-link-active' : ''}" onclick={() => { activePage = 'tenants'; }}>
+          <Users size={18} />
+          <span>Tenants</span>
+        </button>
+        <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left {activePage === 'pools' ? 'nav-link-active' : ''}" onclick={() => { activePage = 'pools'; }}>
+          <Cpu size={18} />
+          <span>Model Pools</span>
+        </button>
         <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left {activePage === 'logs' ? 'nav-link-active' : ''}" onclick={() => { activePage = 'logs'; if (!logsStreaming && adminKey) startLogsStream(); }}>
           <Terminal size={18} />
           <span>Gateway Logs</span>
@@ -803,6 +811,28 @@
             bind:adminKey
             {apiKey}
             {loadModels}
+            {addToast}
+          />
+        {/await}
+
+      {:else if activePage === 'tenants'}
+        <!-- ═══════════════════════════════════════════════════════════════ -->
+        <!-- TENANTS PAGE (lazy loaded)                                      -->
+        <!-- ═══════════════════════════════════════════════════════════════ -->
+        {#await import('./lib/TenantsPage.svelte') then { default: TenantsPage }}
+          <TenantsPage
+            bind:adminKey
+            {addToast}
+          />
+        {/await}
+
+      {:else if activePage === 'pools'}
+        <!-- ═══════════════════════════════════════════════════════════════ -->
+        <!-- MODEL POOLS PAGE (lazy loaded)                                  -->
+        <!-- ═══════════════════════════════════════════════════════════════ -->
+        {#await import('./lib/PoolsPage.svelte') then { default: PoolsPage }}
+          <PoolsPage
+            bind:adminKey
             {addToast}
           />
         {/await}
