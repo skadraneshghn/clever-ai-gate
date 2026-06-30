@@ -178,6 +178,13 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 			return
 		}
 
+		// Handle Ollama native NDJSON streaming (/api/chat and /api/generate).
+		// Ollama Cloud emits raw JSON objects per line — no "data: " prefix.
+		if provider == "ollama" && transmux.IsOllamaNativeChunk(line) {
+			sp.processOllamaChunk(c, flusher, tmx, line)
+			continue
+		}
+
 		// Forward any other lines as-is (comments, retry directives, etc.)
 		if bytes.HasPrefix(line, []byte(":")) {
 			// SSE comment — skip
@@ -211,6 +218,23 @@ func (sp *StreamProxy) handleGeminiStream(c *gin.Context, flusher http.Flusher, 
 
 	c.Writer.Write([]byte("data: [DONE]\n\n"))
 	flusher.Flush()
+}
+
+// processOllamaChunk translates a single Ollama native NDJSON line into an
+// OpenAI-compatible SSE chunk and flushes it to the client.
+func (sp *StreamProxy) processOllamaChunk(c *gin.Context, flusher http.Flusher, tmx transmux.Transmuxer, chunk []byte) {
+	translated, err := tmx.TranslateChunk(chunk)
+	if err != nil {
+		sp.logger.Debug("ollama chunk transmux error", zap.Error(err))
+		return
+	}
+
+	if len(translated) > 0 {
+		c.Writer.Write([]byte("data: "))
+		c.Writer.Write(translated)
+		c.Writer.Write([]byte("\n\n"))
+		flusher.Flush()
+	}
 }
 
 func (sp *StreamProxy) processGeminiChunk(c *gin.Context, flusher http.Flusher, tmx transmux.Transmuxer, chunk []byte) {

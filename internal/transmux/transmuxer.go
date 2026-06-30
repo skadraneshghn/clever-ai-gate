@@ -38,6 +38,11 @@ func NewTransmuxer(provider string) Transmuxer {
 		return NewGeminiTransmuxer()
 	case "nvidia":
 		return NewNvidiaTransmuxer()
+	case "ollama":
+		// Ollama Cloud uses native NDJSON streaming (/api/chat, /api/generate).
+		// Local Ollama in OpenAI-compat mode also benefits from this since it
+		// can emit native NDJSON when called via /api/* endpoints.
+		return NewOllamaTransmuxer()
 	default:
 		// OpenAI-compatible providers (openai, deepseek, groq, together, etc.)
 		return NewOpenAITransmuxer()

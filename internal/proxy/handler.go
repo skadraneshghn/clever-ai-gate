@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -523,6 +524,31 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	}
 
 	// Normal success path
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return http.StatusInternalServerError, upstreamURL, nil, readErr
+	}
+
+	// --- Ollama native response translation (non-streaming) ---
+	// Ollama Cloud returns a native JSON body for non-stream requests that must
+	// be translated to OpenAI chat completion format before sending to the client.
+	if cred.Provider == "ollama" {
+		if translated, ok := translateOllamaResponse(respBody); ok {
+			respBody = translated
+			for key, vals := range resp.Header {
+				for _, val := range vals {
+					c.Writer.Header().Add(key, val)
+				}
+			}
+			c.Writer.Header().Set("Content-Type", "application/json")
+			c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+			c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+			c.Writer.WriteHeader(resp.StatusCode)
+			c.Writer.Write(respBody) //nolint:errcheck
+			return resp.StatusCode, upstreamURL, nil, nil
+		}
+	}
+
 	for key, vals := range resp.Header {
 		for _, val := range vals {
 			c.Writer.Header().Add(key, val)
@@ -531,9 +557,88 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
 	c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
 	c.Writer.WriteHeader(resp.StatusCode)
-	io.Copy(c.Writer, resp.Body) //nolint:errcheck
+	c.Writer.Write(respBody) //nolint:errcheck
 
 	return resp.StatusCode, upstreamURL, nil, nil
+}
+
+// translateOllamaResponse converts a native Ollama non-streaming response body
+// into an OpenAI-compatible chat completion JSON.
+//
+// Ollama /api/chat (non-stream) returns:
+//
+//	{"model":"llama4","message":{"role":"assistant","content":"Hello!"},"done":true,...}
+//
+// Ollama /api/generate (non-stream) returns:
+//
+//	{"model":"llama4","response":"Hello!","done":true,...}
+//
+// Both are translated to the OpenAI /v1/chat/completions shape.
+// Returns (translated, true) on success; (nil, false) if not a known Ollama shape.
+func translateOllamaResponse(data []byte) ([]byte, bool) {
+	var content string
+
+	// Try /api/chat shape first
+	if msgContent, _, _, err := jsonparser.Get(data, "message", "content"); err == nil {
+		content = string(msgContent)
+	} else if response, _, _, err := jsonparser.Get(data, "response"); err == nil {
+		// /api/generate shape
+		content = string(response)
+	} else {
+		// Not a recognised Ollama native response — let it pass through unchanged
+		return nil, false
+	}
+
+	model, _ := jsonparser.GetString(data, "model")
+	promptTokens, _ := jsonparser.GetInt(data, "prompt_eval_count")
+	completionTokens, _ := jsonparser.GetInt(data, "eval_count")
+
+	// Build an OpenAI-compatible chat completion response
+	type message struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	type choice struct {
+		Index        int     `json:"index"`
+		Message      message `json:"message"`
+		FinishReason string  `json:"finish_reason"`
+	}
+	type usage struct {
+		PromptTokens     int64 `json:"prompt_tokens"`
+		CompletionTokens int64 `json:"completion_tokens"`
+		TotalTokens      int64 `json:"total_tokens"`
+	}
+	type completion struct {
+		ID      string   `json:"id"`
+		Object  string   `json:"object"`
+		Model   string   `json:"model"`
+		Choices []choice `json:"choices"`
+		Usage   usage    `json:"usage"`
+	}
+
+	result := completion{
+		ID:     "chatcmpl-gate",
+		Object: "chat.completion",
+		Model:  model,
+		Choices: []choice{
+			{
+				Index:        0,
+				Message:      message{Role: "assistant", Content: content},
+				FinishReason: "stop",
+			},
+		},
+		Usage: usage{
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      promptTokens + completionTokens,
+		},
+	}
+
+	out, err := json.Marshal(result)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }
 
 // findPoolByPrefix searches for a pool matching a model name prefix.
