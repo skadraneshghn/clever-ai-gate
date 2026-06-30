@@ -32,6 +32,7 @@
     flex-direction: column;
     position: relative;
     overflow: hidden;
+    flex-shrink: 0;
   }
 
   /* Padding */
