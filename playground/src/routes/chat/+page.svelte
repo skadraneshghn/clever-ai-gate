@@ -46,22 +46,22 @@
     </Button>
     
     {#if appState.showModelDropdown && appState.models.length > 0}
-      <div class="model-dropdown absolute top-full left-0 mt-2 border rounded-xl shadow-2xl z-20 w-80 bg-[var(--card-bg)] border-[var(--border-color)] overflow-hidden flex flex-col max-h-80 animate-fade-in">
-        <div class="p-2.5 border-b border-[var(--border-color)] flex items-center gap-2 bg-gray-light shrink-0">
+      <div class="model-dropdown animate-fade-in">
+        <div class="model-dropdown-search">
           <Search size={14} class="opacity-60 text-secondary" />
           <input
             type="text"
             placeholder="Search models..."
-            class="w-full text-sm bg-transparent border-none outline-none text-primary"
+            class="model-search-input"
             bind:value={modelSearchQuery}
             onclick={(e) => e.stopPropagation()}
             onkeydown={(e) => e.stopPropagation()}
           />
         </div>
-        <div class="overflow-y-auto flex-grow max-h-60">
+        <div class="model-dropdown-list">
           {#each filteredModels as model}
             <button 
-              class="model-option flex items-center w-full px-4 py-3.5 text-left text-xs {appState.selectedModel === model.id ? 'active' : ''}" 
+              class="model-option flex items-center w-full px-4 py-3 text-left text-xs {appState.selectedModel === model.id ? 'active' : ''}" 
               onclick={() => { appState.selectedModel = model.id; appState.showModelDropdown = false; modelSearchQuery = ''; }}
             >
               {model.id}
@@ -362,6 +362,48 @@
     border-radius: 6px;
     margin-left: 4px;
     display: inline-block;
+  }
+
+  .model-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: 0 10px 30px var(--shadow-color);
+    z-index: 50;
+    width: 320px;
+    background-color: var(--card-bg);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    max-height: 320px;
+  }
+
+  .model-dropdown-search {
+    padding: 10px;
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background-color: rgba(107, 114, 128, 0.05);
+    flex-shrink: 0;
+  }
+
+  .model-search-input {
+    width: 100%;
+    font-size: 14px;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text-primary);
+  }
+
+  .model-dropdown-list {
+    overflow-y: auto;
+    flex-grow: 1;
+    max-height: 240px;
   }
 
   /* Model picker items overrides */
