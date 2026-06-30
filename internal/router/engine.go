@@ -98,12 +98,15 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 				return
 			}
 
-			// Check if the file exists in our subFS
+			// Check if the file exists in our subFS and is not a directory
 			f, err := subFS.Open(filePath)
 			if err == nil {
+				info, statErr := f.Stat()
 				f.Close()
-				fileServer.ServeHTTP(c.Writer, c.Request)
-				return
+				if statErr == nil && !info.IsDir() {
+					fileServer.ServeHTTP(c.Writer, c.Request)
+					return
+				}
 			}
 
 			// Fallback to index.html for SPA client-side routing
