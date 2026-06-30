@@ -84,6 +84,8 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		})
 
 		// Serve Svelte index.html or dynamic static assets for /playground/*any
+		// SPA routing strategy: only serve real files if the path has a file extension
+		// (e.g. .js, .css, .png, .json). All other paths are client-side routes → index.html
 		playgroundGroup.GET("/playground/*any", func(c *gin.Context) {
 			path := c.Param("any")
 			if path == "" || path == "/" {
@@ -91,25 +93,17 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 				return
 			}
 
-			// Clean the path to check if the file exists in the embedded FS
-			filePath := strings.TrimPrefix(path, "/")
-			if filePath == "index.html" {
-				c.Data(200, "text/html; charset=utf-8", indexContent)
+			// If the path contains a dot after the last slash, it's a real static asset
+			// (e.g. /playground/_app/immutable/chunks/foo.js, /playground/favicon.png)
+			// Otherwise it's a SPA route like /playground/logs → serve index.html
+			lastSegment := path[strings.LastIndex(path, "/")+1:]
+			if strings.Contains(lastSegment, ".") {
+				// Real static asset — let the file server handle it
+				fileServer.ServeHTTP(c.Writer, c.Request)
 				return
 			}
 
-			// Check if the file exists in our subFS and is not a directory
-			f, err := subFS.Open(filePath)
-			if err == nil {
-				info, statErr := f.Stat()
-				f.Close()
-				if statErr == nil && !info.IsDir() {
-					fileServer.ServeHTTP(c.Writer, c.Request)
-					return
-				}
-			}
-
-			// Fallback to index.html for SPA client-side routing
+			// SPA client-side route — always serve index.html
 			c.Data(200, "text/html; charset=utf-8", indexContent)
 		})
 
