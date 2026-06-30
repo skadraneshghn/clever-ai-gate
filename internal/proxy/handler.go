@@ -324,8 +324,34 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestSt
 	triedIndices := make(map[int]bool) // deduplicate — never retry the same index twice
 	triedCount := 0
 
+	// Safety valve: in a high-concurrency surge, AcquireActiveToken may return
+	// the same index multiple times as the atomic cursor races with other requests.
+	// The triedIndices guard correctly fires a continue, but with a fixed attempt
+	// counter that continue would burn a slot without evaluating a new key — causing
+	// premature pool exhaustion errors.
+	//
+	// Fix: loop on triedCount (unique keys tried) not attempt (total iterations).
+	// Safety valve maxSpins prevents an infinite spin if all remaining untried keys
+	// are penalized by concurrent requests between our iterations.
+	maxSpins := maxAttempts*3 + 1
+	spins := 0
+
 retryLoop:
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for triedCount < maxAttempts {
+		spins++
+		if spins > maxSpins {
+			// All remaining pool tokens were penalized by concurrent requests
+			// before we could acquire them. Exit gracefully.
+			h.logger.Warn("retry loop safety valve — all remaining tokens penalized by concurrent requests",
+				zap.String("model", pctx.model),
+				zap.String("tenant_id", pctx.tenantID),
+				zap.Int("unique_tried", triedCount),
+				zap.Int("max_attempts", maxAttempts),
+				zap.Int("spins", spins),
+			)
+			break retryLoop
+		}
+
 		// Lock-free credential acquisition
 		result := pctx.pool.AcquireActiveToken()
 
@@ -355,7 +381,7 @@ retryLoop:
 					zap.String("model", pctx.model),
 					zap.String("provider", result.Credential.Provider),
 					zap.Duration("sleep", sleepFor),
-					zap.Int("attempt", attempt+1),
+					zap.Int("unique_tried", triedCount),
 				)
 				time.Sleep(sleepFor)
 			}
@@ -381,7 +407,7 @@ retryLoop:
 				zap.String("tenant_id", pctx.tenantID),
 				zap.Bool("stream", pctx.isStream),
 				zap.Int("status", statusCode),
-				zap.Int("attempt", attempt+1),
+				zap.Int("unique_tried", triedCount),
 				zap.Duration("elapsed", time.Since(requestStart)),
 			)
 
@@ -497,7 +523,7 @@ retryLoop:
 			zap.String("upstream_url", upstreamURL),
 			zap.String("tenant_id", pctx.tenantID),
 			zap.Int("status", recStatus),
-			zap.Int("attempt", attempt+1),
+			zap.Int("spins", spins),
 			zap.Int("max_attempts", maxAttempts),
 			zap.Int("keys_tried", triedCount),
 			zap.Duration("cooldown", cooldownDuration),
