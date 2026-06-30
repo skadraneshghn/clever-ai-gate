@@ -6,7 +6,8 @@
     !!$navigating || 
     appState.isSending || 
     appState.isConnecting || 
-    appState.isAdminConnecting
+    appState.isAdminConnecting ||
+    appState.apiLoading
   );
 
   let width = $state(0);

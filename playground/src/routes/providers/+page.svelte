@@ -52,6 +52,7 @@
   async function loadCredentials() {
     providerLoading = true;
     providerError = '';
+    appState.apiLoading = true;
     try {
       const res = await fetch('/api/v1/admin/credentials', { headers: adminHeaders() });
       if (res.ok) {
@@ -64,10 +65,12 @@
       providerError = `Network error: ${e.message}`;
     } finally {
       providerLoading = false;
+      appState.apiLoading = false;
     }
   }
 
   async function loadPools() {
+    appState.apiLoading = true;
     try {
       const res = await fetch('/api/v1/admin/pools', { headers: adminHeaders() });
       if (res.ok) {
@@ -75,6 +78,8 @@
       }
     } catch (e) {
       console.error('Failed to load pools', e);
+    } finally {
+      appState.apiLoading = false;
     }
   }
 
@@ -88,6 +93,7 @@
 
   async function createCredential() {
     addProviderLoading = true;
+    appState.apiLoading = true;
     try {
       const res = await fetch('/api/v1/admin/credentials', {
         method: 'POST',
@@ -112,11 +118,13 @@
       appState.addToast('error', `Network error: ${e.message}`);
     } finally {
       addProviderLoading = false;
+      appState.apiLoading = false;
     }
   }
 
   async function autoDiscoverProvider() {
     autoDiscoverLoading = true;
+    appState.apiLoading = true;
     let endpoint;
     if (autoDiscoverForm.provider === 'nvidia') {
       endpoint = '/api/v1/admin/providers/nvidia';
@@ -157,6 +165,7 @@
       appState.addToast('error', `Network error: ${e.message}`);
     } finally {
       autoDiscoverLoading = false;
+      appState.apiLoading = false;
     }
   }
 
@@ -174,6 +183,7 @@
 
   async function updateCredential() {
     editLoading = true;
+    appState.apiLoading = true;
     try {
       const res = await fetch(`/api/v1/admin/credentials/${editForm.id}`, {
         method: 'PUT',
@@ -198,6 +208,7 @@
       appState.addToast('error', `Network error: ${e.message}`);
     } finally {
       editLoading = false;
+      appState.apiLoading = false;
     }
   }
 
@@ -208,6 +219,7 @@
 
   async function deleteCredentialById() {
     deleteLoading = true;
+    appState.apiLoading = true;
     try {
       const res = await fetch(`/api/v1/admin/credentials/${deleteTargetId}`, {
         method: 'DELETE',
@@ -226,6 +238,7 @@
       appState.addToast('error', `Network error: ${e.message}`);
     } finally {
       deleteLoading = false;
+      appState.apiLoading = false;
     }
   }
 
@@ -561,16 +574,5 @@
     border-bottom: 2px solid #f97316;
   }
 
-  .providers-table th {
-    padding: 14px 18px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    font-weight: 700;
-    color: var(--text-secondary);
-    border-bottom: 2px solid var(--border-color);
-  }
-  .providers-table td {
-    padding: 14px 18px;
-    border-bottom: 1px solid var(--border-color);
-  }
+
 </style>

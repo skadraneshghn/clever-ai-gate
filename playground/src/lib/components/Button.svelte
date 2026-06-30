@@ -57,7 +57,6 @@
     gap: 8px;
     font-family: inherit;
     font-weight: 600;
-    border-radius: 100px; /* Material Design 3 standard pill shape */
     border: 1px solid transparent;
     cursor: pointer;
     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
@@ -66,23 +65,26 @@
     white-space: nowrap;
   }
 
-  /* Sizes according to Material Design 3 */
+  /* Sizes according to Material Design 3 (Rounded Rectangles) */
   .btn-sm {
     padding: 0 16px;
     font-size: 13px;
     height: 32px;
+    border-radius: 8px;
   }
 
   .btn-md {
     padding: 0 24px;
     font-size: 14px;
     height: 40px;
+    border-radius: 10px;
   }
 
   .btn-lg {
     padding: 0 32px;
     font-size: 15px;
     height: 48px;
+    border-radius: 12px;
   }
 
   /* Variants */

@@ -79,6 +79,7 @@
   async function loadPools() {
     loading = true;
     error = '';
+    appState.apiLoading = true;
     try {
       const res = await fetch('/api/v1/admin/pools', { headers: adminHeaders() });
       if (res.ok) {
@@ -91,11 +92,13 @@
       error = `Network error: ${e.message}`;
     } finally {
       loading = false;
+      appState.apiLoading = false;
     }
   }
 
   // ─── Details View Methods ───────────────────────────────────────────────
   async function loadPoolDetails(poolId) {
+    appState.apiLoading = true;
     try {
       const res = await fetch(`/api/v1/admin/pools/${poolId}`, { headers: adminHeaders() });
       if (res.ok) {
@@ -105,11 +108,14 @@
       }
     } catch (e) {
       appState.addToast('error', `Error loading credentials: ${e.message}`);
+    } finally {
+      appState.apiLoading = false;
     }
   }
 
   async function loadPoolLogs(poolId, append = false) {
     logsLoading = true;
+    appState.apiLoading = true;
     try {
       const params = new URLSearchParams();
       params.append('limit', String(logsLimit));
@@ -136,6 +142,7 @@
       appState.addToast('error', `Error loading logs: ${e.message}`);
     } finally {
       logsLoading = false;
+      appState.apiLoading = false;
     }
   }
 
@@ -154,6 +161,7 @@
 
   async function testCredential(cred) {
     testingCredId = cred.id;
+    appState.apiLoading = true;
     appState.addToast('info', `Testing credential health for ${cred.provider}...`);
     try {
       const res = await fetch(`/api/v1/admin/pools/${selectedPool.id}/credentials/${cred.id}/test`, {
@@ -176,10 +184,12 @@
       appState.addToast('error', `Network error: ${e.message}`);
     } finally {
       testingCredId = null;
+      appState.apiLoading = false;
     }
   }
 
   async function toggleCredentialHealth(cred) {
+    appState.apiLoading = true;
     try {
       const payload = {
         provider: cred.provider,
@@ -201,6 +211,8 @@
       }
     } catch (e) {
       appState.addToast('error', `Network error: ${e.message}`);
+    } finally {
+      appState.apiLoading = false;
     }
   }
 
@@ -227,6 +239,7 @@
       return;
     }
     addLoading = true;
+    appState.apiLoading = true;
     try {
       const payload = {
         model_pattern: addForm.model_pattern,
@@ -250,6 +263,7 @@
       appState.addToast('error', `Network error: ${e.message}`);
     } finally {
       addLoading = false;
+      appState.apiLoading = false;
     }
   }
 
@@ -270,6 +284,7 @@
       return;
     }
     editLoading = true;
+    appState.apiLoading = true;
     try {
       const payload = {
         model_pattern: editForm.model_pattern,
@@ -298,6 +313,7 @@
       appState.addToast('error', `Network error: ${e.message}`);
     } finally {
       editLoading = false;
+      appState.apiLoading = false;
     }
   }
 
@@ -309,6 +325,7 @@
 
   async function deletePoolById() {
     deleteLoading = true;
+    appState.apiLoading = true;
     try {
       const res = await fetch(`/api/v1/admin/pools/${deleteTargetId}`, {
         method: 'DELETE',
@@ -330,6 +347,7 @@
       appState.addToast('error', `Network error: ${e.message}`);
     } finally {
       deleteLoading = false;
+      appState.apiLoading = false;
     }
   }
 
@@ -900,18 +918,7 @@
 </Modal>
 
 <style>
-  .providers-table th {
-    padding: 14px 18px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    font-weight: 700;
-    color: var(--text-secondary);
-    border-bottom: 2px solid var(--border-color);
-  }
-  .providers-table td {
-    padding: 14px 18px;
-    border-bottom: 1px solid var(--border-color);
-  }
+
 
   .pulse-healthy {
     background-color: #10b981;

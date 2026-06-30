@@ -29,6 +29,7 @@ class AppState {
   connectError = $state('');
   isConnecting = $state(false);
   isInitializing = $state(true);
+  apiLoading = $state(false);
   
   activeSettingsTab = $state('tenant');
   adminApiKey = $state('');
@@ -252,6 +253,7 @@ class AppState {
 
   async loadTenantInfo(keyToUse = this.apiKey) {
     if (!keyToUse.trim()) return false;
+    this.apiLoading = true;
     try {
       const res = await fetch('/api/v1/playground/tenant', {
         headers: {
@@ -269,6 +271,8 @@ class AppState {
     } catch (e) {
       console.error('Failed to load tenant info', e);
       return false;
+    } finally {
+      this.apiLoading = false;
     }
   }
 
@@ -280,6 +284,7 @@ class AppState {
   }
 
   async loadModels() {
+    this.apiLoading = true;
     try {
       const res = await fetch('/v1/models', {
         headers: {
@@ -298,10 +303,13 @@ class AppState {
       }
     } catch (e) {
       this.statusHUD = 'Failed to fetch models';
+    } finally {
+      this.apiLoading = false;
     }
   }
 
   async loadChats() {
+    this.apiLoading = true;
     try {
       const res = await fetch('/api/v1/playground/chats', {
         headers: {
@@ -313,11 +321,14 @@ class AppState {
       }
     } catch (e) {
       console.error('Failed to load chat sessions', e);
+    } finally {
+      this.apiLoading = false;
     }
   }
 
   async selectChat(id) {
     this.currentChatId = id;
+    this.apiLoading = true;
     try {
       const res = await fetch(`/api/v1/playground/chats/${id}`, {
         headers: {
@@ -330,6 +341,8 @@ class AppState {
       }
     } catch (e) {
       console.error('Failed to fetch conversation details', e);
+    } finally {
+      this.apiLoading = false;
     }
   }
 
@@ -341,6 +354,7 @@ class AppState {
 
   async deleteChat(id, e) {
     if (e) e.stopPropagation();
+    this.apiLoading = true;
     try {
       const res = await fetch(`/api/v1/playground/chats/${id}`, {
         method: 'DELETE',
@@ -356,6 +370,8 @@ class AppState {
       }
     } catch (err) {
       console.error('Failed to delete chat', err);
+    } finally {
+      this.apiLoading = false;
     }
   }
 
@@ -599,6 +615,7 @@ class AppState {
   async downloadTodayLog() {
     const key = this.adminKey.trim();
     if (!key) { this.logsError = 'Admin API key required.'; return; }
+    this.apiLoading = true;
     try {
       const resp = await fetch('/api/v1/admin/logs/download', {
         headers: { 'Authorization': `Bearer ${key}` },
@@ -619,6 +636,8 @@ class AppState {
       URL.revokeObjectURL(url);
     } catch (err) {
       this.logsError = `Download error: ${err.message}`;
+    } finally {
+      this.apiLoading = false;
     }
   }
 

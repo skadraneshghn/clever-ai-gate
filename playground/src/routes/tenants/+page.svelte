@@ -53,6 +53,7 @@
   async function loadTenants() {
     loading = true;
     error = '';
+    appState.apiLoading = true;
     try {
       const res = await fetch('/api/v1/admin/tenants', { headers: adminHeaders() });
       if (res.ok) {
@@ -65,6 +66,7 @@
       error = `Network error: ${e.message}`;
     } finally {
       loading = false;
+      appState.apiLoading = false;
     }
   }
 
@@ -79,6 +81,7 @@
       return;
     }
     addLoading = true;
+    appState.apiLoading = true;
     try {
       const res = await fetch('/api/v1/admin/tenants', {
         method: 'POST',
@@ -104,6 +107,7 @@
       appState.addToast('error', `Network error: ${e.message}`);
     } finally {
       addLoading = false;
+      appState.apiLoading = false;
     }
   }
 
@@ -131,6 +135,7 @@
       return;
     }
     editLoading = true;
+    appState.apiLoading = true;
     try {
       const res = await fetch(`/api/v1/admin/tenants/${editForm.id}`, {
         method: 'PUT',
@@ -154,6 +159,7 @@
       appState.addToast('error', `Network error: ${e.message}`);
     } finally {
       editLoading = false;
+      appState.apiLoading = false;
     }
   }
 
@@ -164,6 +170,7 @@
 
   async function deleteTenantById() {
     deleteLoading = true;
+    appState.apiLoading = true;
     try {
       const res = await fetch(`/api/v1/admin/tenants/${deleteTargetId}`, {
         method: 'DELETE',
@@ -182,6 +189,7 @@
       appState.addToast('error', `Network error: ${e.message}`);
     } finally {
       deleteLoading = false;
+      appState.apiLoading = false;
     }
   }
 
@@ -453,16 +461,5 @@
 </Modal>
 
 <style>
-  .providers-table th {
-    padding: 14px 18px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    font-weight: 700;
-    color: var(--text-secondary);
-    border-bottom: 2px solid var(--border-color);
-  }
-  .providers-table td {
-    padding: 14px 18px;
-    border-bottom: 1px solid var(--border-color);
-  }
+
 </style>

@@ -1,7 +1,7 @@
 <script>
   import { page } from '$app/stores';
   import { 
-    Settings, Plus, Trash2, Sparkles, Sun, Moon, KeyRound, Terminal, Users, Cpu
+    Settings, Plus, Trash2, Sparkles, Sun, Moon, KeyRound, Terminal, Users, Cpu, Activity
   } from '@lucide/svelte';
   import { appState } from '$lib/state.svelte.js';
   import Button from '$lib/components/Button.svelte';
@@ -14,7 +14,8 @@
   let { children } = $props();
 
   // Route-based active states
-  let isChat = $derived($page.url.pathname === '/playground' || $page.url.pathname === '/playground/');
+  let isDashboard = $derived($page.url.pathname === '/playground' || $page.url.pathname === '/playground/');
+  let isChat = $derived($page.url.pathname.includes('/chat'));
   let isProviders = $derived($page.url.pathname.includes('/providers'));
   let isTenants = $derived($page.url.pathname.includes('/tenants'));
   let isPools = $derived($page.url.pathname.includes('/pools'));
@@ -106,12 +107,21 @@
       <div class="flex flex-col gap-2 border-t pt-4 animate-fade-in">
         <Button
           href="/playground"
+          variant={isDashboard ? 'secondary' : 'ghost'}
+          align="left"
+          class="nav-link w-full {isDashboard ? 'nav-link-active' : ''}"
+        >
+          <Activity size={18} />
+          <span>Dashboard</span>
+        </Button>
+        <Button
+          href="/playground/chat"
           variant={isChat ? 'secondary' : 'ghost'}
           align="left"
           class="nav-link w-full {isChat ? 'nav-link-active' : ''}"
         >
           <Sparkles size={18} />
-          <span>Chat</span>
+          <span>Chat Playground</span>
         </Button>
         <Button
           href="/playground/providers"

@@ -219,6 +219,10 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 			adminGroup.GET("/logs/stream", logCtrl.StreamLiveCoreLogs)
 			adminGroup.GET("/logs/download", logCtrl.DownloadTodayLogFile)
 		}
+
+		// Dashboard statistics & metrics
+		metricsCtrl := admin.NewMetricsController(deps.DB)
+		adminGroup.GET("/metrics", metricsCtrl.GetDashboardStats)
 	}
 
 	return engine
