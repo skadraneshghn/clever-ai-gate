@@ -39,10 +39,24 @@ func NewPool(ctx context.Context, databaseURL string, logger *zap.Logger) (*pgxp
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
+	// Check if pgvector is available
+	var hasVector bool
+	err = pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM pg_type WHERE typname = 'vector')").Scan(&hasVector)
+	if err == nil {
+		HasPgVector = hasVector
+	} else {
+		HasPgVector = false
+	}
+
 	logger.Info("database connection pool established",
 		zap.Int32("max_conns", config.MaxConns),
 		zap.Int32("min_conns", config.MinConns),
+		zap.Bool("has_pgvector", HasPgVector),
 	)
 
 	return pool, nil
 }
+
+// HasPgVector is set during pool initialization indicating if pgvector is active.
+var HasPgVector bool
+

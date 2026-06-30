@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"runtime/debug"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/skadraneshghn/clever-ai-gate/internal/cache"
 	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
+	"github.com/skadraneshghn/clever-ai-gate/internal/telemetry"
 	"go.uber.org/zap"
 )
 
@@ -30,14 +32,10 @@ const metadataScanLimit = 256 * 1024 // 256KB
 // Handler is the main proxy handler for AI provider requests.
 // It sits on the hot-path and is designed for zero heap allocations
 // under normal operation using sync.Pool for buffer reuse.
-//
-// Gap 2 Enhancement: For payloads exceeding 256KB (multi-modal with Base64
-// images), only the leading metadata segment is parsed for routing fields.
-// The heavy vision byte stream is piped directly to the upstream connection
-// without being copied into memory or scanned by jsonparser.
 type Handler struct {
 	client      *http.Client
 	cache       *cache.Store
+	pipeline    *telemetry.Pipeline
 	logger      *zap.Logger
 	bufPool     sync.Pool
 	rewriter    *Rewriter
@@ -45,11 +43,12 @@ type Handler struct {
 }
 
 // NewHandler creates the proxy handler with all its dependencies.
-func NewHandler(client *http.Client, cacheStore *cache.Store, logger *zap.Logger) *Handler {
+func NewHandler(client *http.Client, cacheStore *cache.Store, logger *zap.Logger, pipeline *telemetry.Pipeline) *Handler {
 	h := &Handler{
-		client: client,
-		cache:  cacheStore,
-		logger: logger,
+		client:   client,
+		cache:    cacheStore,
+		pipeline: pipeline,
+		logger:   logger,
 		bufPool: sync.Pool{
 			New: func() interface{} {
 				return bytes.NewBuffer(make([]byte, 0, 32*1024)) // 32KB initial scratch
@@ -280,45 +279,57 @@ func (h *Handler) Handle(c *gin.Context) {
 		pctx.tenantID = tenantID.(string)
 	}
 
-	h.executeWithRetry(c, pctx, requestStart, 3) // Max 3 attempts across different credentials
+	// Try every credential in the pool before giving up.
+	// Cap at 20 to avoid runaway loops on huge pools.
+	maxAttempts := int(pool.TotalCount)
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	if maxAttempts > 20 {
+		maxAttempts = 20
+	}
+	h.executeWithRetry(c, pctx, requestStart, maxAttempts)
 }
 
-// executeWithRetry attempts the proxy request, failing over to the next
-// credential on transient errors (429, 500, 502, 503, 504).
+// executeWithRetry attempts the proxy request, cycling through ALL credentials
+// in the pool before giving up.
 //
-// Flaw A fix: forwardRequest no longer writes anything to c.Writer for retryable
-// statuses — it returns the error body in-memory. Only the FINAL attempt (or a
-// non-retryable outcome) flushes to the wire, so Kilo Code never receives a
-// half-written corrupted HTTP response.
+// Smart retry policy:
+//  - 401 / 403 / 402: credential auth failure — long-cooldown (1h) this key,
+//    immediately try the next one. Tries every key in the pool.
+//  - 429: rate-limited — 30s cooldown, try next key. On single-key pool: abort.
+//  - 500 / 502 / 503 / 504: transient server error — shorter cooldown, retry.
+//  - transport error: mark key as briefly unhealthy, retry next.
+//  - 400 / 404 / 422: request-level error — no retry, return immediately.
 //
-// Flaw B fix: When all tokens are on cooldown (AcquireActiveToken returns nil),
-// we fall back to AcquireLeastPenalizedToken + a short capped sleep instead of
-// immediately returning 503. This keeps single-key setups alive through
-// transient NVIDIA backend errors without a 10–30 s blackout.
+// The caller passes maxAttempts = pool.TotalCount (capped at 20) so every
+// unique credential is tried exactly once.
 func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestStart time.Time, maxAttempts int) {
-	var lastErrBody []byte // in-memory error body from the last failed attempt
+	var lastErrBody []byte
+	var lastStatus int
+	var lastProvider string
+	triedIndices := make(map[int]bool) // deduplicate — never retry the same index twice
+	triedCount := 0
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		// Lock-free credential acquisition
 		result := pctx.pool.AcquireActiveToken()
 
 		if result == nil {
-			// Flaw B: All tokens are currently on cooldown.
-			// Find the one closest to expiry and sleep until it is ready,
-			// capped at 600ms so IDE extensions stay responsive.
+			// All tokens are currently on cooldown.
+			// Pick the soonest-available one and sleep briefly.
 			result = pctx.pool.AcquireLeastPenalizedToken()
 			if result == nil {
 				h.logger.Error("no credentials in pool at all",
 					zap.String("model", pctx.model),
 					zap.String("tenant_id", pctx.tenantID),
-				)
+			)
 				c.JSON(http.StatusServiceUnavailable, gin.H{
 					"error": "all upstream providers are temporarily unavailable",
 					"model": pctx.model,
 				})
 				return
 			}
-			// Sleep until the soonest token is ready (max 600ms)
 			now := time.Now().UnixNano()
 			cooldownUntil := atomic.LoadInt64(&result.Credential.CooldownUntil)
 			if cooldownUntil > now {
@@ -336,16 +347,20 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestSt
 				time.Sleep(sleepFor)
 			}
 		}
+
+		// Skip credentials we've already tried in this request
+		if triedIndices[result.Index] {
+			continue
+		}
+		triedIndices[result.Index] = true
+		triedCount++
 		pctx.credential = result
 
-		// Build and execute the upstream request — does NOT write to c.Writer
-		// for retryable status codes (Flaw A fix).
 		statusCode, upstreamURL, errBody, err := h.forwardRequest(c, pctx)
 
 		if err == nil && !isRetryableStatus(statusCode) {
-			// Terminal outcome — success or a non-retryable client error (e.g. 400).
+			// Terminal outcome — success or a hard client error (e.g. 400 bad request).
 			// forwardRequest has already written the response to c.Writer.
-			// Clear the cooldown on the token that just succeeded — it proved itself healthy.
 			pctx.pool.ResetCooldown(result.Index)
 			if statusCode >= 200 && statusCode < 400 {
 				h.logger.Info("proxy request completed",
@@ -368,75 +383,160 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestSt
 					zap.Duration("elapsed", time.Since(requestStart)),
 				)
 			}
+
+			// Emit success or terminal log telemetry
+			if h.pipeline != nil {
+				promptText := extractPromptText(pctx.body)
+				var responseText string
+				var completionTokens int
+				var promptTokens int
+
+				if pctx.isStream && statusCode == http.StatusOK {
+					type streamResult struct {
+						Text   string `json:"text"`
+						Tokens int    `json:"tokens"`
+					}
+					var sResult streamResult
+					if err := json.Unmarshal(errBody, &sResult); err == nil {
+						responseText = sResult.Text
+						completionTokens = sResult.Tokens
+					}
+				} else {
+					responseText = extractResponseText(errBody)
+					completionTokens = extractTokens(errBody, "completion")
+				}
+
+				promptTokens = extractTokens(pctx.body, "prompt")
+				if promptTokens == 0 {
+					promptTokens = len(promptText) / 4
+				}
+				if completionTokens == 0 && responseText != "" {
+					completionTokens = len(responseText) / 4
+				}
+
+				var errMsg string
+				if statusCode >= 400 {
+					errMsg = string(errBody)
+				}
+
+				h.pipeline.Emit(&telemetry.LogEntry{
+					TenantID:         pctx.tenantID,
+					Model:            pctx.model,
+					Provider:         result.Credential.Provider,
+					PromptTokens:     promptTokens,
+					CompletionTokens: completionTokens,
+					LatencyMs:        int(time.Since(requestStart).Milliseconds()),
+					StatusCode:       statusCode,
+					ErrorMessage:     errMsg,
+					CreatedAt:        time.Now(),
+					Prompt:           promptText,
+					Response:         responseText,
+				})
+			}
 			return
 		}
 
-		// Retryable failure — penalize, log, and decide whether to loop.
+		// Retryable failure — determine penalty and whether to keep trying
 		lastErrBody = errBody
+		lastStatus = statusCode
+		lastProvider = result.Credential.Provider
 		cooldownDuration := cooldownForStatus(statusCode)
-
 		isSingleKey := pctx.pool.TotalCount == 1
 
-		if statusCode == http.StatusTooManyRequests && isSingleKey {
-			// 429 on a single-key pool: the rate-limit window is typically 30–60s.
-			// Retrying within the same request is pointless — there is no other
-			// key to fall back to and the window will not reset in milliseconds.
-			// Penalize with the full duration and break out immediately so the
-			// client gets a clean response and Kilo Code can back off.
+		requestID, _ := c.Get("request_id")
+
+		switch {
+		case isCredentialAuthError(statusCode):
+			// 401 / 402 / 403: this key is rejected by the provider (wrong tier,
+			// invalid key, account suspended). Penalize it for a long time so it
+			// won't be selected again this session, then immediately try the next key.
+			result.FromPool.PenalizeToken(result.Index, cooldownForStatus(statusCode))
+			h.logger.Warn("credential auth rejected — trying next key",
+				zap.String("request_id", fmt.Sprintf("%v", requestID)),
+				zap.String("model", pctx.model),
+				zap.String("provider", result.Credential.Provider),
+				zap.String("upstream_url", upstreamURL),
+				zap.Int("status", statusCode),
+				zap.Int("credential_id", result.Credential.ID),
+				zap.Int("keys_tried", triedCount),
+				zap.Duration("cooldown", cooldownDuration),
+			)
+			continue // immediately rotate to next key
+
+		case statusCode == http.StatusTooManyRequests && isSingleKey:
+			// 429 on a single-key pool: no point retrying — the window won't
+			// reset within this request. Penalize and return to client.
 			result.FromPool.PenalizeToken(result.Index, cooldownDuration)
-			requestID, _ := c.Get("request_id")
 			h.logger.Warn("rate-limited on single-key pool, aborting retries",
+				zap.String("request_id", fmt.Sprintf("%v", requestID)),
+				zap.String("model", pctx.model),
+				zap.String("provider", result.Credential.Provider),
+				zap.Int("status", statusCode),
+				zap.Duration("cooldown", cooldownDuration),
+			)
+			break
+
+		default:
+			// Transient server errors (500/502/503/504) or transport failures.
+			// Shorten cooldown on single-key to avoid long blackouts.
+			if isSingleKey {
+				cooldownDuration = 300 * time.Millisecond
+			}
+			result.FromPool.PenalizeToken(result.Index, cooldownDuration)
+			h.logger.Warn("upstream request failed, retrying with next key",
 				zap.String("request_id", fmt.Sprintf("%v", requestID)),
 				zap.String("model", pctx.model),
 				zap.String("provider", result.Credential.Provider),
 				zap.String("upstream_url", upstreamURL),
 				zap.String("tenant_id", pctx.tenantID),
 				zap.Int("status", statusCode),
+				zap.Int("attempt", attempt+1),
+				zap.Int("max_attempts", maxAttempts),
+				zap.Int("keys_tried", triedCount),
 				zap.Duration("cooldown", cooldownDuration),
 				zap.Duration("elapsed", time.Since(requestStart)),
+				zap.NamedError("transport_err", err),
 			)
-			break // jump to the "all attempts exhausted" response path
 		}
-
-		// For transient server errors (500/502/503/504) on a single-key pool,
-		// shorten the cooldown so one cold-start doesn't black out the key for
-		// 10–30 seconds. A short retry actually makes sense here.
-		if isSingleKey {
-			cooldownDuration = 300 * time.Millisecond
-		}
-		result.FromPool.PenalizeToken(result.Index, cooldownDuration)
-
-		requestID, _ := c.Get("request_id")
-		h.logger.Warn("upstream request failed, retrying",
-			zap.String("request_id", fmt.Sprintf("%v", requestID)),
-			zap.String("model", pctx.model),
-			zap.String("provider", result.Credential.Provider),
-			zap.String("upstream_url", upstreamURL),
-			zap.String("tenant_id", pctx.tenantID),
-			zap.Int("status", statusCode),
-			zap.Int("attempt", attempt+1),
-			zap.Int("max_attempts", maxAttempts),
-			zap.Duration("cooldown", cooldownDuration),
-			zap.Duration("elapsed", time.Since(requestStart)),
-			zap.NamedError("transport_err", err),
-		)
 	}
 
-	// All attempts exhausted. Now — and only now — write the final error to
-	// the client. This is the first time c.Writer is touched for a request
-	// that only ever received retryable upstream errors.
-	h.logger.Error("all retry attempts exhausted",
+	// All credentials tried and exhausted. Write the final error to the client.
+	h.logger.Error("all pool credentials exhausted",
 		zap.String("model", pctx.model),
 		zap.String("tenant_id", pctx.tenantID),
-		zap.Int("max_attempts", maxAttempts),
+		zap.Int("keys_tried", triedCount),
+		zap.Int("last_status", lastStatus),
+		zap.String("last_provider", lastProvider),
 		zap.Duration("total_elapsed", time.Since(requestStart)),
 	)
+
+	// Emit failure log entry
+	if h.pipeline != nil {
+		promptText := extractPromptText(pctx.body)
+		promptTokens := extractTokens(pctx.body, "prompt")
+		if promptTokens == 0 {
+			promptTokens = len(promptText) / 4
+		}
+		h.pipeline.Emit(&telemetry.LogEntry{
+			TenantID:     pctx.tenantID,
+			Model:        pctx.model,
+			Provider:     lastProvider,
+			PromptTokens: promptTokens,
+			LatencyMs:    int(time.Since(requestStart).Milliseconds()),
+			StatusCode:   http.StatusBadGateway,
+			ErrorMessage: "all upstream credentials exhausted; last response: " + string(lastErrBody),
+			CreatedAt:    time.Now(),
+			Prompt:       promptText,
+		})
+	}
+
 	if len(lastErrBody) > 0 {
 		c.Data(http.StatusBadGateway, "application/json", lastErrBody)
 	} else {
 		c.JSON(http.StatusBadGateway, gin.H{
-			"error": "all retry attempts exhausted",
-			"model": pctx.model,
+			"error":      "all upstream credentials exhausted",
+			"model":      pctx.model,
+			"keys_tried": triedCount,
 		})
 	}
 }
@@ -516,18 +616,28 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	}
 
 	// --- Success stream path ---
+	// --- Success stream path ---
 	if pctx.isStream && resp.StatusCode == http.StatusOK {
 		c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
 		c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
-		h.stream.ProxyStream(c, resp, cred.Provider)
-		return resp.StatusCode, upstreamURL, nil, nil
+		responseText, completionTokens := h.stream.ProxyStream(c, resp, cred.Provider)
+		
+		// Pack completion tokens and responseText into a temporary json to pass back to the retry worker
+		type streamResult struct {
+			Text   string `json:"text"`
+			Tokens int    `json:"tokens"`
+		}
+		resJSON, _ := json.Marshal(streamResult{Text: responseText, Tokens: completionTokens})
+		return resp.StatusCode, upstreamURL, resJSON, nil
 	}
 
 	// --- Non-retryable error or non-stream success: write directly to client ---
 	// This is the only place c.Writer.WriteHeader is called for these paths,
 	// so headers are sent exactly once.
+	// Note: 401/402/403/429/5xx are captured above by isRetryableStatus and
+	// never reach this branch — only hard request errors (400, 404, 422, etc.) do.
 	if resp.StatusCode >= 400 {
-		// Non-retryable client error (e.g. 400, 401, 403) — log the body for diagnostics
+		// Hard client error (e.g. 400 bad request, 404 not found, 422 validation error)
 		const maxErrBodyBytes = 4096
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes))
 		if readErr == nil && len(body) > 0 {
@@ -547,7 +657,7 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 			c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
 			c.Writer.WriteHeader(resp.StatusCode)
 			c.Writer.Write(body) //nolint:errcheck
-			return resp.StatusCode, upstreamURL, nil, nil
+			return resp.StatusCode, upstreamURL, body, nil
 		}
 	}
 
@@ -572,7 +682,7 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 			c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
 			c.Writer.WriteHeader(resp.StatusCode)
 			c.Writer.Write(respBody) //nolint:errcheck
-			return resp.StatusCode, upstreamURL, nil, nil
+			return resp.StatusCode, upstreamURL, respBody, nil
 		}
 		// Ollama response didn't match native format — fall through to stream as-is
 		for key, vals := range resp.Header {
@@ -584,13 +694,19 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
 		c.Writer.WriteHeader(resp.StatusCode)
 		c.Writer.Write(respBody) //nolint:errcheck
-		return resp.StatusCode, upstreamURL, nil, nil
+		return resp.StatusCode, upstreamURL, respBody, nil
 	}
 
-	// Normal success path — zero-copy stream directly to client.
-	// io.Copy avoids buffering the entire response body into heap memory,
-	// which is critical for image generation (large base64 payloads),
-	// audio responses, and any other large upstream responses.
+	// Normal success path — capture text responses for logging history.
+	// For JSON (application/json) content types, we read into memory to allow
+	// telemetry indexing. For binary formats (image, audio), we stream directly via io.Copy
+	// to avoid memory bloat.
+	isJSON := strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json")
+	var respBody []byte
+	if isJSON {
+		respBody, _ = io.ReadAll(resp.Body)
+	}
+
 	for key, vals := range resp.Header {
 		for _, val := range vals {
 			c.Writer.Header().Add(key, val)
@@ -599,9 +715,14 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
 	c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
 	c.Writer.WriteHeader(resp.StatusCode)
-	io.Copy(c.Writer, resp.Body) //nolint:errcheck
 
-	return resp.StatusCode, upstreamURL, nil, nil
+	if isJSON {
+		c.Writer.Write(respBody)
+		return resp.StatusCode, upstreamURL, respBody, nil
+	} else {
+		io.Copy(c.Writer, resp.Body) //nolint:errcheck
+		return resp.StatusCode, upstreamURL, nil, nil
+	}
 }
 
 // translateOllamaResponse converts a native Ollama non-streaming response body
@@ -743,10 +864,17 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 }
 
 // isRetryableStatus returns true for HTTP status codes that warrant a retry
-// with a different credential.
+// with a different credential. Two categories:
+//   - Credential auth errors (401/402/403): this key is invalid/insufficient —
+//     try all other keys in the pool before giving up.
+//   - Transient server errors (429/500/502/503/504): upstream is overloaded —
+//     penalize and try next key.
 func isRetryableStatus(status int) bool {
 	switch status {
-	case http.StatusTooManyRequests,       // 429 — rate limited
+	case http.StatusUnauthorized,          // 401 — bad/expired key
+		http.StatusPaymentRequired,        // 402 — quota exceeded / billing
+		http.StatusForbidden,              // 403 — insufficient tier / access denied
+		http.StatusTooManyRequests,        // 429 — rate limited
 		http.StatusInternalServerError,    // 500 — server error
 		http.StatusBadGateway,             // 502 — bad gateway
 		http.StatusServiceUnavailable,     // 503 — overloaded
@@ -756,9 +884,25 @@ func isRetryableStatus(status int) bool {
 	return false
 }
 
+// isCredentialAuthError returns true for status codes that indicate the
+// specific API key is rejected by the provider. These warrant rotating to
+// the next credential immediately with a long cooldown on the bad key.
+func isCredentialAuthError(status int) bool {
+	return status == http.StatusUnauthorized ||
+		status == http.StatusPaymentRequired ||
+		status == http.StatusForbidden
+}
+
 // cooldownForStatus returns appropriate cooldown duration based on error type.
+// Auth errors (401/402/403) use a random jitter between 20–30 minutes to
+// prevent all penalized keys from becoming available simultaneously.
 func cooldownForStatus(status int) time.Duration {
 	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired:
+		// Random 20–30 minutes: long enough to skip bad keys within a session,
+		// short enough that a temporarily-suspended key gets a retry window.
+		// Jitter prevents a thundering-herd re-activation of all bad keys at once.
+		return 20*time.Minute + time.Duration(rand.Intn(int(10*time.Minute)))
 	case http.StatusTooManyRequests:
 		return 30 * time.Second // Rate limited — longer cooldown
 	case http.StatusInternalServerError, http.StatusBadGateway:
@@ -766,7 +910,7 @@ func cooldownForStatus(status int) time.Duration {
 	case http.StatusServiceUnavailable:
 		return 15 * time.Second // Overloaded — moderate-long cooldown
 	case http.StatusGatewayTimeout:
-		return 5 * time.Second // Timeout — short cooldown
+		return 5 * time.Second  // Timeout — short cooldown
 	default:
 		return 5 * time.Second
 	}
@@ -937,4 +1081,45 @@ func extractModelFromMultipart(body []byte) string {
 	value := bytes.TrimSpace(rest[:end])
 	return string(value)
 }
+
+// --- Telemetry Log Extraction Helpers ---
+
+func extractPromptText(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	// Try "prompt" field first
+	if prompt, err := jsonparser.GetString(body, "prompt"); err == nil {
+		return prompt
+	}
+	// Extract the last user message content
+	var lastMessage string
+	_, _ = jsonparser.ArrayEach(body, func(value []byte, dataType jsonparser.ValueType, offset int, err error) {
+		if content, err := jsonparser.GetString(value, "content"); err == nil {
+			lastMessage = content
+		}
+	}, "messages")
+	return lastMessage
+}
+
+func extractResponseText(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	if content, err := jsonparser.GetString(body, "choices", "[0]", "message", "content"); err == nil {
+		return content
+	}
+	if content, err := jsonparser.GetString(body, "choices", "[0]", "text"); err == nil {
+		return content
+	}
+	return ""
+}
+
+func extractTokens(body []byte, promptOrCompletion string) int {
+	if val, err := jsonparser.GetInt(body, "usage", promptOrCompletion+"_tokens"); err == nil {
+		return int(val)
+	}
+	return 0
+}
+
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/buger/jsonparser"
 	"github.com/gin-gonic/gin"
 	"github.com/skadraneshghn/clever-ai-gate/internal/transmux"
 	"go.uber.org/zap"
@@ -17,11 +18,6 @@ import (
 // StreamProxy handles SSE (Server-Sent Events) streaming from upstream providers.
 // It reads upstream chunks line-by-line, passes them through a provider-specific
 // transmuxer for format normalization, and flushes each chunk to the client immediately.
-//
-// Safety guarantees:
-//   - All pooled buffers are returned via deferred recovery blocks, even on client disconnect
-//   - Transmuxer panics are caught and logged without crashing the gateway process
-//   - Scanner buffers are always returned to sync.Pool regardless of exit path
 type StreamProxy struct {
 	client      *http.Client
 	logger      *zap.Logger
@@ -41,32 +37,15 @@ func NewStreamProxy(client *http.Client, logger *zap.Logger) *StreamProxy {
 	}
 }
 
-// ProxyStream pipes SSE chunks from upstream to client with format translation.
-// Each chunk is flushed immediately for minimum Time To First Token (TTFT).
-//
-// Gap 1 Fix: Deferred allocation recovery guarantees all sync.Pool buffers are
-// returned even when a client abruptly severs their connection mid-stream
-// (e.g., developer aborts code generation in VS Code / Cline).
-//
-// Gap 3 Fix: Panic defender wraps the entire stream processing loop so that an
-// unhandled error inside a provider transmuxer cannot crash the gateway process.
-//
-// The flow:
-//  1. Set SSE response headers
-//  2. Create provider-specific transmuxer
-//  3. Read upstream line-by-line with bufio.Scanner
-//  4. For each "data: " prefixed line, transmux and flush
-//  5. On [DONE], send final event and close
-func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, provider string) {
+// ProxyStream pipes SSE chunks from upstream to client with format translation,
+// and returns the fully accumulated response text along with estimated completion tokens.
+func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, provider string) (responseText string, completionTokens int) {
 	// Acquire pooled scanner buffer
 	scanBuf := sp.scannerPool.Get().([]byte)
 
-	// Gap 1 + Gap 3: Absolute protection — guarantee buffer return and catch panics.
-	// This deferred block runs regardless of:
-	//   - Normal completion
-	//   - Client connection drop (broken pipe / connection reset)
-	//   - Transmuxer panic (malformed provider response, nil pointer, etc.)
-	//   - Scanner error on upstream read failure
+	var responseBuilder strings.Builder
+	var tokenEstimate int
+
 	defer func() {
 		// Always return the scanner buffer to the pool
 		sp.scannerPool.Put(scanBuf[:0])
@@ -108,11 +87,10 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		sp.logger.Error("response writer does not support flushing")
-		return
+		return "", 0
 	}
 
 	// Step 4: Read and transmux each SSE line
-	// Each write to the client is wrapped in error checking to detect disconnection
 	for scanner.Scan() {
 		line := scanner.Bytes()
 
@@ -129,34 +107,39 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 			if bytes.Equal(data, []byte("[DONE]")) {
 				c.Writer.Write([]byte("data: [DONE]\n\n"))
 				flusher.Flush()
+				responseText = responseBuilder.String()
+				completionTokens = tokenEstimate
 				return
 			}
 
 			// Transmux the chunk to OpenAI format
-			// Individual chunk errors are caught gracefully — raw data forwarded on failure
 			translated, err := tmx.TranslateChunk(data)
 			if err != nil {
 				sp.logger.Debug("transmux error, forwarding raw",
 					zap.String("provider", provider),
 					zap.Error(err),
 				)
-				// On transmux error, forward raw data
 				translated = data
 			}
 
 			if len(translated) > 0 {
-				// Detect client disconnect: if Write returns an error (broken pipe),
-				// the deferred recovery will clean up all resources
+				if content, err := jsonparser.GetString(translated, "choices", "[0]", "delta", "content"); err == nil {
+					responseBuilder.WriteString(content)
+					tokenEstimate++
+				}
+
 				if _, writeErr := c.Writer.Write([]byte("data: ")); writeErr != nil {
 					sp.logger.Debug("client disconnected during stream",
 						zap.String("provider", provider),
 						zap.Error(writeErr),
 					)
-					return // Deferred cleanup handles buffer return
+					responseText = responseBuilder.String()
+					completionTokens = tokenEstimate
+					return
 				}
 				c.Writer.Write(translated)
 				c.Writer.Write([]byte("\n\n"))
-				flusher.Flush() // Flush after every chunk for minimum TTFT
+				flusher.Flush()
 			}
 			continue
 		}
@@ -164,8 +147,6 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 		// Handle non-data SSE events (some providers send event types)
 		if bytes.HasPrefix(line, []byte("event: ")) {
 			eventType := string(line[7:])
-
-			// Anthropic uses event-based SSE
 			if provider == "anthropic" {
 				tmx.SetEventType(eventType)
 			}
@@ -174,20 +155,26 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 
 		// Handle provider-specific non-SSE streaming (e.g., Gemini JSON array)
 		if provider == "gemini" && len(line) > 0 && (line[0] == '[' || line[0] == ',' || line[0] == '{') {
-			sp.handleGeminiStream(c, flusher, tmx, line, scanner)
+			text, tok := sp.handleGeminiStream(c, flusher, tmx, line, scanner)
+			responseBuilder.WriteString(text)
+			tokenEstimate += tok
+			responseText = responseBuilder.String()
+			completionTokens = tokenEstimate
 			return
 		}
 
 		// Handle Ollama native NDJSON streaming (/api/chat and /api/generate).
-		// Ollama Cloud emits raw JSON objects per line — no "data: " prefix.
 		if provider == "ollama" && transmux.IsOllamaNativeChunk(line) {
-			sp.processOllamaChunk(c, flusher, tmx, line)
+			content := sp.processOllamaChunk(c, flusher, tmx, line)
+			if content != "" {
+				responseBuilder.WriteString(content)
+				tokenEstimate++
+			}
 			continue
 		}
 
 		// Forward any other lines as-is (comments, retry directives, etc.)
 		if bytes.HasPrefix(line, []byte(":")) {
-			// SSE comment — skip
 			continue
 		}
 	}
@@ -199,13 +186,22 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 	// Ensure [DONE] is sent even if upstream didn't send it
 	c.Writer.Write([]byte("data: [DONE]\n\n"))
 	flusher.Flush()
+
+	responseText = responseBuilder.String()
+	completionTokens = tokenEstimate
+	return
 }
 
 // handleGeminiStream processes Gemini's non-SSE JSON streaming format.
-// Gemini sends a JSON array of response objects, one per line.
-func (sp *StreamProxy) handleGeminiStream(c *gin.Context, flusher http.Flusher, tmx transmux.Transmuxer, firstLine []byte, scanner *bufio.Scanner) {
+func (sp *StreamProxy) handleGeminiStream(c *gin.Context, flusher http.Flusher, tmx transmux.Transmuxer, firstLine []byte, scanner *bufio.Scanner) (string, int) {
+	var sb strings.Builder
+	var tokens int
+
 	// Process the first line
-	sp.processGeminiChunk(c, flusher, tmx, firstLine)
+	if val := sp.processGeminiChunk(c, flusher, tmx, firstLine); val != "" {
+		sb.WriteString(val)
+		tokens++
+	}
 
 	// Continue reading
 	for scanner.Scan() {
@@ -213,20 +209,25 @@ func (sp *StreamProxy) handleGeminiStream(c *gin.Context, flusher http.Flusher, 
 		if len(line) == 0 || bytes.Equal(line, []byte("]")) {
 			continue
 		}
-		sp.processGeminiChunk(c, flusher, tmx, line)
+		if val := sp.processGeminiChunk(c, flusher, tmx, line); val != "" {
+			sb.WriteString(val)
+			tokens++
+		}
 	}
 
 	c.Writer.Write([]byte("data: [DONE]\n\n"))
 	flusher.Flush()
+
+	return sb.String(), tokens
 }
 
 // processOllamaChunk translates a single Ollama native NDJSON line into an
 // OpenAI-compatible SSE chunk and flushes it to the client.
-func (sp *StreamProxy) processOllamaChunk(c *gin.Context, flusher http.Flusher, tmx transmux.Transmuxer, chunk []byte) {
+func (sp *StreamProxy) processOllamaChunk(c *gin.Context, flusher http.Flusher, tmx transmux.Transmuxer, chunk []byte) string {
 	translated, err := tmx.TranslateChunk(chunk)
 	if err != nil {
 		sp.logger.Debug("ollama chunk transmux error", zap.Error(err))
-		return
+		return ""
 	}
 
 	if len(translated) > 0 {
@@ -234,22 +235,27 @@ func (sp *StreamProxy) processOllamaChunk(c *gin.Context, flusher http.Flusher, 
 		c.Writer.Write(translated)
 		c.Writer.Write([]byte("\n\n"))
 		flusher.Flush()
+
+		if content, err := jsonparser.GetString(translated, "choices", "[0]", "delta", "content"); err == nil {
+			return content
+		}
 	}
+	return ""
 }
 
-func (sp *StreamProxy) processGeminiChunk(c *gin.Context, flusher http.Flusher, tmx transmux.Transmuxer, chunk []byte) {
-	// Strip leading comma or bracket from JSON array format
+// processGeminiChunk translates a single Gemini JSON chunk into OpenAI SSE format.
+func (sp *StreamProxy) processGeminiChunk(c *gin.Context, flusher http.Flusher, tmx transmux.Transmuxer, chunk []byte) string {
 	chunk = bytes.TrimLeft(chunk, "[,")
 	chunk = bytes.TrimRight(chunk, "]")
 	chunk = bytes.TrimSpace(chunk)
 
 	if len(chunk) == 0 {
-		return
+		return ""
 	}
 
 	translated, err := tmx.TranslateChunk(chunk)
 	if err != nil {
-		return
+		return ""
 	}
 
 	if len(translated) > 0 {
@@ -257,8 +263,14 @@ func (sp *StreamProxy) processGeminiChunk(c *gin.Context, flusher http.Flusher, 
 		c.Writer.Write(translated)
 		c.Writer.Write([]byte("\n\n"))
 		flusher.Flush()
+
+		if content, err := jsonparser.GetString(translated, "choices", "[0]", "delta", "content"); err == nil {
+			return content
+		}
 	}
+	return ""
 }
+
 
 // ExtractStreamFlag checks the body for the stream flag without full unmarshalling.
 // Uses strings.Contains for minimal overhead.

@@ -26,6 +26,7 @@ type Config struct {
 
 	// Database
 	DatabaseURL string
+	RedisURL    string
 
 	// Security
 	MasterEncryptionKey string // AES-256-GCM key (32 bytes hex-encoded)
@@ -69,6 +70,7 @@ func Load() *Config {
 
 		// Database (required)
 		DatabaseURL: envRequired("DATABASE_URL"),
+		RedisURL:    envStr("REDIS_URL", ""),
 
 		// Security (required)
 		MasterEncryptionKey: envRequired("MASTER_ENCRYPTION_KEY"),

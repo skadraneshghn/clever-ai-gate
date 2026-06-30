@@ -119,6 +119,7 @@ func main() {
 		cfg.TelemetryQueueSize,
 		cfg.TelemetryBatchSize,
 		cfg.TelemetryFlushInterval,
+		cfg.RedisURL,
 	)
 	telemetryPipeline.Start()
 	defer telemetryPipeline.Stop()
@@ -126,7 +127,7 @@ func main() {
 	// --- Step 8: Build HTTP transport and proxy handler ---
 	transport := proxy.BuildOptimizedTransport(cfg)
 	httpClient := proxy.BuildHTTPClient(transport)
-	proxyHandler := proxy.NewHandler(httpClient, cacheStore, logger)
+	proxyHandler := proxy.NewHandler(httpClient, cacheStore, logger, telemetryPipeline)
 
 	// --- Step 9: Initialize health handler ---
 	healthHandler := health.New(dbPool)

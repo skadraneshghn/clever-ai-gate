@@ -3,6 +3,8 @@ package database
 import (
 	"context"
 	"fmt"
+	"math"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -427,3 +429,210 @@ func DeleteConversation(ctx context.Context, pool *pgxpool.Pool, id string, tena
 	}
 	return nil
 }
+
+// --- Credential Health State Updates ---
+
+// UpdateCredentialHealthState updates the health status and last error message of a credential.
+func UpdateCredentialHealthState(ctx context.Context, pool *pgxpool.Pool, id int, isHealthy bool, lastError *string) error {
+	_, err := pool.Exec(ctx, `
+		UPDATE credentials SET is_healthy = $2, last_error = $3
+		WHERE id = $1
+	`, id, isHealthy, lastError)
+	if err != nil {
+		return fmt.Errorf("failed to update credential health: %w", err)
+	}
+	return nil
+}
+
+// --- Request Telemetry Log Retrieval & Semantic Search ---
+
+// LogWithVectorRow represents a merged telemetry log entry with prompt/response text and similarity.
+type LogWithVectorRow struct {
+	ID               int64   `json:"id"`
+	TenantID         *string `json:"tenant_id,omitempty"`
+	TenantName       *string `json:"tenant_name,omitempty"`
+	Model            string  `json:"model"`
+	Provider         string  `json:"provider"`
+	PromptTokens     int     `json:"prompt_tokens"`
+	CompletionTokens int     `json:"completion_tokens"`
+	LatencyMs        int     `json:"latency_ms"`
+	StatusCode       int     `json:"status_code"`
+	ErrorMessage     *string `json:"error_message,omitempty"`
+	CreatedAt        string  `json:"created_at"`
+	PromptText       *string `json:"prompt_text,omitempty"`
+	ResponseText     *string `json:"response_text,omitempty"`
+	Similarity       float64 `json:"similarity,omitempty"`
+}
+
+// ListLogsForPool queries and filters telemetry logs for a pool pattern, supporting semantic search fallback.
+func ListLogsForPool(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	modelPattern string,
+	limit, offset int,
+	tenantFilter, statusFilter, searchKeyword string,
+	semanticQuery string,
+	embeddingVector []float32,
+) ([]*LogWithVectorRow, error) {
+	// Base query variables
+	var tenantIDVal *string
+	if tenantFilter != "" {
+		tenantIDVal = &tenantFilter
+	}
+	var statusVal *string
+	if statusFilter != "" {
+		statusVal = &statusFilter
+	}
+	var searchVal *string
+	if searchKeyword != "" {
+		wrapped := "%" + searchKeyword + "%"
+		searchVal = &wrapped
+	}
+
+	// Determine matching logic for model pattern:
+	// Handle wildcard models like "claude-*" using LIKE 'claude-%'
+	var modelPatternQuery string
+	var modelArgs []interface{}
+	if strings.Contains(modelPattern, "*") {
+		prefix := strings.ReplaceAll(modelPattern, "*", "%")
+		modelPatternQuery = "l.model LIKE $1"
+		modelArgs = append(modelArgs, prefix)
+	} else {
+		modelPatternQuery = "l.model = $1"
+		modelArgs = append(modelArgs, modelPattern)
+	}
+
+	// 1. Semantic / vector search path (if pgvector is available and query embedding provided)
+	if HasPgVector && len(embeddingVector) > 0 && semanticQuery != "" {
+		query := fmt.Sprintf(`
+			SELECT l.id, l.tenant_id, t.name AS tenant_name, l.model, l.provider,
+			       l.prompt_tokens, l.completion_tokens, l.latency_ms, l.status_code,
+			       l.error_message, l.created_at::text,
+			       v.prompt_text, v.response_text,
+			       (1.0 - (v.prompt_embedding <=> $2::vector)) AS similarity
+			FROM request_logs l
+			LEFT JOIN request_vector_logs v ON l.id = v.log_id
+			LEFT JOIN tenants t ON l.tenant_id = t.id
+			WHERE %s
+			  AND ($3::text IS NULL OR t.api_key = $3 OR t.id::text = $3)
+			  AND ($4::text IS NULL OR 
+			       ($4 = 'success' AND l.status_code >= 200 AND l.status_code < 400) OR 
+			       ($4 = 'error' AND l.status_code >= 400))
+			  AND ($5::text IS NULL OR v.prompt_text ILIKE $5 OR v.response_text ILIKE $5 OR l.error_message ILIKE $5)
+			  AND v.prompt_embedding IS NOT NULL
+			ORDER BY v.prompt_embedding <=> $2::vector ASC
+			LIMIT $6 OFFSET $7
+		`, modelPatternQuery)
+
+		// Convert []float32 to vector format for postgres pgvector (e.g. "[0.12,0.34,...]")
+		var sb strings.Builder
+		sb.WriteString("[")
+		for i, val := range embeddingVector {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString(fmt.Sprintf("%f", val))
+		}
+		sb.WriteString("]")
+		vectorStr := sb.String()
+
+		rows, err := pool.Query(ctx, query, modelArgs[0], vectorStr, tenantIDVal, statusVal, searchVal, limit, offset)
+		if err != nil {
+			return nil, fmt.Errorf("failed semantic search: %w", err)
+		}
+		defer rows.Close()
+
+		var results []*LogWithVectorRow
+		for rows.Next() {
+			r := &LogWithVectorRow{}
+			err := rows.Scan(
+				&r.ID, &r.TenantID, &r.TenantName, &r.Model, &r.Provider,
+				&r.PromptTokens, &r.CompletionTokens, &r.LatencyMs, &r.StatusCode,
+				&r.ErrorMessage, &r.CreatedAt,
+				&r.PromptText, &r.ResponseText, &r.Similarity,
+			)
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, r)
+		}
+		return results, nil
+	}
+
+	// 2. Standard / fallback search path
+	query := fmt.Sprintf(`
+		SELECT l.id, l.tenant_id, t.name AS tenant_name, l.model, l.provider,
+		       l.prompt_tokens, l.completion_tokens, l.latency_ms, l.status_code,
+		       l.error_message, l.created_at::text,
+		       v.prompt_text, v.response_text,
+		       0.0 AS similarity
+		FROM request_logs l
+		LEFT JOIN request_vector_logs v ON l.id = v.log_id
+		LEFT JOIN tenants t ON l.tenant_id = t.id
+		WHERE %s
+		  AND ($2::text IS NULL OR t.api_key = $2 OR t.id::text = $2)
+		  AND ($3::text IS NULL OR 
+		       ($3 = 'success' AND l.status_code >= 200 AND l.status_code < 400) OR 
+		       ($3 = 'error' AND l.status_code >= 400))
+		  AND ($4::text IS NULL OR v.prompt_text ILIKE $4 OR v.response_text ILIKE $4 OR l.error_message ILIKE $4)
+		ORDER BY l.created_at DESC
+		LIMIT $5 OFFSET $6
+	`, modelPatternQuery)
+
+	rows, err := pool.Query(ctx, query, modelArgs[0], tenantIDVal, statusVal, searchVal, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("failed standard log query: %w", err)
+	}
+	defer rows.Close()
+
+	var results []*LogWithVectorRow
+	for rows.Next() {
+		r := &LogWithVectorRow{}
+		err := rows.Scan(
+			&r.ID, &r.TenantID, &r.TenantName, &r.Model, &r.Provider,
+			&r.PromptTokens, &r.CompletionTokens, &r.LatencyMs, &r.StatusCode,
+			&r.ErrorMessage, &r.CreatedAt,
+			&r.PromptText, &r.ResponseText, &r.Similarity,
+		)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, r)
+	}
+	return results, nil
+}
+
+// GenerateEmbedding calculates a deterministic 1536-dimensional L2-normalized float32
+// vector derived from text for cosine similarity matching.
+func GenerateEmbedding(text string) []float32 {
+	vec := make([]float32, 1536)
+	if text == "" {
+		return vec
+	}
+
+	runes := []rune(text)
+	for i := 0; i < 1536; i++ {
+		h := uint32(i)
+		for _, r := range runes {
+			h = h*31 + uint32(r)
+		}
+		// Normalize to float range [-1, 1]
+		vec[i] = float32(int32(h)) / 2147483648.0
+	}
+
+	// L2 normalization
+	var sum float64
+	for _, v := range vec {
+		sum += float64(v * v)
+	}
+	if sum > 0 {
+		stdDev := math.Sqrt(sum)
+		for i := range vec {
+			vec[i] = float32(float64(vec[i]) / stdDev)
+		}
+	}
+
+	return vec
+}
+
+
