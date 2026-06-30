@@ -108,13 +108,14 @@ type ModelPoolRow struct {
 	ModelPattern   string
 	Strategy       string
 	FallbackPoolID *int
+	Capabilities   []byte // Raw JSONB bytes — decoded by callers
 	CreatedAt      string
 }
 
 // ListModelPools returns all model routing pools.
 func ListModelPools(ctx context.Context, pool *pgxpool.Pool) ([]*ModelPoolRow, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT id, model_pattern, strategy, fallback_pool_id, created_at::text
+		SELECT id, model_pattern, strategy, fallback_pool_id, capabilities, created_at::text
 		FROM model_pools ORDER BY model_pattern
 	`)
 	if err != nil {
@@ -125,7 +126,7 @@ func ListModelPools(ctx context.Context, pool *pgxpool.Pool) ([]*ModelPoolRow, e
 	var pools []*ModelPoolRow
 	for rows.Next() {
 		p := &ModelPoolRow{}
-		if err := rows.Scan(&p.ID, &p.ModelPattern, &p.Strategy, &p.FallbackPoolID, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.ModelPattern, &p.Strategy, &p.FallbackPoolID, &p.Capabilities, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan pool: %w", err)
 		}
 		pools = append(pools, p)
@@ -136,12 +137,12 @@ func ListModelPools(ctx context.Context, pool *pgxpool.Pool) ([]*ModelPoolRow, e
 // GetModelPool returns a single model pool by ID.
 func GetModelPool(ctx context.Context, dbPool *pgxpool.Pool, id int) (*ModelPoolRow, error) {
 	row := dbPool.QueryRow(ctx, `
-		SELECT id, model_pattern, strategy, fallback_pool_id, created_at::text
+		SELECT id, model_pattern, strategy, fallback_pool_id, capabilities, created_at::text
 		FROM model_pools WHERE id = $1
 	`, id)
 
 	p := &ModelPoolRow{}
-	err := row.Scan(&p.ID, &p.ModelPattern, &p.Strategy, &p.FallbackPoolID, &p.CreatedAt)
+	err := row.Scan(&p.ID, &p.ModelPattern, &p.Strategy, &p.FallbackPoolID, &p.Capabilities, &p.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}

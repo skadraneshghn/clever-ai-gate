@@ -61,27 +61,35 @@ func DiscoverAndRegisterNvidiaModels(ctx context.Context, db *pgxpool.Pool, vaul
 
 	for _, m := range modelList.Data {
 		var poolID int
-		
+
 		// Ensure model_pattern contains the required prefix for routing matching logic
 		// We prepend "nvidia/" prefix so that they automatically hit the NVIDIA proxy routes!
 		modelPattern := "nvidia/" + m.ID
 
-		// Insert or fetch the model pool ID
-		err = tx.QueryRow(ctx, 
-			`INSERT INTO model_pools (model_pattern, strategy) 
-			 VALUES ($1, 'round-robin') 
-			 ON CONFLICT (model_pattern) DO UPDATE SET model_pattern = EXCLUDED.model_pattern
-			 RETURNING id`, 
-			modelPattern,
+		// Classify capabilities — NVIDIA models are often reasoning-capable
+		caps := ClassifyModel(modelPattern)
+		capsJSON, err := json.Marshal(caps.ToMap())
+		if err != nil {
+			capsJSON = []byte("{}")
+		}
+
+		// Insert or fetch the model pool ID, updating capabilities on conflict
+		err = tx.QueryRow(ctx,
+			`INSERT INTO model_pools (model_pattern, strategy, capabilities)
+			 VALUES ($1, 'round-robin', $2)
+			 ON CONFLICT (model_pattern) DO UPDATE
+			 SET capabilities = EXCLUDED.capabilities
+			 RETURNING id`,
+			modelPattern, capsJSON,
 		).Scan(&poolID)
-		
+
 		if err != nil {
 			return 0, nil, fmt.Errorf("failed to upsert model pool row for %s: %w", modelPattern, err)
 		}
 
 		// Connect the discovered model pool directly to our hardware key credential
 		_, err = tx.Exec(ctx,
-			`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy) 
+			`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
 			 VALUES ($1, 'nvidia', $2, $3, $4, true)
 			 ON CONFLICT DO NOTHING`, // prevents duplicates if the same key is submitted twice
 			poolID, encryptedKey, baseURL, weight,

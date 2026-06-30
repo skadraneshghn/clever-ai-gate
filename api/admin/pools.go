@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 
@@ -40,11 +41,19 @@ func (h *PoolHandler) List(c *gin.Context) {
 	for i, p := range pools {
 		// Get credential count
 		creds, _ := database.ListCredentialsByPool(c.Request.Context(), h.db, p.ID)
+
+		// Decode capabilities JSONB into map
+		var caps map[string]bool
+		if len(p.Capabilities) > 0 {
+			_ = json.Unmarshal(p.Capabilities, &caps)
+		}
+
 		resp[i] = dto.PoolResponse{
 			ID:              p.ID,
 			ModelPattern:    p.ModelPattern,
 			Strategy:        p.Strategy,
 			FallbackPoolID:  p.FallbackPoolID,
+			Capabilities:    caps,
 			CredentialCount: len(creds),
 			CreatedAt:       p.CreatedAt,
 		}
@@ -97,11 +106,18 @@ func (h *PoolHandler) Get(c *gin.Context) {
 		}
 	}
 
+	// Decode capabilities JSONB
+	var caps map[string]bool
+	if len(pool.Capabilities) > 0 {
+		_ = json.Unmarshal(pool.Capabilities, &caps)
+	}
+
 	c.JSON(http.StatusOK, dto.PoolResponse{
 		ID:              pool.ID,
 		ModelPattern:    pool.ModelPattern,
 		Strategy:        pool.Strategy,
 		FallbackPoolID:  pool.FallbackPoolID,
+		Capabilities:    caps,
 		CredentialCount: len(creds),
 		Credentials:     credResponses,
 		CreatedAt:       pool.CreatedAt,

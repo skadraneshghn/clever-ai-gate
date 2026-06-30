@@ -2,6 +2,7 @@ package credentials
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -12,6 +13,15 @@ import (
 	"github.com/skadraneshghn/clever-ai-gate/internal/database"
 	"go.uber.org/zap"
 )
+
+// ActiveModel holds the routing key and detected capabilities for a model.
+// Stored in the Ristretto cache under "system:active_models" as []ActiveModel.
+// The Capabilities map is decoded from the JSONB column at cache load time —
+// zero extra DB round-trips at request time.
+type ActiveModel struct {
+	Pattern      string          `json:"id"`
+	Capabilities map[string]bool `json:"capabilities,omitempty"`
+}
 
 // SyncManager handles real-time configuration synchronization between
 // PostgreSQL and the in-memory routing cache using LISTEN/NOTIFY.
@@ -114,10 +124,22 @@ func (sm *SyncManager) LoadInitialState(ctx context.Context) error {
 		}
 	}
 
-	// Cache active models list for /v1/models endpoint
-	var activeModels []string
-	for m := range poolMap {
-		activeModels = append(activeModels, m)
+	// Cache active models list for /v1/models endpoint.
+	// Store as []ActiveModel (rich objects) so ListModels can return
+	// capabilities without additional DB queries.
+	var activeModels []ActiveModel
+	for _, pr := range poolRows {
+		am := ActiveModel{Pattern: pr.ModelPattern}
+		if len(pr.Capabilities) > 0 && string(pr.Capabilities) != "{}" {
+			if err := json.Unmarshal(pr.Capabilities, &am.Capabilities); err != nil {
+				// Non-fatal: log and continue without capabilities
+				sm.logger.Warn("failed to decode model capabilities",
+					zap.String("model", pr.ModelPattern),
+					zap.Error(err),
+				)
+			}
+		}
+		activeModels = append(activeModels, am)
 	}
 	sm.cache.Set("system:active_models", activeModels, 1000)
 

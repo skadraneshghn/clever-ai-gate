@@ -773,11 +773,14 @@ func cooldownForStatus(status int) time.Duration {
 }
 
 // ModelDetail represents model information in OpenAI format.
+// The Capabilities field is a gateway extension — OpenAI clients ignore
+// unknown fields, so this is safe for all compliant tooling.
 type ModelDetail struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	OwnedBy string `json:"owned_by"`
+	ID           string          `json:"id"`
+	Object       string          `json:"object"`
+	Created      int64           `json:"created"`
+	OwnedBy      string          `json:"owned_by"`
+	Capabilities map[string]bool `json:"capabilities,omitempty"`
 }
 
 // ModelListResponse represents the OpenAI list models response.
@@ -786,23 +789,32 @@ type ModelListResponse struct {
 	Data   []ModelDetail `json:"data"`
 }
 
-// ListModels returns a list of configured active model pools.
+// ListModels returns a list of configured active model pools with their
+// detected capabilities in OpenAI-compatible format.
 func (h *Handler) ListModels(c *gin.Context) {
 	val, found := h.cache.Get("system:active_models")
-	var models []string
+
+	var data []ModelDetail
+	now := time.Now().Unix()
+
 	if found {
-		models = val.([]string)
+		// New enriched format: []credentials.ActiveModel
+		if models, ok := val.([]credentials.ActiveModel); ok {
+			data = make([]ModelDetail, len(models))
+			for i, m := range models {
+				data[i] = ModelDetail{
+					ID:           m.Pattern,
+					Object:       "model",
+					Created:      now,
+					OwnedBy:      "clever-ai-gate",
+					Capabilities: m.Capabilities,
+				}
+			}
+		}
 	}
 
-	data := make([]ModelDetail, len(models))
-	now := time.Now().Unix()
-	for i, m := range models {
-		data[i] = ModelDetail{
-			ID:      m,
-			Object:  "model",
-			Created: now,
-			OwnedBy: "clever-ai-gate",
-		}
+	if data == nil {
+		data = []ModelDetail{}
 	}
 
 	c.JSON(http.StatusOK, ModelListResponse{
@@ -810,6 +822,7 @@ func (h *Handler) ListModels(c *gin.Context) {
 		Data:   data,
 	})
 }
+
 
 // --- NVIDIA Reasoning Parameter Injection ---
 

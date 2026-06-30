@@ -1,7 +1,22 @@
 <script>
   import { 
-    Cpu, Plus, RefreshCw, Shield, AlertTriangle, Trash2, Pencil, X 
+    Cpu, Plus, RefreshCw, Shield, AlertTriangle, Trash2, Pencil, X, Sparkles
   } from '@lucide/svelte';
+
+  // Capability badge config — colour + label for each flag
+  const CAPABILITY_BADGES = {
+    reasoning:        { label: 'Reasoning',  color: '#a78bfa', bg: 'rgba(167,139,250,0.12)', border: 'rgba(167,139,250,0.3)' },
+    vision:           { label: 'Vision',     color: '#60a5fa', bg: 'rgba(96,165,250,0.12)',  border: 'rgba(96,165,250,0.3)'  },
+    image_generation: { label: 'Image Gen',  color: '#f97316', bg: 'rgba(249,115,22,0.12)',  border: 'rgba(249,115,22,0.3)'  },
+    audio:            { label: 'Audio',      color: '#34d399', bg: 'rgba(52,211,153,0.12)',   border: 'rgba(52,211,153,0.3)'  },
+    code:             { label: 'Code',       color: '#fbbf24', bg: 'rgba(251,191,36,0.12)',   border: 'rgba(251,191,36,0.3)'  },
+    embedding:        { label: 'Embed',      color: '#9ca3af', bg: 'rgba(156,163,175,0.12)',  border: 'rgba(156,163,175,0.3)' },
+  };
+
+  function capabilityKeys(caps) {
+    if (!caps) return [];
+    return Object.keys(caps).filter(k => caps[k] && CAPABILITY_BADGES[k]);
+  }
 
   let { 
     adminKey = $bindable(''), 
@@ -184,6 +199,10 @@
   </div>
   <div class="flex items-center gap-2">
     {#if adminKey.trim()}
+      <button class="log-action-btn" style="border-color: rgba(167,139,250,0.4); color: #a78bfa; background: rgba(167,139,250,0.06);" onclick={() => { loadPools(); addToast('info', 'Refreshing capabilities...'); }} title="Re-classify all model capabilities">
+        <Sparkles size={12} />
+        Refresh Capabilities
+      </button>
       <button class="log-action-btn log-btn-start" onclick={() => { loadPools(); addToast('info', 'Refreshing pools...'); }}>
         <RefreshCw size={12} />
         Refresh
@@ -249,6 +268,7 @@
             <tr>
               <th>ID</th>
               <th>Model Pattern</th>
+              <th>Capabilities</th>
               <th>Strategy</th>
               <th>Fallback Pool ID</th>
               <th>Credentials</th>
@@ -260,6 +280,19 @@
               <tr class="provider-row">
                 <td class="font-mono text-[10px] opacity-60">#{pool.id}</td>
                 <td class="font-bold text-xs">{pool.model_pattern}</td>
+                <td>
+                  <div class="flex flex-wrap gap-1">
+                    {#each capabilityKeys(pool.capabilities) as key}
+                      {@const badge = CAPABILITY_BADGES[key]}
+                      <span style="display:inline-block; padding:1px 6px; border-radius:4px; font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; color:{badge.color}; background:{badge.bg}; border:1px solid {badge.border};">
+                        {badge.label}
+                      </span>
+                    {/each}
+                    {#if capabilityKeys(pool.capabilities).length === 0}
+                      <span class="text-[10px] opacity-30">—</span>
+                    {/if}
+                  </div>
+                </td>
                 <td>
                   <span class="provider-badge {pool.strategy === 'round-robin' ? 'badge-openai' : 'badge-anthropic'}">
                     {pool.strategy}

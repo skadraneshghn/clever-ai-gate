@@ -20,6 +20,7 @@ type PoolResponse struct {
 	ModelPattern    string               `json:"model_pattern" example:"gpt-4o"`
 	Strategy        string               `json:"strategy" example:"round-robin"`
 	FallbackPoolID  *int                 `json:"fallback_pool_id,omitempty" example:"2"`
+	Capabilities    map[string]bool      `json:"capabilities,omitempty"`
 	CredentialCount int                  `json:"credential_count,omitempty" example:"3"`
 	Credentials     []CredentialResponse `json:"credentials,omitempty"`
 	CreatedAt       string               `json:"created_at" example:"2024-01-15T10:30:00Z"`

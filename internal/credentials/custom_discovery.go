@@ -107,14 +107,22 @@ func DiscoverAndRegisterCustomModels(ctx context.Context, db *pgxpool.Pool, vaul
 		// if OpenAI and Together both host "gpt-4o", they share the same pool.
 		modelPattern := m.ID
 
-		// Upsert the model pool. ON CONFLICT keeps the existing pool and
-		// returns its ID so the new credential joins the same routing ring.
+		// Classify the model capabilities from its identifier
+		caps := ClassifyModel(modelPattern)
+		capsJSON, err := json.Marshal(caps.ToMap())
+		if err != nil {
+			capsJSON = []byte("{}")
+		}
+
+		// Upsert the model pool. ON CONFLICT updates capabilities so that
+		// re-running discovery refreshes detected feature flags live.
 		err = tx.QueryRow(ctx,
-			`INSERT INTO model_pools (model_pattern, strategy)
-			 VALUES ($1, 'round-robin')
-			 ON CONFLICT (model_pattern) DO UPDATE SET model_pattern = EXCLUDED.model_pattern
+			`INSERT INTO model_pools (model_pattern, strategy, capabilities)
+			 VALUES ($1, 'round-robin', $2)
+			 ON CONFLICT (model_pattern) DO UPDATE
+			 SET capabilities = EXCLUDED.capabilities
 			 RETURNING id`,
-			modelPattern,
+			modelPattern, capsJSON,
 		).Scan(&poolID)
 
 		if err != nil {

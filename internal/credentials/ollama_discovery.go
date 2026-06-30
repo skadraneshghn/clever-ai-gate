@@ -104,16 +104,24 @@ func DiscoverAndRegisterOllamaModels(ctx context.Context, db *pgxpool.Pool, vaul
 		// proxy routes in the handler.
 		modelPattern := "ollama/" + modelID
 
-		// Insert or fetch the model pool ID.
+		// Classify capabilities from the model name
+		caps := ClassifyModel(modelPattern)
+		capsJSON, err := json.Marshal(caps.ToMap())
+		if err != nil {
+			capsJSON = []byte("{}")
+		}
+
+		// Insert or fetch the model pool ID, updating capabilities on conflict.
 		// If another Ollama account already registered this model, the ON CONFLICT
-		// clause keeps the existing pool and merely returns its ID — the new
+		// clause updates capabilities and returns the existing pool ID — the new
 		// credential is then bound to the same pool for multi-account load balancing.
 		err = tx.QueryRow(ctx,
-			`INSERT INTO model_pools (model_pattern, strategy)
-			 VALUES ($1, 'round-robin')
-			 ON CONFLICT (model_pattern) DO UPDATE SET model_pattern = EXCLUDED.model_pattern
+			`INSERT INTO model_pools (model_pattern, strategy, capabilities)
+			 VALUES ($1, 'round-robin', $2)
+			 ON CONFLICT (model_pattern) DO UPDATE
+			 SET capabilities = EXCLUDED.capabilities
 			 RETURNING id`,
-			modelPattern,
+			modelPattern, capsJSON,
 		).Scan(&poolID)
 
 		if err != nil {
