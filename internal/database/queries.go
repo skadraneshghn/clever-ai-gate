@@ -202,13 +202,14 @@ type CredentialRow struct {
 	IsHealthy    bool
 	LastError    *string
 	CreatedAt    string
+	Prefix       string
 }
 
 // ListCredentialsByPool returns all credentials for a given pool.
 func ListCredentialsByPool(ctx context.Context, pool *pgxpool.Pool, poolID int) ([]*CredentialRow, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT id, pool_id, provider, encrypted_key, base_url, weight, 
-		       is_healthy, last_error, created_at::text
+		       is_healthy, last_error, created_at::text, prefix
 		FROM credentials WHERE pool_id = $1 ORDER BY id
 	`, poolID)
 	if err != nil {
@@ -219,7 +220,7 @@ func ListCredentialsByPool(ctx context.Context, pool *pgxpool.Pool, poolID int) 
 	var creds []*CredentialRow
 	for rows.Next() {
 		c := &CredentialRow{}
-		if err := rows.Scan(&c.ID, &c.PoolID, &c.Provider, &c.EncryptedKey, &c.BaseURL, &c.Weight, &c.IsHealthy, &c.LastError, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.PoolID, &c.Provider, &c.EncryptedKey, &c.BaseURL, &c.Weight, &c.IsHealthy, &c.LastError, &c.CreatedAt, &c.Prefix); err != nil {
 			return nil, fmt.Errorf("failed to scan credential: %w", err)
 		}
 		creds = append(creds, c)
@@ -240,7 +241,7 @@ func ListAllCredentials(ctx context.Context, pool *pgxpool.Pool) ([]*CredentialW
 	rows, err := pool.Query(ctx, `
 		SELECT c.id, c.pool_id, c.provider, c.encrypted_key, c.base_url, c.weight,
 		       c.is_healthy, c.last_error, c.created_at::text,
-		       COALESCE(mp.model_pattern, '') AS model_pattern
+		       COALESCE(mp.model_pattern, '') AS model_pattern, c.prefix
 		FROM credentials c
 		LEFT JOIN model_pools mp ON c.pool_id = mp.id
 		ORDER BY c.id
@@ -255,7 +256,7 @@ func ListAllCredentials(ctx context.Context, pool *pgxpool.Pool) ([]*CredentialW
 		c := &CredentialWithPool{}
 		if err := rows.Scan(
 			&c.ID, &c.PoolID, &c.Provider, &c.EncryptedKey, &c.BaseURL, &c.Weight,
-			&c.IsHealthy, &c.LastError, &c.CreatedAt, &c.ModelPattern,
+			&c.IsHealthy, &c.LastError, &c.CreatedAt, &c.ModelPattern, &c.Prefix,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan credential: %w", err)
 		}
@@ -268,12 +269,12 @@ func ListAllCredentials(ctx context.Context, pool *pgxpool.Pool) ([]*CredentialW
 func GetCredential(ctx context.Context, pool *pgxpool.Pool, id int) (*CredentialRow, error) {
 	row := pool.QueryRow(ctx, `
 		SELECT id, pool_id, provider, encrypted_key, base_url, weight,
-		       is_healthy, last_error, created_at::text
+		       is_healthy, last_error, created_at::text, prefix
 		FROM credentials WHERE id = $1
 	`, id)
 
 	c := &CredentialRow{}
-	err := row.Scan(&c.ID, &c.PoolID, &c.Provider, &c.EncryptedKey, &c.BaseURL, &c.Weight, &c.IsHealthy, &c.LastError, &c.CreatedAt)
+	err := row.Scan(&c.ID, &c.PoolID, &c.Provider, &c.EncryptedKey, &c.BaseURL, &c.Weight, &c.IsHealthy, &c.LastError, &c.CreatedAt, &c.Prefix)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -284,13 +285,13 @@ func GetCredential(ctx context.Context, pool *pgxpool.Pool, id int) (*Credential
 }
 
 // CreateCredential inserts a new provider credential.
-func CreateCredential(ctx context.Context, pool *pgxpool.Pool, poolID int, provider, encryptedKey, baseURL string, weight int) (int, error) {
+func CreateCredential(ctx context.Context, pool *pgxpool.Pool, poolID int, provider, encryptedKey, baseURL string, weight int, prefix string) (int, error) {
 	var id int
 	err := pool.QueryRow(ctx, `
-		INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, prefix)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id
-	`, poolID, provider, encryptedKey, baseURL, weight).Scan(&id)
+	`, poolID, provider, encryptedKey, baseURL, weight, prefix).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("failed to create credential: %w", err)
 	}
@@ -298,12 +299,12 @@ func CreateCredential(ctx context.Context, pool *pgxpool.Pool, poolID int, provi
 }
 
 // UpdateCredential updates a credential's mutable fields.
-func UpdateCredential(ctx context.Context, pool *pgxpool.Pool, id int, provider, encryptedKey, baseURL string, weight int, isHealthy bool) error {
+func UpdateCredential(ctx context.Context, pool *pgxpool.Pool, id int, provider, encryptedKey, baseURL string, weight int, isHealthy bool, prefix string) error {
 	_, err := pool.Exec(ctx, `
 		UPDATE credentials SET provider = $2, encrypted_key = $3, base_url = $4, 
-		       weight = $5, is_healthy = $6
+		       weight = $5, is_healthy = $6, prefix = $7
 		WHERE id = $1
-	`, id, provider, encryptedKey, baseURL, weight, isHealthy)
+	`, id, provider, encryptedKey, baseURL, weight, isHealthy, prefix)
 	if err != nil {
 		return fmt.Errorf("failed to update credential: %w", err)
 	}

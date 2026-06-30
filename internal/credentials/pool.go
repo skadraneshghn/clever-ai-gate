@@ -14,6 +14,7 @@ type RuntimeCredential struct {
 	BaseURL       string // Provider base URL
 	Weight        int    // Distribution weight
 	CooldownUntil int64  // Unix nanosecond; managed via atomic ops
+	Prefix        string // Optional routing prefix to strip before forwarding
 }
 
 // IsAvailable checks if this credential is past its cooldown period.
@@ -119,6 +120,35 @@ func (p *BalancedChannelPool) PenalizeToken(index int, duration time.Duration) {
 	}
 	cooldownTime := time.Now().Add(duration).UnixNano()
 	atomic.StoreInt64(&p.Credentials[index].CooldownUntil, cooldownTime)
+}
+
+// PenalizeByCredID marks a credential by ID as unavailable until the given
+// Unix nanosecond timestamp. Used by the cluster broadcaster to apply events
+// received from peer nodes without needing an index.
+func (p *BalancedChannelPool) PenalizeByCredID(credID int, untilNs int64) {
+	if p == nil {
+		return
+	}
+	for _, cred := range p.Credentials {
+		if cred.ID == credID {
+			atomic.StoreInt64(&cred.CooldownUntil, untilNs)
+			return
+		}
+	}
+}
+
+// ResetByCredID clears the cooldown for a credential identified by ID.
+// Used by the cluster broadcaster to apply reset events from peer nodes.
+func (p *BalancedChannelPool) ResetByCredID(credID int) {
+	if p == nil {
+		return
+	}
+	for _, cred := range p.Credentials {
+		if cred.ID == credID {
+			atomic.StoreInt64(&cred.CooldownUntil, 0)
+			return
+		}
+	}
 }
 
 // ResetCooldown clears the cooldown on a specific credential.

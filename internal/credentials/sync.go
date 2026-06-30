@@ -90,6 +90,7 @@ func (sm *SyncManager) LoadInitialState(ctx context.Context) error {
 				APIKey:   decryptedKey,
 				BaseURL:  cr.BaseURL,
 				Weight:   cr.Weight,
+				Prefix:   cr.Prefix,
 			})
 		}
 
@@ -281,4 +282,11 @@ func (sm *SyncManager) GetPool(model string) *BalancedChannelPool {
 		return nil
 	}
 	return (*pools)[model]
+}
+
+// GetPoolForCluster returns a BalancedChannelPool as a cluster.PenalizerPool
+// interface for use by the cluster broadcaster subscriber.
+// Returns nil if the pool does not exist.
+func (sm *SyncManager) GetPoolForCluster(pattern string) *BalancedChannelPool {
+	return sm.GetPool(pattern)
 }

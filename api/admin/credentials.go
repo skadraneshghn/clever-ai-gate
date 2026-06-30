@@ -51,6 +51,7 @@ func (h *CredentialHandler) List(c *gin.Context) {
 			LastError:    cr.LastError,
 			KeyMask:      dto.MaskAPIKey(cr.EncryptedKey),
 			ModelPattern: cr.ModelPattern,
+			Prefix:       cr.Prefix,
 			CreatedAt:    cr.CreatedAt,
 		}
 	}
@@ -99,7 +100,7 @@ func (h *CredentialHandler) Create(c *gin.Context) {
 		return
 	}
 
-	id, err := database.CreateCredential(c.Request.Context(), h.db, req.PoolID, req.Provider, encryptedKey, req.BaseURL, req.Weight)
+	id, err := database.CreateCredential(c.Request.Context(), h.db, req.PoolID, req.Provider, encryptedKey, req.BaseURL, req.Weight, req.Prefix)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to create credential", Details: err.Error()})
 		return
@@ -113,6 +114,7 @@ func (h *CredentialHandler) Create(c *gin.Context) {
 		Weight:    req.Weight,
 		IsHealthy: true,
 		KeyMask:   dto.MaskAPIKey(req.APIKey),
+		Prefix:    req.Prefix,
 	})
 }
 
@@ -152,6 +154,7 @@ func (h *CredentialHandler) Get(c *gin.Context) {
 		IsHealthy: cred.IsHealthy,
 		LastError: cred.LastError,
 		KeyMask:   dto.MaskAPIKey(cred.EncryptedKey),
+		Prefix:    cred.Prefix,
 		CreatedAt: cred.CreatedAt,
 	})
 }
@@ -201,7 +204,7 @@ func (h *CredentialHandler) Update(c *gin.Context) {
 		encryptedKey = existing.EncryptedKey
 	}
 
-	err = database.UpdateCredential(c.Request.Context(), h.db, id, req.Provider, encryptedKey, req.BaseURL, req.Weight, req.IsHealthy)
+	err = database.UpdateCredential(c.Request.Context(), h.db, id, req.Provider, encryptedKey, req.BaseURL, req.Weight, req.IsHealthy, req.Prefix)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to update credential", Details: err.Error()})
 		return
@@ -387,6 +390,7 @@ func (h *CredentialHandler) RegisterCustomProvider(c *gin.Context) {
 		req.BaseURL,
 		providerLabel,
 		req.Weight,
+		req.Prefix,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "OpenAI-compatible provider discovery failed", Details: err.Error()})

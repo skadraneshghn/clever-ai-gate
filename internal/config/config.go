@@ -28,6 +28,13 @@ type Config struct {
 	DatabaseURL string
 	RedisURL    string
 
+	// Redis connection pool tuning
+	RedisPoolSize    int
+	RedisMinIdle     int
+	RedisReadTimeout time.Duration
+	RedisWriteTimeout time.Duration
+	RedisDialTimeout  time.Duration
+
 	// Security
 	MasterEncryptionKey string // AES-256-GCM key (32 bytes hex-encoded)
 	AdminAPIKey         string // Master admin API key for management endpoints
@@ -71,6 +78,13 @@ func Load() *Config {
 		// Database (required)
 		DatabaseURL: envRequired("DATABASE_URL"),
 		RedisURL:    envStr("REDIS_URL", ""),
+
+		// Redis pool tuning — tuned for Clever Cloud edge
+		RedisPoolSize:     envInt("REDIS_POOL_SIZE", 200),
+		RedisMinIdle:      envInt("REDIS_MIN_IDLE", 20),
+		RedisReadTimeout:  envDuration("REDIS_READ_TIMEOUT", 200*time.Millisecond),
+		RedisWriteTimeout: envDuration("REDIS_WRITE_TIMEOUT", 200*time.Millisecond),
+		RedisDialTimeout:  envDuration("REDIS_DIAL_TIMEOUT", 500*time.Millisecond),
 
 		// Security (required)
 		MasterEncryptionKey: envRequired("MASTER_ENCRYPTION_KEY"),

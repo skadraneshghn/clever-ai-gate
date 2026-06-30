@@ -32,7 +32,7 @@ type OpenAIModelListResponse struct {
 //
 // The provider label is stored in the credentials table so admins can
 // distinguish between "together", "deepinfra", "vllm", etc. in the dashboard.
-func DiscoverAndRegisterCustomModels(ctx context.Context, db *pgxpool.Pool, vault *Vault, apiKey, baseURL, providerLabel string, weight int) (int, []string, error) {
+func DiscoverAndRegisterCustomModels(ctx context.Context, db *pgxpool.Pool, vault *Vault, apiKey, baseURL, providerLabel string, weight int, prefix string) (int, []string, error) {
 	if apiKey == "" {
 		return 0, nil, fmt.Errorf("api_key is required for OpenAI-compatible provider discovery")
 	}
@@ -102,10 +102,13 @@ func DiscoverAndRegisterCustomModels(ctx context.Context, db *pgxpool.Pool, vaul
 
 		var poolID int
 
-		// Store models under their RAW name — no prefix.
-		// This enables automatic cross-provider load balancing:
-		// if OpenAI and Together both host "gpt-4o", they share the same pool.
+		// Store models under their RAW name (or with prefix if specified).
 		modelPattern := m.ID
+		trimmedPrefix := strings.TrimSpace(prefix)
+		trimmedPrefix = strings.Trim(trimmedPrefix, "/")
+		if trimmedPrefix != "" {
+			modelPattern = trimmedPrefix + "/" + m.ID
+		}
 
 		// Classify the model capabilities from its identifier
 		caps := ClassifyModel(modelPattern)
@@ -132,10 +135,10 @@ func DiscoverAndRegisterCustomModels(ctx context.Context, db *pgxpool.Pool, vaul
 		// Bind the credential to the pool.
 		// ON CONFLICT prevents duplicates if the same key is submitted twice.
 		_, err = tx.Exec(ctx,
-			`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
-			 VALUES ($1, $2, $3, $4, $5, true)
+			`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy, prefix)
+			 VALUES ($1, $2, $3, $4, $5, true, $6)
 			 ON CONFLICT DO NOTHING`,
-			poolID, providerLabel, encryptedKey, baseURL, weight,
+			poolID, providerLabel, encryptedKey, baseURL, weight, prefix,
 		)
 		if err != nil {
 			return 0, nil, fmt.Errorf("failed to bind credential to pool %s: %w", modelPattern, err)

@@ -38,6 +38,7 @@ type CredentialResponse struct {
 	LastError    *string `json:"last_error,omitempty"`
 	KeyMask      string  `json:"key_mask" example:"sk-...xxxx"`
 	ModelPattern string  `json:"model_pattern,omitempty" example:"gpt-4o"`
+	Prefix       string  `json:"prefix,omitempty" example:"exampleprefix"`
 	CreatedAt    string  `json:"created_at" example:"2024-01-15T10:30:00Z"`
 }
 

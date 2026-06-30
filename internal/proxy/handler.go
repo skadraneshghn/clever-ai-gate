@@ -17,6 +17,7 @@ import (
 	"github.com/buger/jsonparser"
 	"github.com/gin-gonic/gin"
 	"github.com/skadraneshghn/clever-ai-gate/internal/cache"
+	"github.com/skadraneshghn/clever-ai-gate/internal/cluster"
 	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
 	"github.com/skadraneshghn/clever-ai-gate/internal/telemetry"
 	"go.uber.org/zap"
@@ -36,6 +37,7 @@ type Handler struct {
 	client      *http.Client
 	cache       *cache.Store
 	pipeline    *telemetry.Pipeline
+	broadcaster *cluster.Broadcaster // nil when Redis not configured; safe no-op
 	logger      *zap.Logger
 	bufPool     sync.Pool
 	rewriter    *Rewriter
@@ -43,12 +45,14 @@ type Handler struct {
 }
 
 // NewHandler creates the proxy handler with all its dependencies.
-func NewHandler(client *http.Client, cacheStore *cache.Store, logger *zap.Logger, pipeline *telemetry.Pipeline) *Handler {
+// broadcaster may be nil — all Broadcaster methods are nil-safe no-ops.
+func NewHandler(client *http.Client, cacheStore *cache.Store, logger *zap.Logger, pipeline *telemetry.Pipeline, broadcaster *cluster.Broadcaster) *Handler {
 	h := &Handler{
-		client:   client,
-		cache:    cacheStore,
-		pipeline: pipeline,
-		logger:   logger,
+		client:      client,
+		cache:       cacheStore,
+		pipeline:    pipeline,
+		broadcaster: broadcaster,
+		logger:      logger,
 		bufPool: sync.Pool{
 			New: func() interface{} {
 				return bytes.NewBuffer(make([]byte, 0, 32*1024)) // 32KB initial scratch
@@ -59,6 +63,7 @@ func NewHandler(client *http.Client, cacheStore *cache.Store, logger *zap.Logger
 	h.stream = NewStreamProxy(client, logger)
 	return h
 }
+
 
 // proxyContext carries extracted fields through the hot-path without allocations.
 type proxyContext struct {
@@ -451,6 +456,7 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestSt
 			// invalid key, account suspended). Penalize it for a long time so it
 			// won't be selected again this session, then immediately try the next key.
 			result.FromPool.PenalizeToken(result.Index, cooldownForStatus(statusCode))
+			h.broadcaster.PublishPenalize(result.FromPool.ModelPattern, result.Credential.ID, result.Index, time.Now().Add(cooldownForStatus(statusCode)))
 			h.logger.Warn("credential auth rejected — trying next key",
 				zap.String("request_id", fmt.Sprintf("%v", requestID)),
 				zap.String("model", pctx.model),
@@ -467,6 +473,7 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestSt
 			// 429 on a single-key pool: no point retrying — the window won't
 			// reset within this request. Penalize and return to client.
 			result.FromPool.PenalizeToken(result.Index, cooldownDuration)
+			h.broadcaster.PublishPenalize(result.FromPool.ModelPattern, result.Credential.ID, result.Index, time.Now().Add(cooldownDuration))
 			h.logger.Warn("rate-limited on single-key pool, aborting retries",
 				zap.String("request_id", fmt.Sprintf("%v", requestID)),
 				zap.String("model", pctx.model),
@@ -483,6 +490,7 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestSt
 				cooldownDuration = 300 * time.Millisecond
 			}
 			result.FromPool.PenalizeToken(result.Index, cooldownDuration)
+			h.broadcaster.PublishPenalize(result.FromPool.ModelPattern, result.Credential.ID, result.Index, time.Now().Add(cooldownDuration))
 			h.logger.Warn("upstream request failed, retrying with next key",
 				zap.String("request_id", fmt.Sprintf("%v", requestID)),
 				zap.String("model", pctx.model),
@@ -572,13 +580,31 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	}()
 
 	cred := pctx.credential.Credential
-	upstreamURL = h.rewriter.RewriteURL(cred.Provider, cred.BaseURL, c.Request.URL.Path, pctx.model)
+	modelName := pctx.model
+	bodyBytes := pctx.body
+
+	// If the credential has an optional prefix, we must strip it from both the model ID
+	// passed to the rewriter and the JSON payload sent upstream.
+	if cred.Prefix != "" {
+		prefixSlash := cred.Prefix + "/"
+		if strings.HasPrefix(modelName, prefixSlash) {
+			modelName = strings.TrimPrefix(modelName, prefixSlash)
+
+			// Replace model name inside JSON body bytes.
+			// Same O(n) replacement logic as nvidia/ollama.
+			oldToken := []byte(`"` + pctx.model + `"`)
+			newToken := []byte(`"` + modelName + `"`)
+			bodyBytes = bytes.Replace(bodyBytes, oldToken, newToken, 1)
+		}
+	}
+
+	upstreamURL = h.rewriter.RewriteURL(cred.Provider, cred.BaseURL, c.Request.URL.Path, modelName)
 
 	upstreamReq, err := http.NewRequestWithContext(
 		c.Request.Context(),
 		c.Request.Method,
 		upstreamURL,
-		bytes.NewReader(pctx.body),
+		bytes.NewReader(bodyBytes),
 	)
 	if err != nil {
 		return http.StatusInternalServerError, upstreamURL, nil, err

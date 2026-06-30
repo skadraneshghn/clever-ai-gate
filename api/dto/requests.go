@@ -38,6 +38,7 @@ type CreateCredentialRequest struct {
 	APIKey   string `json:"api_key" binding:"required" example:"sk-..."`
 	BaseURL  string `json:"base_url" binding:"required" example:"https://api.openai.com"`
 	Weight   int    `json:"weight,omitempty" example:"1"`
+	Prefix   string `json:"prefix,omitempty" example:"exampleprefix"`
 }
 
 // UpdateCredentialRequest represents the body for updating a provider credential.
@@ -47,6 +48,7 @@ type UpdateCredentialRequest struct {
 	BaseURL   string `json:"base_url" binding:"required" example:"https://api.openai.com"`
 	Weight    int    `json:"weight" example:"1"`
 	IsHealthy bool   `json:"is_healthy" example:"true"`
+	Prefix    string `json:"prefix,omitempty" example:"exampleprefix"`
 }
 
 type DiscoverProviderRequest struct {
@@ -55,6 +57,7 @@ type DiscoverProviderRequest struct {
 	BaseURL  string `json:"base_url" binding:"required" example:"https://integrate.api.nvidia.com/v1"`
 	Weight   int    `json:"weight" example:"1"`
 	Label    string `json:"label,omitempty" example:"together-ai"`
+	Prefix   string `json:"prefix,omitempty" example:"exampleprefix"`
 }
 
 type DiscoverProviderResponse struct {

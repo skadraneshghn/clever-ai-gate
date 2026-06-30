@@ -16,20 +16,23 @@ import (
 	"github.com/skadraneshghn/clever-ai-gate/internal/middleware"
 	"github.com/skadraneshghn/clever-ai-gate/internal/playground"
 	"github.com/skadraneshghn/clever-ai-gate/internal/proxy"
+	"github.com/skadraneshghn/clever-ai-gate/internal/redisclient"
 	"github.com/skadraneshghn/clever-ai-gate/internal/telemetry"
 	"go.uber.org/zap"
 )
 
 // Dependencies holds all the shared dependencies for route handlers.
 type Dependencies struct {
-	Config     *config.Config
-	DB         *pgxpool.Pool
-	Cache      *cache.Store
-	Vault      *credentials.Vault
-	Logger     *zap.Logger
-	Health     *health.Handler
-	Proxy      *proxy.Handler
-	LogHub     *telemetry.LogHub // non-blocking log broadcaster for the admin log viewer
+	Config      *config.Config
+	DB          *pgxpool.Pool
+	Cache       *cache.Store
+	TenantCache *cache.RedisTenantCache // nil when Redis not configured
+	Redis       *redisclient.Client     // nil when Redis not configured
+	Vault       *credentials.Vault
+	Logger      *zap.Logger
+	Health      *health.Handler
+	Proxy       *proxy.Handler
+	LogHub      *telemetry.LogHub // non-blocking log broadcaster for the admin log viewer
 }
 
 // NewEngine creates and configures the Gin engine with all routes.
@@ -118,9 +121,21 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 	// --- Proxy routes (minimal middleware for maximum throughput) ---
 	proxyGroup := engine.Group("")
 	{
-		proxyGroup.Use(middleware.ProxyAuth(deps.Cache))
-		rateLimiter := middleware.NewRateLimiter(deps.Config.DefaultRateLimitRPM)
-		proxyGroup.Use(rateLimiter.Middleware())
+		// Auth: prefer two-layer Ristretto+Redis cache when available
+		if deps.TenantCache != nil {
+			proxyGroup.Use(middleware.ProxyAuthWithRedis(deps.TenantCache))
+		} else {
+			proxyGroup.Use(middleware.ProxyAuth(deps.Cache))
+		}
+
+		// Rate limiting: prefer Redis Lua sliding-window when available
+		if deps.Redis != nil && deps.Redis.Unwrap() != nil {
+			redisRL := middleware.NewRedisRateLimiter(deps.Redis.Unwrap(), deps.Config.DefaultRateLimitRPM)
+			proxyGroup.Use(redisRL.Middleware())
+		} else {
+			rateLimiter := middleware.NewRateLimiter(deps.Config.DefaultRateLimitRPM)
+			proxyGroup.Use(rateLimiter.Middleware())
+		}
 
 		// Single catch-all for all OpenAI-compatible endpoints:
 		// /v1/chat/completions, /v1/embeddings, /v1/images/generations,

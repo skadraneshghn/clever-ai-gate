@@ -31,12 +31,15 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 	"github.com/skadraneshghn/clever-ai-gate/internal/cache"
+	"github.com/skadraneshghn/clever-ai-gate/internal/cluster"
 	"github.com/skadraneshghn/clever-ai-gate/internal/config"
 	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
 	"github.com/skadraneshghn/clever-ai-gate/internal/database"
 	"github.com/skadraneshghn/clever-ai-gate/internal/health"
 	"github.com/skadraneshghn/clever-ai-gate/internal/proxy"
+	"github.com/skadraneshghn/clever-ai-gate/internal/redisclient"
 	"github.com/skadraneshghn/clever-ai-gate/internal/router"
 	"github.com/skadraneshghn/clever-ai-gate/internal/telemetry"
 	"go.uber.org/zap"
@@ -54,20 +57,17 @@ func main() {
 	cfg := config.Load()
 
 	// --- Initialize LogHub before the logger so the logger can write to it ---
-	// The log directory defaults to "logs/" relative to the working directory
-	// but can be overridden by the LOG_DIR environment variable.
 	logDir := os.Getenv("LOG_DIR")
 	if logDir == "" {
 		logDir = "logs"
 	}
 	logHub, err := telemetry.NewLogHub(logDir)
 	if err != nil {
-		// This is a startup-time error — we cannot log it yet, so panic.
 		panic("failed to initialize log hub: " + err.Error())
 	}
 	defer logHub.Sync()
 
-	// Initialize structured logger (dual-writes to stdout + daily log file)
+	// Initialize structured logger
 	logger := initLogger(cfg.LogLevel, logHub)
 	defer logger.Sync()
 
@@ -90,6 +90,21 @@ func main() {
 		logger.Fatal("failed to run migrations", zap.Error(err))
 	}
 
+	// --- Step 2.5: Initialize shared Redis client (tuned for Clever Cloud) ---
+	redisClient, err := redisclient.New(cfg, logger)
+	if err != nil {
+		// Redis is not required — log and continue without it
+		logger.Warn("redis initialization failed, running without Redis", zap.Error(err))
+		redisClient = nil
+	}
+	if redisClient != nil {
+		defer redisClient.Close()
+	}
+
+	// Extract the raw *redis.Client for subsystems that need it directly
+	var rdb interface{ Unwrap() interface{ LPush(ctx context.Context, key string, values ...interface{}) interface{ Err() error } } }
+	_ = rdb // placeholder — subsystems use redisClient.Unwrap() directly
+
 	// --- Step 3: Initialize encryption vault ---
 	vault, err := credentials.NewVault(cfg.MasterEncryptionKey)
 	if err != nil {
@@ -103,6 +118,13 @@ func main() {
 	}
 	defer cacheStore.Close()
 
+	// --- Step 4.5: Initialize two-layer tenant cache (L1=Ristretto, L2=Redis) ---
+	var tenantCache *cache.RedisTenantCache
+	if redisClient != nil {
+		tenantCache = cache.NewRedisTenantCache(cacheStore, redisClient.Unwrap(), logger)
+		logger.Info("redis tenant L2 cache enabled")
+	}
+
 	// --- Step 5: Load routing pools from DB → cache ---
 	syncManager := credentials.NewSyncManager(dbPool, cacheStore, vault, logger)
 	if err := syncManager.LoadInitialState(ctx); err != nil {
@@ -113,35 +135,56 @@ func main() {
 	syncManager.StartListener()
 	defer syncManager.Stop()
 
+	// --- Step 6.5: Initialize cluster broadcaster for cross-node cooldown sync ---
+	var broadcaster *cluster.Broadcaster
+	if redisClient != nil {
+		broadcaster = cluster.New(redisClient.Unwrap(), logger)
+		// Wrap GetPoolForCluster so it satisfies the broadcaster's interface
+		broadcaster.StartSubscriber(func(pattern string) cluster.PenalizerPool {
+			return syncManager.GetPoolForCluster(pattern)
+		})
+		defer broadcaster.Stop()
+		logger.Info("cluster broadcaster started — cross-node key cooldowns active")
+	}
+
 	// --- Step 7: Start telemetry pipeline ---
+	var rawRedis *redis.Client
+	if redisClient != nil {
+		rawRedis = redisClient.Unwrap()
+	}
 	telemetryPipeline := telemetry.NewPipeline(
 		dbPool, logger,
 		cfg.TelemetryQueueSize,
 		cfg.TelemetryBatchSize,
 		cfg.TelemetryFlushInterval,
-		cfg.RedisURL,
+		rawRedis,
 	)
 	telemetryPipeline.Start()
+	if rawRedis != nil {
+		telemetryPipeline.StartRedisConsumer()
+	}
 	defer telemetryPipeline.Stop()
 
 	// --- Step 8: Build HTTP transport and proxy handler ---
 	transport := proxy.BuildOptimizedTransport(cfg)
 	httpClient := proxy.BuildHTTPClient(transport)
-	proxyHandler := proxy.NewHandler(httpClient, cacheStore, logger, telemetryPipeline)
+	proxyHandler := proxy.NewHandler(httpClient, cacheStore, logger, telemetryPipeline, broadcaster)
 
 	// --- Step 9: Initialize health handler ---
 	healthHandler := health.New(dbPool)
 
 	// --- Step 10: Build Gin engine with all routes ---
 	engine := router.NewEngine(&router.Dependencies{
-		Config: cfg,
-		DB:     dbPool,
-		Cache:  cacheStore,
-		Vault:  vault,
-		Logger: logger,
-		Health: healthHandler,
-		Proxy:  proxyHandler,
-		LogHub: logHub,
+		Config:      cfg,
+		DB:          dbPool,
+		Cache:       cacheStore,
+		TenantCache: tenantCache,
+		Redis:       redisClient,
+		Vault:       vault,
+		Logger:      logger,
+		Health:      healthHandler,
+		Proxy:       proxyHandler,
+		LogHub:      logHub,
 	})
 
 	// --- Step 11: Start HTTP server ---
@@ -172,7 +215,7 @@ func main() {
 
 	logger.Info("shutdown signal received", zap.String("signal", sig.String()))
 
-	// Mark as not ready (health check will fail, load balancer stops sending traffic)
+	// Mark as not ready (load balancer stops sending traffic)
 	healthHandler.SetReady(false)
 
 	// Give in-flight requests time to complete
@@ -186,14 +229,7 @@ func main() {
 	logger.Info("server stopped gracefully")
 }
 
-// initLogger creates a production-tuned zap logger that dual-writes to:
-//  1. os.Stdout — respects LOG_LEVEL for container log aggregators
-//  2. logHub — always captures Info level minimum regardless of LOG_LEVEL,
-//     so the daily rotating log file always contains the full request audit
-//     trail needed to diagnose API instability (e.g. Kilo Code 500 loops).
-//
-// The JSON encoder uses ISO 8601 timestamps. Caller info is included so every
-// log line carries its source file and line number.
+// initLogger creates a production-tuned zap logger that dual-writes to stdout and logHub.
 func initLogger(level string, logHub *telemetry.LogHub) *zap.Logger {
 	var stdoutLevel zapcore.Level
 	switch level {
@@ -207,8 +243,6 @@ func initLogger(level string, logHub *telemetry.LogHub) *zap.Logger {
 		stdoutLevel = zapcore.InfoLevel
 	}
 
-	// The file always captures Debug when LOG_LEVEL=debug, but is floored at
-	// Info otherwise — never silenced below Info even in production.
 	fileLevel := stdoutLevel
 	if fileLevel > zapcore.InfoLevel {
 		fileLevel = zapcore.InfoLevel
@@ -220,15 +254,12 @@ func initLogger(level string, logHub *telemetry.LogHub) *zap.Logger {
 	encoderCfg.EncodeLevel = zapcore.LowercaseLevelEncoder
 	jsonEncoder := zapcore.NewJSONEncoder(encoderCfg)
 
-	// Core 1: stdout — uses LOG_LEVEL so operators control console noise
 	stdoutCore := zapcore.NewCore(
 		jsonEncoder,
 		zapcore.Lock(os.Stdout),
 		stdoutLevel,
 	)
 
-	// Core 2: LogHub (daily file + live SSE broadcast)
-	// Always floored at Info so request/response logs are always on disk.
 	hubCore := zapcore.NewCore(
 		jsonEncoder,
 		logHub,
