@@ -133,7 +133,6 @@ func (h *Handler) Handle(c *gin.Context) {
 		}
 		// Multipart requests are never streaming (audio, image, file uploads)
 		isStream = false
-		scanSlice = nil
 	} else {
 		// JSON path: bounded metadata scan (existing zero-alloc logic)
 		//
@@ -191,8 +190,6 @@ func (h *Handler) Handle(c *gin.Context) {
 			zap.String("model", model),
 		)
 	}
-
-
 
 	// --- Access log: first thing we know enough to emit a useful Info entry ---
 	// This fires for EVERY request and is the primary tool for diagnosing
@@ -554,16 +551,15 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		}
 	}
 
-	// Normal success path
-	respBody, readErr := io.ReadAll(resp.Body)
-	if readErr != nil {
-		return http.StatusInternalServerError, upstreamURL, nil, readErr
-	}
-
 	// --- Ollama native response translation (non-streaming) ---
 	// Ollama Cloud returns a native JSON body for non-stream requests that must
 	// be translated to OpenAI chat completion format before sending to the client.
+	// Only Ollama requires buffering — all other providers stream directly below.
 	if cred.Provider == "ollama" {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return http.StatusInternalServerError, upstreamURL, nil, readErr
+		}
 		if translated, ok := translateOllamaResponse(respBody); ok {
 			respBody = translated
 			for key, vals := range resp.Header {
@@ -578,8 +574,23 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 			c.Writer.Write(respBody) //nolint:errcheck
 			return resp.StatusCode, upstreamURL, nil, nil
 		}
+		// Ollama response didn't match native format — fall through to stream as-is
+		for key, vals := range resp.Header {
+			for _, val := range vals {
+				c.Writer.Header().Add(key, val)
+			}
+		}
+		c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+		c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+		c.Writer.WriteHeader(resp.StatusCode)
+		c.Writer.Write(respBody) //nolint:errcheck
+		return resp.StatusCode, upstreamURL, nil, nil
 	}
 
+	// Normal success path — zero-copy stream directly to client.
+	// io.Copy avoids buffering the entire response body into heap memory,
+	// which is critical for image generation (large base64 payloads),
+	// audio responses, and any other large upstream responses.
 	for key, vals := range resp.Header {
 		for _, val := range vals {
 			c.Writer.Header().Add(key, val)
@@ -588,7 +599,7 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
 	c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
 	c.Writer.WriteHeader(resp.StatusCode)
-	c.Writer.Write(respBody) //nolint:errcheck
+	io.Copy(c.Writer, resp.Body) //nolint:errcheck
 
 	return resp.StatusCode, upstreamURL, nil, nil
 }
