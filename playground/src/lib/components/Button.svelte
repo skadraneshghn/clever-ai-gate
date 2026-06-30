@@ -2,6 +2,7 @@
   let {
     variant = 'primary', // 'primary' | 'secondary' | 'success' | 'danger' | 'outline' | 'ghost' | 'text'
     size = 'md',         // 'sm' | 'md' | 'lg'
+    align = 'center',    // 'center' | 'left' | 'right' | 'between'
     disabled = false,
     type = 'button',
     class: className = '',
@@ -11,6 +12,15 @@
     children,
     ...rest
   } = $props();
+
+  const alignMap = {
+    left: 'flex-start',
+    right: 'flex-end',
+    between: 'space-between',
+    center: 'center'
+  };
+
+  let alignVal = $derived(alignMap[align] || 'center');
 </script>
 
 {#if href}
@@ -19,6 +29,7 @@
     class="btn btn-{variant} btn-{size} {className}"
     class:disabled
     {title}
+    style="--btn-align: {alignVal};"
     onclick={(e) => { if (disabled) e.preventDefault(); else onclick?.(e); }}
     {...rest}
   >
@@ -30,6 +41,7 @@
     class="btn btn-{variant} btn-{size} {className}"
     {disabled}
     {title}
+    style="--btn-align: {alignVal};"
     onclick={onclick}
     {...rest}
   >
@@ -41,7 +53,7 @@
   .btn {
     display: inline-flex;
     align-items: center;
-    justify-content: center;
+    justify-content: var(--btn-align, center);
     gap: 8px;
     font-family: inherit;
     font-weight: 600;
