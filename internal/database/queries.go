@@ -224,6 +224,43 @@ func ListCredentialsByPool(ctx context.Context, pool *pgxpool.Pool, poolID int) 
 	return creds, nil
 }
 
+// CredentialWithPool extends CredentialRow with the model pattern from the
+// associated pool, used by the management dashboard list view.
+type CredentialWithPool struct {
+	CredentialRow
+	ModelPattern string
+}
+
+// ListAllCredentials returns all credentials across all pools, joined with
+// the model_pools table to include the model_pattern string.
+func ListAllCredentials(ctx context.Context, pool *pgxpool.Pool) ([]*CredentialWithPool, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT c.id, c.pool_id, c.provider, c.encrypted_key, c.base_url, c.weight,
+		       c.is_healthy, c.last_error, c.created_at::text,
+		       COALESCE(mp.model_pattern, '') AS model_pattern
+		FROM credentials c
+		LEFT JOIN model_pools mp ON c.pool_id = mp.id
+		ORDER BY c.id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list all credentials: %w", err)
+	}
+	defer rows.Close()
+
+	var creds []*CredentialWithPool
+	for rows.Next() {
+		c := &CredentialWithPool{}
+		if err := rows.Scan(
+			&c.ID, &c.PoolID, &c.Provider, &c.EncryptedKey, &c.BaseURL, &c.Weight,
+			&c.IsHealthy, &c.LastError, &c.CreatedAt, &c.ModelPattern,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan credential: %w", err)
+		}
+		creds = append(creds, c)
+	}
+	return creds, nil
+}
+
 // GetCredential returns a single credential by ID.
 func GetCredential(ctx context.Context, pool *pgxpool.Pool, id int) (*CredentialRow, error) {
 	row := pool.QueryRow(ctx, `

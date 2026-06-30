@@ -52,6 +52,10 @@ type Config struct {
 
 	// Logging
 	LogLevel string
+
+	// Playground Authentication
+	PlaygroundUser string
+	PlaygroundPass string
 }
 
 // Load reads configuration from environment variables.
@@ -91,6 +95,10 @@ func Load() *Config {
 
 		// Logging defaults
 		LogLevel: envStr("LOG_LEVEL", "info"),
+
+		// Playground authentication defaults
+		PlaygroundUser: envStr("PLAYGROUND_USER", "salman"),
+		PlaygroundPass: envStr("PLAYGROUND_PASS", "136517"),
 	}
 
 	cfg.validate()

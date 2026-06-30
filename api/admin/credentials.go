@@ -22,6 +22,41 @@ func NewCredentialHandler(db *pgxpool.Pool, vault *credentials.Vault) *Credentia
 	return &CredentialHandler{db: db, vault: vault}
 }
 
+// List returns all provider credentials with masked keys.
+// @Summary      List credentials
+// @Description  Returns all provider credentials across all pools with masked API keys
+// @Tags         Credentials
+// @Produce      json
+// @Security     BearerAuth
+// @Success      200  {array}   dto.CredentialResponse
+// @Failure      500  {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/credentials [get]
+func (h *CredentialHandler) List(c *gin.Context) {
+	creds, err := database.ListAllCredentials(c.Request.Context(), h.db)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to list credentials", Details: err.Error()})
+		return
+	}
+
+	resp := make([]dto.CredentialResponse, len(creds))
+	for i, cr := range creds {
+		resp[i] = dto.CredentialResponse{
+			ID:           cr.ID,
+			PoolID:       cr.PoolID,
+			Provider:     cr.Provider,
+			BaseURL:      cr.BaseURL,
+			Weight:       cr.Weight,
+			IsHealthy:    cr.IsHealthy,
+			LastError:    cr.LastError,
+			KeyMask:      dto.MaskAPIKey(cr.EncryptedKey),
+			ModelPattern: cr.ModelPattern,
+			CreatedAt:    cr.CreatedAt,
+		}
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
 // Create adds a new provider credential to a pool.
 // @Summary      Add credential
 // @Description  Adds a new provider API key to a model routing pool
