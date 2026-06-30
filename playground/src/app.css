@@ -241,6 +241,9 @@ select:-webkit-autofill:focus {
 .text-\[9px\] { font-size: 11px; }
 .text-\[8px\] { font-size: 10px; }
 .min-w-\[120px\] { min-width: 120px; }
+.bg-\[var\(--sidebar-bg\)\] { background-color: var(--sidebar-bg) !important; }
+.bg-\[var\(--frame-bg\)\] { background-color: var(--frame-bg) !important; }
+.border-\[var\(--border-color\)\] { border-color: var(--border-color) !important; }
 
 /* Custom utility colors & opacity */
 .text-white { color: #ffffff !important; }
