@@ -147,6 +147,18 @@ func (h *Handler) Handle(c *gin.Context) {
 		)
 	}
 
+	// --- Ollama Prefix Detection ---
+	// Models prefixed with "ollama/" are routed to Ollama instances.
+	// The prefix is stripped from the JSON body before forwarding so the
+	// upstream Ollama server receives the clean model name (e.g., "llama3:8b").
+	isOllama := false
+	if strings.HasPrefix(model, "ollama/") {
+		isOllama = true
+		h.logger.Debug("ollama model detected",
+			zap.String("model", model),
+		)
+	}
+
 	// Step 3: Detect streaming mode (also bounded to metadata segment)
 	isStream, _ := jsonparser.GetBoolean(scanSlice, "stream")
 
@@ -163,6 +175,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		zap.String("path", c.Request.URL.Path),
 		zap.Bool("stream", isStream),
 		zap.Bool("is_nvidia", strings.HasPrefix(model, "nvidia/")),
+		zap.Bool("is_ollama", strings.HasPrefix(model, "ollama/")),
 		zap.Int("body_bytes", len(body)),
 		zap.String("client_ip", c.ClientIP()),
 	)
@@ -205,6 +218,18 @@ func (h *Handler) Handle(c *gin.Context) {
 		// bytes.Replace is a single-pass O(n) scan — no alloc overhead from
 		// json.Unmarshal/Marshal and no risk of key reordering.
 		// We replace the full quoted token to avoid partial matches.
+		oldToken := []byte(`"` + model + `"`)
+		newToken := []byte(`"` + upstreamModel + `"`)
+		body = bytes.Replace(body, oldToken, newToken, 1)
+	}
+
+	// --- Ollama Payload Sanitization ---
+	// For Ollama-prefixed models the routing prefix must be stripped from the
+	// JSON "model" field so the upstream Ollama server receives the clean model
+	// name it expects (e.g., "llama3:8b" instead of "ollama/llama3:8b").
+	// Uses the same byte-level replacement as NVIDIA — single-pass O(n) scan.
+	if isOllama {
+		upstreamModel := strings.TrimPrefix(model, "ollama/")
 		oldToken := []byte(`"` + model + `"`)
 		newToken := []byte(`"` + upstreamModel + `"`)
 		body = bytes.Replace(body, oldToken, newToken, 1)
@@ -527,6 +552,22 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 		}
 		// Also try just the provider namespace key "nvidia"
 		if val, found := h.cache.Get(cache.PoolKey("nvidia")); found {
+			return val, true
+		}
+	}
+
+	// Handle Ollama slash-separated model names (e.g., "ollama/llama3:8b")
+	if strings.HasPrefix(model, "ollama/") {
+		// Try progressively shorter slash-separated prefixes
+		slashParts := strings.Split(model, "/")
+		for i := len(slashParts) - 1; i >= 1; i-- {
+			prefix := strings.Join(slashParts[:i], "/")
+			if val, found := h.cache.Get(cache.PoolKey(prefix)); found {
+				return val, true
+			}
+		}
+		// Also try just the provider namespace key "ollama"
+		if val, found := h.cache.Get(cache.PoolKey("ollama")); found {
 			return val, true
 		}
 	}

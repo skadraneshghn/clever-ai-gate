@@ -225,6 +225,11 @@ func (h *CredentialHandler) RegisterNvidiaProvider(c *gin.Context) {
 		return
 	}
 
+	if req.APIKey == "" {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "api_key is required for NVIDIA provider"})
+		return
+	}
+
 	if req.Weight <= 0 {
 		req.Weight = 1
 	}
@@ -244,6 +249,59 @@ func (h *CredentialHandler) RegisterNvidiaProvider(c *gin.Context) {
 
 	c.JSON(http.StatusOK, dto.DiscoverProviderResponse{
 		Message:       "Successfully synchronized all NVIDIA models",
+		ModelsCount:   count,
+		DiscoveredIDs: models,
+	})
+}
+
+// RegisterOllamaProvider auto-discovers all models available on an Ollama instance,
+// creates model pools for each, and binds the credential to all of them in one transaction.
+// Multiple Ollama accounts can be registered — identical models are grouped into the same
+// pool for automatic load balancing and failover.
+// @Summary      Auto-discover Ollama Models
+// @Description  Connects to an Ollama instance, hits the /v1/models endpoint, and registers all available models automatically
+// @Tags         Credentials
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        body  body      dto.DiscoverProviderRequest  true  "Ollama provider details"
+// @Success      200   {object}  dto.DiscoverProviderResponse
+// @Failure      400   {object}  dto.ErrorResponse
+// @Failure      500   {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/providers/ollama [post]
+func (h *CredentialHandler) RegisterOllamaProvider(c *gin.Context) {
+	var req dto.DiscoverProviderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
+		return
+	}
+
+	if req.Provider != "ollama" {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid provider, must be 'ollama'"})
+		return
+	}
+
+	if req.Weight <= 0 {
+		req.Weight = 1
+	}
+
+	// API key is optional for Ollama — local instances typically require no authentication.
+	// When provided, it is sent as a Bearer token (useful for Ollama behind an auth proxy).
+	count, models, err := credentials.DiscoverAndRegisterOllamaModels(
+		c.Request.Context(),
+		h.db,
+		h.vault,
+		req.APIKey,
+		req.BaseURL,
+		req.Weight,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Ollama auto-discovery failed", Details: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.DiscoverProviderResponse{
+		Message:       "Successfully synchronized all Ollama models",
 		ModelsCount:   count,
 		DiscoveredIDs: models,
 	})

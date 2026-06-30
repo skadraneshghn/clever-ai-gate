@@ -51,7 +51,7 @@ type UpdateCredentialRequest struct {
 
 type DiscoverProviderRequest struct {
 	Provider string `json:"provider" binding:"required" example:"nvidia"`
-	APIKey   string `json:"api_key" binding:"required" example:"nvapi-..."`
+	APIKey   string `json:"api_key,omitempty" example:"nvapi-..."`
 	BaseURL  string `json:"base_url" binding:"required" example:"https://integrate.api.nvidia.com/v1"`
 	Weight   int    `json:"weight" example:"1"`
 }

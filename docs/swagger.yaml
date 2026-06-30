@@ -565,6 +565,39 @@ paths:
       summary: Auto-discover NVIDIA Models
       tags:
       - Credentials
+  /api/v1/admin/providers/ollama:
+    post:
+      consumes:
+      - application/json
+      description: Connects to an Ollama instance, hits the /v1/models endpoint, and
+        registers all available models automatically
+      parameters:
+      - description: Ollama provider details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/dto.DiscoverProviderRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.DiscoverProviderResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/dto.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Auto-discover Ollama Models
+      tags:
+      - Credentials
   /api/v1/admin/tenants:
     get:
       description: Returns all registered tenants
