@@ -107,32 +107,64 @@ func (h *Handler) Handle(c *gin.Context) {
 	}
 	body := buf.Bytes()
 
-	// Step 2: Zero-alloc field extraction via jsonparser
+	// Step 2: Extract the "model" field for routing.
 	//
-	// Gap 2 Fix — Bounded Metadata Scanner:
-	// When the body exceeds metadataScanLimit (256KB), the payload likely contains
-	// heavy Base64 image data from IDE extensions (Cline sending screenshots, etc.).
-	// Scanning the entire multi-megabyte body for the "model" and "stream" fields
-	// would trigger heap allocations and GC pauses.
-	//
-	// Instead, we parse only the leading metadata segment. JSON objects place
-	// structural keys (model, stream, messages) before binary content payloads,
-	// so the routing fields are always in the first few hundred bytes.
-	scanSlice := body
-	if len(body) > metadataScanLimit {
-		scanSlice = body[:metadataScanLimit]
-		h.logger.Debug("large payload detected, using bounded metadata scan",
-			zap.Int("body_size", len(body)),
-			zap.Int("scan_limit", metadataScanLimit),
-		)
-	}
+	// Two code paths depending on Content-Type:
+	//   - JSON (default): zero-alloc bounded jsonparser scan
+	//   - multipart/form-data: byte-level search for the model form field
+	//     (used by /v1/audio/transcriptions, /v1/images/edits, /v1/files, etc.)
+	contentType := c.Request.Header.Get("Content-Type")
+	isMultipart := strings.HasPrefix(contentType, "multipart/")
 
-	modelBytes, _, _, err := jsonparser.Get(scanSlice, "model")
-	if err != nil || len(modelBytes) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing or invalid 'model' field"})
-		return
+	var model string
+	var scanSlice []byte
+	var isStream bool
+
+	if isMultipart {
+		// Multipart model extraction: search the raw body for the form field
+		// named "model". In multipart encoding this appears as:
+		//   Content-Disposition: form-data; name="model"\r\n\r\nmodel-value\r\n
+		// We do a fast byte scan to locate the value without parsing the
+		// entire multipart structure (which would require heap allocations).
+		model = extractModelFromMultipart(body)
+		if model == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "missing 'model' field in multipart form data"})
+			return
+		}
+		// Multipart requests are never streaming (audio, image, file uploads)
+		isStream = false
+		scanSlice = nil
+	} else {
+		// JSON path: bounded metadata scan (existing zero-alloc logic)
+		//
+		// Gap 2 Fix — Bounded Metadata Scanner:
+		// When the body exceeds metadataScanLimit (256KB), the payload likely contains
+		// heavy Base64 image data from IDE extensions (Cline sending screenshots, etc.).
+		// Scanning the entire multi-megabyte body for the "model" and "stream" fields
+		// would trigger heap allocations and GC pauses.
+		//
+		// Instead, we parse only the leading metadata segment. JSON objects place
+		// structural keys (model, stream, messages) before binary content payloads,
+		// so the routing fields are always in the first few hundred bytes.
+		scanSlice = body
+		if len(body) > metadataScanLimit {
+			scanSlice = body[:metadataScanLimit]
+			h.logger.Debug("large payload detected, using bounded metadata scan",
+				zap.Int("body_size", len(body)),
+				zap.Int("scan_limit", metadataScanLimit),
+			)
+		}
+
+		modelBytes, _, _, err := jsonparser.Get(scanSlice, "model")
+		if err != nil || len(modelBytes) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "missing or invalid 'model' field"})
+			return
+		}
+		model = string(modelBytes)
+
+		// Step 3: Detect streaming mode (also bounded to metadata segment)
+		isStream, _ = jsonparser.GetBoolean(scanSlice, "stream")
 	}
-	model := string(modelBytes)
 
 	// --- NVIDIA Prefix Detection ---
 	// Models prefixed with "nvidia/" are routed through the NVIDIA NIM pipeline.
@@ -160,8 +192,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		)
 	}
 
-	// Step 3: Detect streaming mode (also bounded to metadata segment)
-	isStream, _ := jsonparser.GetBoolean(scanSlice, "stream")
+
 
 	// --- Access log: first thing we know enough to emit a useful Info entry ---
 	// This fires for EVERY request and is the primary tool for diagnosing
@@ -829,5 +860,57 @@ func supportsNvidiaReasoning(upstreamModel string) bool {
 		strings.Contains(lower, "-r1") ||
 		strings.Contains(lower, "reasoning") ||
 		strings.Contains(lower, "think")
+}
+
+// extractModelFromMultipart extracts the "model" field value from a
+// multipart/form-data body using a fast byte-level scan.
+//
+// In multipart encoding, the model field appears as:
+//
+//	Content-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n
+//
+// We search for the pattern `name="model"` followed by the double CRLF
+// separator, then read until the next \r\n or boundary marker.
+// This avoids parsing the full multipart structure (no heap allocations
+// from mime/multipart) and handles Whisper, DALL-E, and file upload
+// requests in sub-microsecond time.
+func extractModelFromMultipart(body []byte) string {
+	// Look for the field marker
+	marker := []byte(`name="model"`)
+	idx := bytes.Index(body, marker)
+	if idx < 0 {
+		return ""
+	}
+
+	// Skip past the marker to find the value.
+	// After name="model" there may be a CRLF, then optional headers, then
+	// a blank CRLF line, then the actual value.
+	start := idx + len(marker)
+	rest := body[start:]
+
+	// Find the double CRLF (\r\n\r\n) that separates headers from the value
+	sep := bytes.Index(rest, []byte("\r\n\r\n"))
+	if sep < 0 {
+		// Try LF-only variant (some clients use \n\n)
+		sep = bytes.Index(rest, []byte("\n\n"))
+		if sep < 0 {
+			return ""
+		}
+		rest = rest[sep+2:]
+	} else {
+		rest = rest[sep+4:]
+	}
+
+	// The value ends at the next \r\n (before the boundary)
+	end := bytes.Index(rest, []byte("\r\n"))
+	if end < 0 {
+		end = bytes.Index(rest, []byte("\n"))
+		if end < 0 {
+			return ""
+		}
+	}
+
+	value := bytes.TrimSpace(rest[:end])
+	return string(value)
 }
 

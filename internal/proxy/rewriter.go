@@ -32,6 +32,9 @@ func NewRewriter() *Rewriter {
 	r.pathTransformers["mistral"] = passthroughPath
 	r.pathTransformers["perplexity"] = passthroughPath
 
+	// Generic OpenAI-compatible (any third-party provider)
+	r.pathTransformers["custom"] = passthroughPath
+
 	// NVIDIA NIM
 	r.pathTransformers["nvidia"] = passthroughPath
 	r.pathTransformers["xai"] = passthroughPath
@@ -83,8 +86,16 @@ func (r *Rewriter) RewriteURL(provider, baseURL, requestPath, model string) stri
 // RewriteHeaders sets the appropriate authentication and content headers
 // for the target provider.
 func (r *Rewriter) RewriteHeaders(req *http.Request, provider, apiKey string, sourceHeaders http.Header) {
-	// Always set JSON content type
-	req.Header.Set("Content-Type", "application/json")
+	// Content-Type handling: multipart/form-data payloads (audio transcriptions,
+	// image uploads, file uploads) include a boundary string that must be
+	// preserved exactly. Forcing application/json would destroy the payload.
+	if ct := sourceHeaders.Get("Content-Type"); strings.HasPrefix(ct, "multipart/") {
+		req.Header.Set("Content-Type", ct)
+	} else if ct != "" {
+		req.Header.Set("Content-Type", ct)
+	} else {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	// Copy relevant headers from original request
 	if accept := sourceHeaders.Get("Accept"); accept != "" {

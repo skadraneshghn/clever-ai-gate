@@ -54,6 +54,7 @@ type DiscoverProviderRequest struct {
 	APIKey   string `json:"api_key,omitempty" example:"nvapi-..."`
 	BaseURL  string `json:"base_url" binding:"required" example:"https://integrate.api.nvidia.com/v1"`
 	Weight   int    `json:"weight" example:"1"`
+	Label    string `json:"label,omitempty" example:"together-ai"`
 }
 
 type DiscoverProviderResponse struct {

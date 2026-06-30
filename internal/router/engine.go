@@ -175,6 +175,7 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		// Provider auto-discovery (registers all models for a given provider key)
 		adminGroup.POST("/providers/nvidia", credHandler.RegisterNvidiaProvider)
 		adminGroup.POST("/providers/ollama", credHandler.RegisterOllamaProvider)
+		adminGroup.POST("/providers/custom", credHandler.RegisterCustomProvider)
 
 		// Live log streaming and daily log file download
 		if deps.LogHub != nil {

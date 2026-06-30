@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -342,3 +343,59 @@ func (h *CredentialHandler) RegisterOllamaProvider(c *gin.Context) {
 	})
 }
 
+// RegisterCustomProvider handles POST /api/v1/admin/providers/custom
+// It connects to any OpenAI-compatible provider, validates the API key,
+// discovers all available models, and registers them for load balancing.
+//
+// @Summary     Register a generic OpenAI-compatible provider
+// @Description Auto-discovers models from any OpenAI-compatible endpoint.
+// @Tags        providers
+// @Accept      json
+// @Produce     json
+// @Param       body body     dto.DiscoverProviderRequest true "Provider details"
+// @Success     200  {object} dto.DiscoverProviderResponse
+// @Failure     400  {object} dto.ErrorResponse
+// @Failure     500  {object} dto.ErrorResponse
+// @Router      /api/v1/admin/providers/custom [post]
+func (h *CredentialHandler) RegisterCustomProvider(c *gin.Context) {
+	var req dto.DiscoverProviderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
+		return
+	}
+
+	if req.APIKey == "" {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "api_key is required for OpenAI-compatible provider discovery"})
+		return
+	}
+
+	if req.Weight <= 0 {
+		req.Weight = 1
+	}
+
+	// Use the label field as the provider name, falling back to "custom"
+	providerLabel := req.Label
+	if providerLabel == "" {
+		providerLabel = "custom"
+	}
+
+	count, models, err := credentials.DiscoverAndRegisterCustomModels(
+		c.Request.Context(),
+		h.db,
+		h.vault,
+		req.APIKey,
+		req.BaseURL,
+		providerLabel,
+		req.Weight,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "OpenAI-compatible provider discovery failed", Details: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.DiscoverProviderResponse{
+		Message:       fmt.Sprintf("Successfully synchronized %d models from %s", count, providerLabel),
+		ModelsCount:   count,
+		DiscoveredIDs: models,
+	})
+}

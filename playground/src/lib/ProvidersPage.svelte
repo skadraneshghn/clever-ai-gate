@@ -21,7 +21,7 @@
   let addProviderLoading = $state(false);
 
   // Auto-discovery form
-  let autoDiscoverForm = $state({ provider: 'nvidia', api_key: '', base_url: 'https://integrate.api.nvidia.com/v1', weight: 1 });
+  let autoDiscoverForm = $state({ provider: 'nvidia', api_key: '', base_url: 'https://integrate.api.nvidia.com/v1', weight: 1, label: '' });
   let autoDiscoverLoading = $state(false);
 
   // Edit modal
@@ -81,7 +81,7 @@
 
   function openAddProviderModal() {
     addProviderForm = { pool_id: '', provider: 'openai', api_key: '', base_url: 'https://api.openai.com', weight: 1 };
-    autoDiscoverForm = { provider: 'nvidia', api_key: '', base_url: 'https://integrate.api.nvidia.com/v1', weight: 1 };
+    autoDiscoverForm = { provider: 'nvidia', api_key: '', base_url: 'https://integrate.api.nvidia.com/v1', weight: 1, label: '' };
     addProviderTab = 'standard';
     showAddProviderModal = true;
     loadPools();
@@ -118,23 +118,36 @@
 
   async function autoDiscoverProvider() {
     autoDiscoverLoading = true;
-    const endpoint = autoDiscoverForm.provider === 'nvidia'
-      ? '/api/v1/admin/providers/nvidia'
-      : '/api/v1/admin/providers/ollama';
+    let endpoint;
+    if (autoDiscoverForm.provider === 'nvidia') {
+      endpoint = '/api/v1/admin/providers/nvidia';
+    } else if (autoDiscoverForm.provider === 'ollama') {
+      endpoint = '/api/v1/admin/providers/ollama';
+    } else {
+      endpoint = '/api/v1/admin/providers/custom';
+    }
     try {
+      const payload = {
+        provider: autoDiscoverForm.provider,
+        api_key: autoDiscoverForm.api_key,
+        base_url: autoDiscoverForm.base_url,
+        weight: autoDiscoverForm.weight || 1
+      };
+      // Include label for custom providers
+      if (autoDiscoverForm.provider === 'custom' && autoDiscoverForm.label) {
+        payload.label = autoDiscoverForm.label;
+      }
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: adminHeaders(),
-        body: JSON.stringify({
-          provider: autoDiscoverForm.provider,
-          api_key: autoDiscoverForm.api_key,
-          base_url: autoDiscoverForm.base_url,
-          weight: autoDiscoverForm.weight || 1
-        })
+        body: JSON.stringify(payload)
       });
       if (res.ok) {
         const data = await res.json();
-        addToast('success', `Successfully synchronized ${data.models_count || 0} ${autoDiscoverForm.provider.toUpperCase()} models`);
+        const displayName = autoDiscoverForm.provider === 'custom'
+          ? (autoDiscoverForm.label || 'Custom')
+          : autoDiscoverForm.provider.toUpperCase();
+        addToast('success', `Successfully synchronized ${data.models_count || 0} ${displayName} models`);
         showAddProviderModal = false;
         loadCredentials();
         if (apiKey) loadModels();
@@ -224,6 +237,7 @@
       case 'nvidia': return 'badge-nvidia';
       case 'ollama': return 'badge-ollama';
       case 'anthropic': return 'badge-anthropic';
+      case 'custom': return 'badge-custom';
       default: return 'badge-default';
     }
   }
@@ -419,22 +433,38 @@
           </button>
         </div>
       {:else}
-        <p class="text-xs mb-4">Auto-discover all models from an NVIDIA NIM or Ollama Cloud provider. Pools are created automatically.</p>
+        <p class="text-xs mb-4">Auto-discover all models from an NVIDIA NIM, Ollama Cloud, or any OpenAI-compatible provider. Pools are created automatically.</p>
         <div class="flex flex-col gap-3 mb-5">
           <div class="form-group flex flex-col gap-1">
             <label class="text-[10px] font-bold uppercase tracking-wider" for="auto-provider-select">Provider Type</label>
-            <select id="auto-provider-select" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={autoDiscoverForm.provider} onchange={() => { autoDiscoverForm.base_url = autoDiscoverForm.provider === 'nvidia' ? 'https://integrate.api.nvidia.com/v1' : 'https://ollama.com'; }}>
+            <select id="auto-provider-select" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={autoDiscoverForm.provider} onchange={() => {
+              if (autoDiscoverForm.provider === 'nvidia') {
+                autoDiscoverForm.base_url = 'https://integrate.api.nvidia.com/v1';
+              } else if (autoDiscoverForm.provider === 'ollama') {
+                autoDiscoverForm.base_url = 'https://ollama.com';
+              } else {
+                autoDiscoverForm.base_url = '';
+              }
+              autoDiscoverForm.label = '';
+            }}>
               <option value="nvidia">NVIDIA NIM</option>
               <option value="ollama">Ollama Cloud</option>
+              <option value="custom">OpenAI-Compatible (Custom)</option>
             </select>
           </div>
+          {#if autoDiscoverForm.provider === 'custom'}
+            <div class="form-group flex flex-col gap-1">
+              <label class="text-[10px] font-bold uppercase tracking-wider" for="auto-label-input">Label <span class="opacity-50">(optional — e.g. "Together AI", "DeepInfra")</span></label>
+              <input type="text" id="auto-label-input" class="input-box w-full p-2.5 rounded-lg border text-sm" placeholder="e.g. together-ai, deepinfra, vllm" bind:value={autoDiscoverForm.label} />
+            </div>
+          {/if}
           <div class="form-group flex flex-col gap-1">
             <label class="text-[10px] font-bold uppercase tracking-wider" for="auto-api-key-input">API Key {autoDiscoverForm.provider === 'ollama' ? '(required for cloud)' : ''}</label>
-            <input type="password" id="auto-api-key-input" class="input-box w-full p-2.5 rounded-lg border text-sm" placeholder={autoDiscoverForm.provider === 'nvidia' ? 'nvapi-...' : 'Ollama Cloud API key...'} bind:value={autoDiscoverForm.api_key} />
+            <input type="password" id="auto-api-key-input" class="input-box w-full p-2.5 rounded-lg border text-sm" placeholder={autoDiscoverForm.provider === 'nvidia' ? 'nvapi-...' : autoDiscoverForm.provider === 'ollama' ? 'Ollama Cloud API key...' : 'Bearer API key...'} bind:value={autoDiscoverForm.api_key} />
           </div>
           <div class="form-group flex flex-col gap-1">
             <label class="text-[10px] font-bold uppercase tracking-wider" for="auto-base-url-input">Base URL</label>
-            <input type="text" id="auto-base-url-input" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={autoDiscoverForm.base_url} />
+            <input type="text" id="auto-base-url-input" class="input-box w-full p-2.5 rounded-lg border text-sm" placeholder={autoDiscoverForm.provider === 'custom' ? 'https://api.together.xyz/v1' : ''} bind:value={autoDiscoverForm.base_url} />
           </div>
           <div class="form-group flex flex-col gap-1">
             <label class="text-[10px] font-bold uppercase tracking-wider" for="auto-weight-input">Weight</label>
