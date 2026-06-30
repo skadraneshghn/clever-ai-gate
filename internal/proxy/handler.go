@@ -296,26 +296,35 @@ func (h *Handler) Handle(c *gin.Context) {
 	h.executeWithRetry(c, pctx, requestStart, maxAttempts)
 }
 
+// attemptRecord captures the outcome of a single credential attempt within
+// the retry loop. A slice of these is built during pool exhaustion and used
+// to construct a detailed diagnostic summary in the final OpenAI error envelope.
+type attemptRecord struct {
+	provider   string
+	statusCode int
+	credID     int
+}
+
+
 // executeWithRetry attempts the proxy request, cycling through ALL credentials
 // in the pool before giving up.
 //
-// Smart retry policy:
-//  - 401 / 403 / 402: credential auth failure — long-cooldown (1h) this key,
-//    immediately try the next one. Tries every key in the pool.
-//  - 429: rate-limited — 30s cooldown, try next key. On single-key pool: abort.
-//  - 500 / 502 / 503 / 504: transient server error — shorter cooldown, retry.
-//  - transport error: mark key as briefly unhealthy, retry next.
-//  - 400 / 404 / 422: request-level error — no retry, return immediately.
-//
-// The caller passes maxAttempts = pool.TotalCount (capped at 20) so every
-// unique credential is tried exactly once.
+// Total exhaustion policy — ANY non-2xx response or transport error rotates
+// to the next available key. The loop never aborts early for a single error:
+//   - 400/401/402/403/404/422: key rejected or wrong tier — long cooldown, rotate.
+//   - 429 single-key pool: abort immediately (no other key can help).
+//   - 429 multi-key pool: short cooldown, rotate to next key.
+//   - 5xx / transport-mapped (502/504) / non-standard codes: moderate cooldown, rotate.
+//   - When all exhausted: canonical OpenAI error envelope is returned to client.
 func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestStart time.Time, maxAttempts int) {
 	var lastErrBody []byte
 	var lastStatus int
 	var lastProvider string
+	var attempts []attemptRecord
 	triedIndices := make(map[int]bool) // deduplicate — never retry the same index twice
 	triedCount := 0
 
+retryLoop:
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		// Lock-free credential acquisition
 		result := pctx.pool.AcquireActiveToken()
@@ -328,11 +337,10 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestSt
 				h.logger.Error("no credentials in pool at all",
 					zap.String("model", pctx.model),
 					zap.String("tenant_id", pctx.tenantID),
-			)
-				c.JSON(http.StatusServiceUnavailable, gin.H{
-					"error": "all upstream providers are temporarily unavailable",
-					"model": pctx.model,
-				})
+				)
+				finalBody := formatOpenAIError(http.StatusServiceUnavailable, nil,
+					"no credentials are configured for model: "+pctx.model)
+				c.Data(http.StatusServiceUnavailable, "application/json", finalBody)
 				return
 			}
 			now := time.Now().UnixNano()
@@ -363,33 +371,21 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestSt
 
 		statusCode, upstreamURL, errBody, err := h.forwardRequest(c, pctx)
 
-		if err == nil && !isRetryableStatus(statusCode) {
-			// Terminal outcome — success or a hard client error (e.g. 400 bad request).
-			// forwardRequest has already written the response to c.Writer.
+		// ── True 2xx success: forwardRequest already wrote to c.Writer ────────
+		if err == nil && statusCode >= 200 && statusCode < 300 {
 			pctx.pool.ResetCooldown(result.Index)
-			if statusCode >= 200 && statusCode < 400 {
-				h.logger.Info("proxy request completed",
-					zap.String("model", pctx.model),
-					zap.String("provider", result.Credential.Provider),
-					zap.String("upstream_url", upstreamURL),
-					zap.String("tenant_id", pctx.tenantID),
-					zap.Bool("stream", pctx.isStream),
-					zap.Int("status", statusCode),
-					zap.Int("attempt", attempt+1),
-					zap.Duration("elapsed", time.Since(requestStart)),
-				)
-			} else {
-				h.logger.Warn("upstream returned non-retryable client error",
-					zap.String("model", pctx.model),
-					zap.String("provider", result.Credential.Provider),
-					zap.String("upstream_url", upstreamURL),
-					zap.String("tenant_id", pctx.tenantID),
-					zap.Int("status", statusCode),
-					zap.Duration("elapsed", time.Since(requestStart)),
-				)
-			}
+			h.logger.Info("proxy request completed",
+				zap.String("model", pctx.model),
+				zap.String("provider", result.Credential.Provider),
+				zap.String("upstream_url", upstreamURL),
+				zap.String("tenant_id", pctx.tenantID),
+				zap.Bool("stream", pctx.isStream),
+				zap.Int("status", statusCode),
+				zap.Int("attempt", attempt+1),
+				zap.Duration("elapsed", time.Since(requestStart)),
+			)
 
-			// Emit success or terminal log telemetry
+			// Emit success telemetry (zero-alloc pool pattern)
 			if h.pipeline != nil {
 				promptText := extractPromptText(pctx.body)
 				var responseText string
@@ -419,96 +415,98 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestSt
 					completionTokens = len(responseText) / 4
 				}
 
-				var errMsg string
-				if statusCode >= 400 {
-					errMsg = string(errBody)
-				}
-
-				h.pipeline.Emit(&telemetry.LogEntry{
-					TenantID:         pctx.tenantID,
-					Model:            pctx.model,
-					Provider:         result.Credential.Provider,
-					PromptTokens:     promptTokens,
-					CompletionTokens: completionTokens,
-					LatencyMs:        int(time.Since(requestStart).Milliseconds()),
-					StatusCode:       statusCode,
-					ErrorMessage:     errMsg,
-					CreatedAt:        time.Now(),
-					Prompt:           promptText,
-					Response:         responseText,
-				})
+				entry := telemetry.AcquireEntry()
+				entry.TenantID = pctx.tenantID
+				entry.Model = pctx.model
+				entry.Provider = result.Credential.Provider
+				entry.PromptTokens = promptTokens
+				entry.CompletionTokens = completionTokens
+				entry.LatencyMs = int(time.Since(requestStart).Milliseconds())
+				entry.StatusCode = statusCode
+				entry.CreatedAt = time.Now()
+				entry.Prompt = promptText
+				entry.Response = responseText
+				h.pipeline.Emit(entry)
 			}
 			return
 		}
 
-		// Retryable failure — determine penalty and whether to keep trying
+		// ── Non-2xx or unrecovered panic: record, penalize, rotate ────────────
+		// forwardRequest maps ALL transport errors to numeric status codes (502/504),
+		// so err is non-nil only for recovered panics inside forwardRequest (500).
+		recStatus := statusCode
+		if err != nil {
+			recStatus = http.StatusInternalServerError
+		}
+		attempts = append(attempts, attemptRecord{
+			provider:   result.Credential.Provider,
+			statusCode: recStatus,
+			credID:     result.Credential.ID,
+		})
 		lastErrBody = errBody
-		lastStatus = statusCode
+		lastStatus = recStatus
 		lastProvider = result.Credential.Provider
-		cooldownDuration := cooldownForStatus(statusCode)
+		cooldownDuration := cooldownForStatus(recStatus)
 		isSingleKey := pctx.pool.TotalCount == 1
 
 		requestID, _ := c.Get("request_id")
 
-		switch {
-		case isCredentialAuthError(statusCode):
-			// 401 / 402 / 403: this key is rejected by the provider (wrong tier,
-			// invalid key, account suspended). Penalize it for a long time so it
-			// won't be selected again this session, then immediately try the next key.
-			result.FromPool.PenalizeToken(result.Index, cooldownForStatus(statusCode))
-			h.broadcaster.PublishPenalize(result.FromPool.ModelPattern, result.Credential.ID, result.Index, time.Now().Add(cooldownForStatus(statusCode)))
-			h.logger.Warn("credential auth rejected — trying next key",
+		if isCredentialAuthError(recStatus) {
+			// 400/401/402/403/404/422: this key cannot serve this model.
+			// Long cooldown + immediately rotate to the next available key.
+			result.FromPool.PenalizeToken(result.Index, cooldownDuration)
+			h.broadcaster.PublishPenalize(result.FromPool.ModelPattern, result.Credential.ID, result.Index, time.Now().Add(cooldownDuration))
+			h.logger.Warn("credential rejected by upstream — rotating to next key",
 				zap.String("request_id", fmt.Sprintf("%v", requestID)),
 				zap.String("model", pctx.model),
 				zap.String("provider", result.Credential.Provider),
 				zap.String("upstream_url", upstreamURL),
-				zap.Int("status", statusCode),
+				zap.Int("status", recStatus),
 				zap.Int("credential_id", result.Credential.ID),
 				zap.Int("keys_tried", triedCount),
 				zap.Duration("cooldown", cooldownDuration),
 			)
-			continue // immediately rotate to next key
-
-		case statusCode == http.StatusTooManyRequests && isSingleKey:
-			// 429 on a single-key pool: no point retrying — the window won't
-			// reset within this request. Penalize and return to client.
-			result.FromPool.PenalizeToken(result.Index, cooldownDuration)
-			h.broadcaster.PublishPenalize(result.FromPool.ModelPattern, result.Credential.ID, result.Index, time.Now().Add(cooldownDuration))
-			h.logger.Warn("rate-limited on single-key pool, aborting retries",
-				zap.String("request_id", fmt.Sprintf("%v", requestID)),
-				zap.String("model", pctx.model),
-				zap.String("provider", result.Credential.Provider),
-				zap.Int("status", statusCode),
-				zap.Duration("cooldown", cooldownDuration),
-			)
-			break
-
-		default:
-			// Transient server errors (500/502/503/504) or transport failures.
-			// Shorten cooldown on single-key to avoid long blackouts.
-			if isSingleKey {
-				cooldownDuration = 300 * time.Millisecond
-			}
-			result.FromPool.PenalizeToken(result.Index, cooldownDuration)
-			h.broadcaster.PublishPenalize(result.FromPool.ModelPattern, result.Credential.ID, result.Index, time.Now().Add(cooldownDuration))
-			h.logger.Warn("upstream request failed, retrying with next key",
-				zap.String("request_id", fmt.Sprintf("%v", requestID)),
-				zap.String("model", pctx.model),
-				zap.String("provider", result.Credential.Provider),
-				zap.String("upstream_url", upstreamURL),
-				zap.String("tenant_id", pctx.tenantID),
-				zap.Int("status", statusCode),
-				zap.Int("attempt", attempt+1),
-				zap.Int("max_attempts", maxAttempts),
-				zap.Int("keys_tried", triedCount),
-				zap.Duration("cooldown", cooldownDuration),
-				zap.Duration("elapsed", time.Since(requestStart)),
-				zap.NamedError("transport_err", err),
-			)
+			continue // immediately rotate
 		}
+
+		if recStatus == http.StatusTooManyRequests && isSingleKey {
+			// 429 on a single-key pool: abort — no other key to rotate to.
+			result.FromPool.PenalizeToken(result.Index, cooldownDuration)
+			h.broadcaster.PublishPenalize(result.FromPool.ModelPattern, result.Credential.ID, result.Index, time.Now().Add(cooldownDuration))
+			h.logger.Warn("rate-limited on single-key pool — aborting retries",
+				zap.String("request_id", fmt.Sprintf("%v", requestID)),
+				zap.String("model", pctx.model),
+				zap.String("provider", result.Credential.Provider),
+				zap.Int("status", recStatus),
+				zap.Duration("cooldown", cooldownDuration),
+			)
+			break retryLoop // labeled break exits the for loop, not just a switch
+		}
+
+		// All other non-2xx (429 multi-key, 5xx, non-standard, transport-mapped 502/504):
+		// apply cooldown and rotate to the next available key.
+		if isSingleKey {
+			cooldownDuration = 300 * time.Millisecond
+		}
+		result.FromPool.PenalizeToken(result.Index, cooldownDuration)
+		h.broadcaster.PublishPenalize(result.FromPool.ModelPattern, result.Credential.ID, result.Index, time.Now().Add(cooldownDuration))
+		h.logger.Warn("upstream request failed — rotating to next key",
+			zap.String("request_id", fmt.Sprintf("%v", requestID)),
+			zap.String("model", pctx.model),
+			zap.String("provider", result.Credential.Provider),
+			zap.String("upstream_url", upstreamURL),
+			zap.String("tenant_id", pctx.tenantID),
+			zap.Int("status", recStatus),
+			zap.Int("attempt", attempt+1),
+			zap.Int("max_attempts", maxAttempts),
+			zap.Int("keys_tried", triedCount),
+			zap.Duration("cooldown", cooldownDuration),
+			zap.Duration("elapsed", time.Since(requestStart)),
+			zap.NamedError("transport_err", err),
+		)
 	}
 
-	// All credentials tried and exhausted. Write the final error to the client.
+	// ── All credentials exhausted ─────────────────────────────────────────────
 	h.logger.Error("all pool credentials exhausted",
 		zap.String("model", pctx.model),
 		zap.String("tenant_id", pctx.tenantID),
@@ -518,35 +516,30 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestSt
 		zap.Duration("total_elapsed", time.Since(requestStart)),
 	)
 
-	// Emit failure log entry
+	// Emit exhaustion telemetry (zero-alloc pool pattern)
 	if h.pipeline != nil {
 		promptText := extractPromptText(pctx.body)
 		promptTokens := extractTokens(pctx.body, "prompt")
 		if promptTokens == 0 {
 			promptTokens = len(promptText) / 4
 		}
-		h.pipeline.Emit(&telemetry.LogEntry{
-			TenantID:     pctx.tenantID,
-			Model:        pctx.model,
-			Provider:     lastProvider,
-			PromptTokens: promptTokens,
-			LatencyMs:    int(time.Since(requestStart).Milliseconds()),
-			StatusCode:   http.StatusBadGateway,
-			ErrorMessage: "all upstream credentials exhausted; last response: " + string(lastErrBody),
-			CreatedAt:    time.Now(),
-			Prompt:       promptText,
-		})
+		entry := telemetry.AcquireEntry()
+		entry.TenantID = pctx.tenantID
+		entry.Model = pctx.model
+		entry.Provider = lastProvider
+		entry.PromptTokens = promptTokens
+		entry.LatencyMs = int(time.Since(requestStart).Milliseconds())
+		entry.StatusCode = http.StatusBadGateway
+		entry.ErrorMessage = buildAttemptSummary(pctx.model, attempts)
+		entry.CreatedAt = time.Now()
+		entry.Prompt = promptText
+		h.pipeline.Emit(entry)
 	}
 
-	if len(lastErrBody) > 0 {
-		c.Data(http.StatusBadGateway, "application/json", lastErrBody)
-	} else {
-		c.JSON(http.StatusBadGateway, gin.H{
-			"error":      "all upstream credentials exhausted",
-			"model":      pctx.model,
-			"keys_tried": triedCount,
-		})
-	}
+	// Never dump raw upstream bytes — always return a canonical OpenAI error envelope.
+	summary := buildAttemptSummary(pctx.model, attempts)
+	finalBody := formatOpenAIError(lastStatus, lastErrBody, summary)
+	c.Data(http.StatusBadGateway, "application/json", finalBody)
 }
 
 // forwardRequest sends the request to the upstream provider and returns the
@@ -614,24 +607,34 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 
 	resp, err := h.client.Do(upstreamReq)
 	if err != nil {
-		h.logger.Error("upstream transport error",
+		// Map transport-level failures to numeric HTTP status codes so the
+		// total-exhaustion retry loop can penalize and rotate to the next key.
+		// forwardRequest never returns a non-nil Go error for transport issues;
+		// only unrecovered panics (caught by defer/recover above) do.
+		mapped := http.StatusBadGateway // connection reset, DNS, TLS handshake
+		if isContextTimeoutError(err) {
+			mapped = http.StatusGatewayTimeout
+		}
+		h.logger.Error("upstream transport error — mapped to status for retry",
 			zap.String("model", pctx.model),
 			zap.String("provider", cred.Provider),
 			zap.String("upstream_url", upstreamURL),
+			zap.Int("mapped_status", mapped),
 			zap.Error(err),
 		)
-		return 0, upstreamURL, nil, err
+		return mapped, upstreamURL, []byte(err.Error()), nil
 	}
 	defer resp.Body.Close()
 
-	// --- Retryable error: capture body in memory, do NOT touch c.Writer ---
-	// This is the Flaw A fix. If we wrote headers here and then the caller
-	// retried, the second attempt would try to WriteHeader on an already-sent
-	// connection, corrupting the HTTP stream and crashing Kilo Code.
-	if isRetryableStatus(resp.StatusCode) {
+	// ── Total exhaustion policy: capture ALL non-2xx without touching c.Writer ──
+	// forwardRequest never writes error responses to the wire. executeWithRetry
+	// decides whether to rotate to another key or flush the normalised error.
+	// This invariant prevents double WriteHeader corruption on retried connections
+	// and enables any error code (400, 404, 422, 444, 599, …) to trigger rotation.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		const maxErrBodyBytes = 4096
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes))
-		h.logger.Error("upstream returned retryable error (not flushed to client yet)",
+		h.logger.Error("upstream returned error (buffered for retry evaluation)",
 			zap.String("model", pctx.model),
 			zap.String("provider", cred.Provider),
 			zap.String("upstream_url", upstreamURL),
@@ -657,35 +660,8 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		return resp.StatusCode, upstreamURL, resJSON, nil
 	}
 
-	// --- Non-retryable error or non-stream success: write directly to client ---
-	// This is the only place c.Writer.WriteHeader is called for these paths,
-	// so headers are sent exactly once.
-	// Note: 401/402/403/429/5xx are captured above by isRetryableStatus and
-	// never reach this branch — only hard request errors (400, 404, 422, etc.) do.
-	if resp.StatusCode >= 400 {
-		// Hard client error (e.g. 400 bad request, 404 not found, 422 validation error)
-		const maxErrBodyBytes = 4096
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes))
-		if readErr == nil && len(body) > 0 {
-			h.logger.Error("upstream returned non-retryable error",
-				zap.String("model", pctx.model),
-				zap.String("provider", cred.Provider),
-				zap.String("upstream_url", upstreamURL),
-				zap.Int("status", resp.StatusCode),
-				zap.ByteString("upstream_error_body", body),
-			)
-			for key, vals := range resp.Header {
-				for _, val := range vals {
-					c.Writer.Header().Add(key, val)
-				}
-			}
-			c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
-			c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
-			c.Writer.WriteHeader(resp.StatusCode)
-			c.Writer.Write(body) //nolint:errcheck
-			return resp.StatusCode, upstreamURL, body, nil
-		}
-	}
+	// All non-2xx responses are captured by the universal error block above.
+	// Only 2xx responses reach this point — safe to write to c.Writer.
 
 	// --- Ollama native response translation (non-streaming) ---
 	// Ollama Cloud returns a native JSON body for non-stream requests that must
@@ -889,56 +865,63 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 	return nil, false
 }
 
-// isRetryableStatus returns true for HTTP status codes that warrant a retry
-// with a different credential. Two categories:
-//   - Credential auth errors (401/402/403): this key is invalid/insufficient —
-//     try all other keys in the pool before giving up.
-//   - Transient server errors (429/500/502/503/504): upstream is overloaded —
-//     penalize and try next key.
-func isRetryableStatus(status int) bool {
+
+
+// isCredentialAuthError returns true for status codes that indicate the
+// specific API key is rejected by the provider, or the model is not accessible
+// on this account's plan. All of these warrant an immediate key rotation with
+// a long cooldown — the key is broken for this model, not the request itself.
+//
+//   - 400 Bad Request:          malformed auth header, or model alias not found on account
+//   - 401 Unauthorized:         invalid or expired API key
+//   - 402 Payment Required:     billing lapsed / quota exhausted
+//   - 403 Forbidden:            key tier insufficient for this model
+//   - 404 Not Found:            model not accessible under this key's plan
+//   - 422 Unprocessable Entity: key accepted but provider rejects this request shape
+func isCredentialAuthError(status int) bool {
 	switch status {
-	case http.StatusUnauthorized,          // 401 — bad/expired key
-		http.StatusPaymentRequired,        // 402 — quota exceeded / billing
-		http.StatusForbidden,              // 403 — insufficient tier / access denied
-		http.StatusTooManyRequests,        // 429 — rate limited
-		http.StatusInternalServerError,    // 500 — server error
-		http.StatusBadGateway,             // 502 — bad gateway
-		http.StatusServiceUnavailable,     // 503 — overloaded
-		http.StatusGatewayTimeout:         // 504 — timeout
+	case http.StatusBadRequest,         // 400
+		http.StatusUnauthorized,        // 401
+		http.StatusPaymentRequired,     // 402
+		http.StatusForbidden,           // 403
+		http.StatusNotFound,            // 404
+		http.StatusUnprocessableEntity: // 422
 		return true
 	}
 	return false
 }
 
-// isCredentialAuthError returns true for status codes that indicate the
-// specific API key is rejected by the provider. These warrant rotating to
-// the next credential immediately with a long cooldown on the bad key.
-func isCredentialAuthError(status int) bool {
-	return status == http.StatusUnauthorized ||
-		status == http.StatusPaymentRequired ||
-		status == http.StatusForbidden
-}
-
-// cooldownForStatus returns appropriate cooldown duration based on error type.
-// Auth errors (401/402/403) use a random jitter between 20–30 minutes to
-// prevent all penalized keys from becoming available simultaneously.
+// cooldownForStatus returns the appropriate cooldown duration for a given
+// upstream HTTP status code. Covers standard codes, auth anomalies, and
+// non-standard codes from load balancers and custom proxies (444, 520, 524, 599…).
 func cooldownForStatus(status int) time.Duration {
-	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired:
-		// Random 20–30 minutes: long enough to skip bad keys within a session,
-		// short enough that a temporarily-suspended key gets a retry window.
-		// Jitter prevents a thundering-herd re-activation of all bad keys at once.
+	switch {
+	case status == http.StatusBadRequest ||
+		status == http.StatusUnauthorized ||
+		status == http.StatusPaymentRequired ||
+		status == http.StatusForbidden ||
+		status == http.StatusNotFound ||
+		status == http.StatusUnprocessableEntity:
+		// Auth/access anomalies: the key is broken for this model.
+		// 20–30 min jitter prevents thundering-herd re-activation of all bad keys.
 		return 20*time.Minute + time.Duration(rand.Intn(int(10*time.Minute)))
-	case http.StatusTooManyRequests:
-		return 30 * time.Second // Rate limited — longer cooldown
-	case http.StatusInternalServerError, http.StatusBadGateway:
-		return 10 * time.Second // Server errors — moderate cooldown
-	case http.StatusServiceUnavailable:
+
+	case status == http.StatusTooManyRequests:
+		return 30 * time.Second // Rate limited — wait for quota window reset
+
+	case status == http.StatusInternalServerError || status == http.StatusBadGateway:
+		return 10 * time.Second // Server error — moderate cooldown
+
+	case status == http.StatusServiceUnavailable:
 		return 15 * time.Second // Overloaded — moderate-long cooldown
-	case http.StatusGatewayTimeout:
-		return 5 * time.Second  // Timeout — short cooldown
+
+	case status == http.StatusGatewayTimeout:
+		return 5 * time.Second // Timeout — short cooldown, try others first
+
 	default:
-		return 5 * time.Second
+		// Non-standard codes (nginx 444, Cloudflare 520/524, custom 599, etc.)
+		// 15s safe fallback prevents cascading delays across cluster nodes.
+		return 15 * time.Second
 	}
 }
 
@@ -1148,4 +1131,121 @@ func extractTokens(body []byte, promptOrCompletion string) int {
 	return 0
 }
 
+// isContextTimeoutError reports whether a transport error is a context timeout
+// or deadline exceeded, enabling more precise HTTP status mapping (504 vs 502).
+func isContextTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "context canceled") ||
+		strings.Contains(msg, "timeout")
+}
 
+// buildAttemptSummary formats the list of failed credential attempts into a
+// human-readable diagnostic string for inclusion in the final error envelope.
+func buildAttemptSummary(model string, attempts []attemptRecord) string {
+	if len(attempts) == 0 {
+		return fmt.Sprintf("all upstream credentials for model %q were exhausted with no successful response", model)
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "all %d credential(s) exhausted for model %q. Attempts: [", len(attempts), model)
+	for i, a := range attempts {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		fmt.Fprintf(&sb, "cred#%d(%s)→%d", a.credID, a.provider, a.statusCode)
+	}
+	sb.WriteString("]")
+	return sb.String()
+}
+
+// formatOpenAIError returns a canonical OpenAI error envelope for any failure
+// context. It is the single exit point for all error responses sent to clients
+// — never raw upstream bytes, never unformatted text or HTML.
+//
+// Detection priority:
+//  1. rawBody is already a valid OpenAI error envelope → return as-is
+//     (preserves provider transparency: upstream Claude/OpenAI error details)
+//  2. rawBody is JSON with a "message", "error.message", or "detail" field
+//     → extract and re-wrap into the canonical schema
+//  3. HTML, plain-text, or empty body → sanitize and embed in the message field
+func formatOpenAIError(statusCode int, rawBody []byte, summary string) []byte {
+	type innerError struct {
+		Message string  `json:"message"`
+		Type    string  `json:"type"`
+		Param   *string `json:"param"`
+		Code    string  `json:"code"`
+	}
+	type envelope struct {
+		Error innerError `json:"error"`
+	}
+
+	// 1. Already a valid OpenAI error envelope? Return unchanged.
+	if len(rawBody) > 0 {
+		if errVal, dataType, _, parseErr := jsonparser.Get(rawBody, "error"); parseErr == nil &&
+			dataType == jsonparser.Object && len(errVal) > 0 {
+			if _, _, _, msgErr := jsonparser.Get(errVal, "message"); msgErr == nil {
+				return rawBody // perfect OpenAI shape — preserve provider details
+			}
+		}
+	}
+
+	// 2. Try to extract any upstream message text
+	var upstreamMsg string
+	if len(rawBody) > 0 {
+		if msg, err := jsonparser.GetString(rawBody, "message"); err == nil && msg != "" {
+			upstreamMsg = msg
+		}
+		if upstreamMsg == "" {
+			if msg, err := jsonparser.GetString(rawBody, "error", "message"); err == nil && msg != "" {
+				upstreamMsg = msg
+			}
+		}
+		if upstreamMsg == "" {
+			// FastAPI / Python upstream pattern
+			if msg, err := jsonparser.GetString(rawBody, "detail"); err == nil && msg != "" {
+				upstreamMsg = msg
+			}
+		}
+	}
+
+	// 3. Build the canonical message
+	message := summary
+	if upstreamMsg != "" {
+		message = summary + ". Last upstream message: " + upstreamMsg
+	} else if len(rawBody) > 0 {
+		raw := string(rawBody)
+		if strings.Contains(raw, "<html") || strings.Contains(raw, "<!DOCTYPE") {
+			raw = "[HTML response from upstream load balancer or CDN]"
+		} else if len(raw) > 512 {
+			raw = raw[:512] + "…"
+		}
+		if isPrintable(raw) {
+			message = summary + ". Last upstream body: " + raw
+		}
+	}
+
+	out, _ := json.Marshal(envelope{
+		Error: innerError{
+			Message: message,
+			Type:    "gateway_exhaustion_error",
+			Param:   nil,
+			Code:    "all_providers_failed",
+		},
+	})
+	return out
+}
+
+// isPrintable returns true if s consists only of printable ASCII/UTF-8 text.
+// Used to filter out binary garbage from upstream responses before embedding
+// them in human-readable error messages.
+func isPrintable(s string) bool {
+	for _, r := range s {
+		if r < 0x20 && r != '\n' && r != '\r' && r != '\t' {
+			return false
+		}
+	}
+	return true
+}

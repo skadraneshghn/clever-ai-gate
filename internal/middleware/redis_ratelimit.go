@@ -40,12 +40,15 @@ if count >= limit then
     return {0, count}
 end
 
--- Record this request with a unique member (timestamp + random suffix avoids collisions)
-local member = now .. '-' .. redis.call('INCR', key .. ':seq')
+-- Record this request with a unique member (timestamp + sequence counter)
+local seq_key = key .. ':seq'
+local member = now .. '-' .. redis.call('INCR', seq_key)
 redis.call('ZADD', key, now, member)
 
--- Set TTL slightly longer than window so the key auto-expires
+-- Set TTL on BOTH keys — :seq left without TTL causes a permanent memory leak
+-- for every unique tenant that ever hits the gateway.
 redis.call('PEXPIRE', key, window + 1000)
+redis.call('PEXPIRE', seq_key, window + 1000)
 
 return {1, count + 1}
 `)
