@@ -3,6 +3,7 @@ package router
 import (
 	"io/fs"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -62,10 +63,6 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 	if err != nil {
 		panic("failed to read embedded playground dist: " + err.Error())
 	}
-	assetsFS, err := fs.Sub(playground.DistFS, "dist/assets")
-	if err != nil {
-		panic("failed to read embedded playground assets: " + err.Error())
-	}
 
 	// Read index.html at startup to serve it directly
 	// This avoids http.FileServer's built-in redirect logic for "index.html" (which redirects to ./ and causes 404/redirection loops)
@@ -78,16 +75,38 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 	// This secures both the SPA HTML and the compiled JS/CSS bundles.
 	playgroundGroup := engine.Group("", middleware.PlaygroundBasicAuth(deps.Config.PlaygroundUser, deps.Config.PlaygroundPass))
 	{
-		// Serve Svelte client compiled CSS/JS from /assets/*
-		playgroundGroup.StaticFS("/assets", http.FS(assetsFS))
+		// Serve Svelte client static assets from the subFS using http.FileServer
+		fileServer := http.StripPrefix("/playground", http.FileServer(http.FS(subFS)))
 
-		// Serve Svelte index.html for requests to /playground and /playground/*any
-		// This explicitly serves the client on both paths to avoid Gin's automatic trailing slash
-		// HTTP redirects which fail behind Clever Cloud's reverse proxy, while also resolving SPA 404s.
+		// Serve Svelte index.html for requests to /playground
 		playgroundGroup.GET("/playground", func(c *gin.Context) {
 			c.Data(200, "text/html; charset=utf-8", indexContent)
 		})
+
+		// Serve Svelte index.html or dynamic static assets for /playground/*any
 		playgroundGroup.GET("/playground/*any", func(c *gin.Context) {
+			path := c.Param("any")
+			if path == "" || path == "/" {
+				c.Data(200, "text/html; charset=utf-8", indexContent)
+				return
+			}
+
+			// Clean the path to check if the file exists in the embedded FS
+			filePath := strings.TrimPrefix(path, "/")
+			if filePath == "index.html" {
+				c.Data(200, "text/html; charset=utf-8", indexContent)
+				return
+			}
+
+			// Check if the file exists in our subFS
+			f, err := subFS.Open(filePath)
+			if err == nil {
+				f.Close()
+				fileServer.ServeHTTP(c.Writer, c.Request)
+				return
+			}
+
+			// Fallback to index.html for SPA client-side routing
 			c.Data(200, "text/html; charset=utf-8", indexContent)
 		})
 
