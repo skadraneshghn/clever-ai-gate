@@ -36,8 +36,9 @@ func NewRewriter() *Rewriter {
 	r.pathTransformers["nvidia"] = passthroughPath
 	r.pathTransformers["xai"] = passthroughPath
 
-	// Ollama (OpenAI-compatible at /v1/chat/completions)
-	r.pathTransformers["ollama"] = passthroughPath
+	// Ollama: uses native /api/* paths for Ollama Cloud (https://ollama.com)
+	// and OpenAI-compatible /v1/* passthrough for local instances.
+	r.pathTransformers["ollama"] = ollamaPath
 
 	// Anthropic
 	r.pathTransformers["anthropic"] = anthropicPath
@@ -196,3 +197,32 @@ func coherePath(baseURL, requestPath, _ string) string {
 // Note: NVIDIA NIM uses passthroughPath since it is OpenAI-compatible.
 // Base URL should be configured as https://integrate.api.nvidia.com/v1
 // and the path /v1/chat/completions passes through directly.
+
+// ollamaPath routes requests to the correct Ollama endpoint based on the
+// base URL. Ollama Cloud (https://ollama.com) exposes a native REST API:
+//
+//   /v1/chat/completions  → /api/chat
+//   /v1/completions       → /api/generate
+//   /v1/embeddings        → /api/embeddings
+//
+// Local Ollama instances (http://localhost:11434 or custom self-hosted) expose
+// an OpenAI-compatible API at /v1/*, so we fall through to passthroughPath.
+func ollamaPath(baseURL, requestPath, _ string) string {
+	// Route to native Ollama Cloud API endpoints only when the base URL
+	// points to the official Ollama Cloud host.
+	if strings.Contains(baseURL, "ollama.com") {
+		if strings.Contains(requestPath, "/chat/completions") {
+			return baseURL + "/api/chat"
+		}
+		if strings.Contains(requestPath, "/completions") {
+			return baseURL + "/api/generate"
+		}
+		if strings.Contains(requestPath, "/embeddings") {
+			return baseURL + "/api/embeddings"
+		}
+		// Default: use the native API path as-is
+		return baseURL + requestPath
+	}
+	// Local / self-hosted Ollama: passthrough OpenAI-compatible paths unchanged.
+	return baseURL + requestPath
+}

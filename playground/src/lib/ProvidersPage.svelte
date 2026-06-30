@@ -419,18 +419,18 @@
           </button>
         </div>
       {:else}
-        <p class="text-xs mb-4">Auto-discover all models from an NVIDIA or Ollama provider. Pools are created automatically.</p>
+        <p class="text-xs mb-4">Auto-discover all models from an NVIDIA NIM or Ollama Cloud provider. Pools are created automatically.</p>
         <div class="flex flex-col gap-3 mb-5">
           <div class="form-group flex flex-col gap-1">
             <label class="text-[10px] font-bold uppercase tracking-wider" for="auto-provider-select">Provider Type</label>
-            <select id="auto-provider-select" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={autoDiscoverForm.provider} onchange={() => { autoDiscoverForm.base_url = autoDiscoverForm.provider === 'nvidia' ? 'https://integrate.api.nvidia.com/v1' : 'http://localhost:11434/v1'; }}>
+            <select id="auto-provider-select" class="input-box w-full p-2.5 rounded-lg border text-sm" bind:value={autoDiscoverForm.provider} onchange={() => { autoDiscoverForm.base_url = autoDiscoverForm.provider === 'nvidia' ? 'https://integrate.api.nvidia.com/v1' : 'https://ollama.com'; }}>
               <option value="nvidia">NVIDIA NIM</option>
-              <option value="ollama">Ollama</option>
+              <option value="ollama">Ollama Cloud</option>
             </select>
           </div>
           <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="auto-api-key-input">API Key {autoDiscoverForm.provider === 'ollama' ? '(optional)' : ''}</label>
-            <input type="password" id="auto-api-key-input" class="input-box w-full p-2.5 rounded-lg border text-sm" placeholder={autoDiscoverForm.provider === 'nvidia' ? 'nvapi-...' : 'Optional for local Ollama'} bind:value={autoDiscoverForm.api_key} />
+            <label class="text-[10px] font-bold uppercase tracking-wider" for="auto-api-key-input">API Key {autoDiscoverForm.provider === 'ollama' ? '(required for cloud)' : ''}</label>
+            <input type="password" id="auto-api-key-input" class="input-box w-full p-2.5 rounded-lg border text-sm" placeholder={autoDiscoverForm.provider === 'nvidia' ? 'nvapi-...' : 'Ollama Cloud API key...'} bind:value={autoDiscoverForm.api_key} />
           </div>
           <div class="form-group flex flex-col gap-1">
             <label class="text-[10px] font-bold uppercase tracking-wider" for="auto-base-url-input">Base URL</label>
