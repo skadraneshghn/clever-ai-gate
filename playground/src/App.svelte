@@ -1,14 +1,11 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { 
-    Globe, BookOpen, FileText, Settings, Compass, Search, HelpCircle, 
-    Send, Plus, Trash2, Sparkles, User, Sun, Moon, Cpu, Paperclip, Mic, 
-    ExternalLink, Check, Copy, ChevronDown, RefreshCw, LogIn, Terminal,
-    Download, Play, Square, Eraser
+    Settings, Plus, Trash2, Sparkles, Sun, Moon, KeyRound, Terminal
   } from '@lucide/svelte';
 
   // State (using Svelte 5 Runes)
-  let theme = $state('light'); // Default to light as in the first screenshot
+  let theme = $state('light');
   let apiKey = $state('');
   let models = $state([]);
   let selectedModel = $state('');
@@ -50,7 +47,7 @@
   let isInitializing = $state(true);
 
   // Settings modal tabs and admin registration state
-  let activeSettingsTab = $state('tenant'); // 'tenant' or 'admin'
+  let activeSettingsTab = $state('tenant');
   let adminApiKey = $state('');
   let nvidiaApiKey = $state('');
   let nvidiaBaseUrl = $state('https://integrate.api.nvidia.com/v1');
@@ -62,17 +59,34 @@
   let showCodePanel = $state(false);
   let activeCodeTab = $state('curl');
 
-  // Page routing: 'chat' | 'logs'
+  // Page routing: 'chat' | 'logs' | 'providers'
   let activePage = $state('chat');
 
-  // ─── Logs Console State ──────────────────────────────────────────────────
+  // Shared Admin Key
+  let adminKey = $state('');
+
+  // Logs Console State
   let logLines = $state([]);
   let logsStreaming = $state(false);
   let logsAutoScroll = $state(true);
-  let logsAdminKey = $state('');
   let logsError = $state('');
   let logsAbortController = null;
-  let logsTerminalEl = $state(null);
+
+  // Toast Notification System
+  let toasts = $state([]);
+  let toastCounter = 0;
+
+  function addToast(type, message, timeout = 4000) {
+    const id = ++toastCounter;
+    toasts = [...toasts, { id, type, message }];
+    setTimeout(() => {
+      toasts = toasts.filter(t => t.id !== id);
+    }, timeout);
+  }
+
+  function removeToast(id) {
+    toasts = toasts.filter(t => t.id !== id);
+  }
 
   // Sidebar grouping computed state
   let sidebarChats = $derived.by(() => {
@@ -124,10 +138,9 @@
       applyTheme(theme);
     }
 
-    // Pre-populate admin key from localStorage if available
     const savedAdminKey = localStorage.getItem('cag_admin_key');
     if (savedAdminKey) {
-      logsAdminKey = savedAdminKey;
+      adminKey = savedAdminKey;
     }
 
     isInitializing = false;
@@ -206,7 +219,6 @@
       if (res.status === 200) {
         const data = await res.json();
         adminConnectSuccess = `Successfully registered ${data.models_count || 0} models!`;
-        // Refresh models dropdown
         if (apiKey) {
           loadModels();
         }
@@ -230,7 +242,6 @@
     }
   }
 
-  // Load tenant details from GET /api/v1/playground/tenant. Returns true if key is valid.
   async function loadTenantInfo(keyToUse = apiKey) {
     if (!keyToUse.trim()) return false;
     try {
@@ -253,21 +264,13 @@
     }
   }
 
-  // Format large numbers for token display (e.g. 1000000000 -> 1.0B)
   function formatBalance(num) {
-    if (num >= 1e9) {
-      return (num / 1e9).toFixed(1) + 'B';
-    }
-    if (num >= 1e6) {
-      return (num / 1e6).toFixed(1) + 'M';
-    }
-    if (num >= 1e3) {
-      return (num / 1e3).toFixed(1) + 'K';
-    }
+    if (num >= 1e9) return (num / 1e9).toFixed(1) + 'B';
+    if (num >= 1e6) return (num / 1e6).toFixed(1) + 'M';
+    if (num >= 1e3) return (num / 1e3).toFixed(1) + 'K';
     return num.toString();
   }
 
-  // Load active models from the Go backend GET /v1/models route
   async function loadModels() {
     try {
       const res = await fetch('/v1/models', {
@@ -290,7 +293,6 @@
     }
   }
 
-  // Load chat history from the Go backend GET /api/v1/playground/chats route
   async function loadChats() {
     try {
       const res = await fetch('/api/v1/playground/chats', {
@@ -306,7 +308,6 @@
     }
   }
 
-  // Set active conversation session
   async function selectChat(id) {
     currentChatId = id;
     try {
@@ -324,14 +325,12 @@
     }
   }
 
-  // Create a new empty conversation session in database
   async function startNewChat() {
     currentChatId = null;
     messages = [];
     inputText = '';
   }
 
-  // Delete chat session
   async function deleteChat(id, e) {
     e.stopPropagation();
     try {
@@ -352,12 +351,10 @@
     }
   }
 
-  // Trigger prompt presets
   function applyPreset(text) {
     inputText = text;
   }
 
-  // Main Submit Chat request (Handles streaming & parsing)
   async function submitPrompt() {
     if (!inputText.trim() || isSending) return;
     
@@ -367,7 +364,6 @@
     inputText = '';
     isSending = true;
 
-    // HUD reset
     statusHUD = 'Streaming...';
     providerHUD = '—';
     modelHUD = selectedModel;
@@ -380,7 +376,6 @@
     let firstTokenReceived = false;
     let tokenCount = 0;
     
-    // Create new assistant placeholder
     const assistantPlaceholder = { role: 'assistant', content: '', reasoning_content: '' };
     messages = [...messages, assistantPlaceholder];
     const assistantIndex = messages.length - 1;
@@ -408,7 +403,6 @@
         return;
       }
 
-      // Read response headers for metadata HUD
       const gwProvider = response.headers.get('X-Gateway-Provider');
       const gwModel = response.headers.get('X-Gateway-Model-Pattern');
       if (gwProvider) providerHUD = gwProvider.toUpperCase();
@@ -430,7 +424,7 @@
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
-        buffer = lines.pop(); // Keep partial line in buffer
+        buffer = lines.pop();
 
         for (const line of lines) {
           const cleanedLine = line.trim();
@@ -452,12 +446,11 @@
                 tokenCount++;
               }
             } catch (e) {
-              // Parse error wrapper
+              // Parse error
             }
           }
         }
 
-        // Live calculation speed
         const elapsed = (performance.now() - startTime) / 1000;
         if (elapsed > 0) {
           speedHUD = `${Math.round(tokenCount / elapsed)} tok/s`;
@@ -468,7 +461,6 @@
       latencyHUD = `${Math.round(totalElapsed)}ms`;
       statusHUD = 'Done';
 
-      // Save/Persist conversation in database
       await saveConversation(originalInput);
 
     } catch (err) {
@@ -479,13 +471,11 @@
     }
   }
 
-  // Database synchronisation helper (saves the conversation log)
   async function saveConversation(firstPrompt) {
     const title = messages[0].content.substring(0, 35) + (messages[0].content.length > 35 ? '...' : '');
     
     try {
       if (currentChatId) {
-        // Update existing chat
         await fetch(`/api/v1/playground/chats/${currentChatId}`, {
           method: 'PUT',
           headers: {
@@ -498,7 +488,6 @@
           })
         });
       } else {
-        // Create new chat
         const res = await fetch('/api/v1/playground/chats', {
           method: 'POST',
           headers: {
@@ -520,16 +509,14 @@
       console.error('Failed to auto-save conversation', e);
     }
   }
-  // ─── Logs Console Functions ───────────────────────────────────────────────
 
   async function startLogsStream() {
     if (logsStreaming) return;
-    const key = logsAdminKey.trim();
+    const key = adminKey.trim();
     if (!key) {
       logsError = 'Admin API key is required to stream logs.';
       return;
     }
-    // Persist admin key so the Logs page re-connects on reload
     localStorage.setItem('cag_admin_key', key);
     logsError = '';
     logsStreaming = true;
@@ -557,20 +544,18 @@
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         const frames = buf.split('\n\n');
-        buf = frames.pop(); // keep trailing incomplete frame
+        buf = frames.pop();
 
         for (const frame of frames) {
           const trimmed = frame.trim();
-          if (!trimmed || trimmed.startsWith(': ')) continue; // SSE comment/ping
+          if (!trimmed || trimmed.startsWith(': ')) continue;
           if (trimmed.startsWith('data: ')) {
             const raw = trimmed.slice(6).trim();
             try {
               const parsed = JSON.parse(raw);
-              // Keep ring buffer at 500 entries max
               logLines = [...logLines.slice(-499), parsed];
-              if (logsAutoScroll) scrollLogsToBottom();
             } catch {
-              // Non-JSON SSE frame — skip
+              // Ignore non-JSON
             }
           }
         }
@@ -578,7 +563,6 @@
     } catch (err) {
       if (err.name !== 'AbortError') {
         logsError = `Stream error: ${err.message}`;
-        // Auto-reconnect after 3 s
         setTimeout(() => {
           if (!logsStreaming) startLogsStream();
         }, 3000);
@@ -599,7 +583,7 @@
   }
 
   async function downloadTodayLog() {
-    const key = logsAdminKey.trim();
+    const key = adminKey.trim();
     if (!key) { logsError = 'Admin API key required.'; return; }
     try {
       const resp = await fetch('/api/v1/admin/logs/download', {
@@ -624,12 +608,6 @@
     }
   }
 
-  function scrollLogsToBottom() {
-    setTimeout(() => {
-      if (logsTerminalEl) logsTerminalEl.scrollTop = logsTerminalEl.scrollHeight;
-    }, 16);
-  }
-
   function logLevelClass(level) {
     switch ((level || '').toLowerCase()) {
       case 'debug': return 'lvl-debug';
@@ -642,7 +620,6 @@
 
   function formatLogTime(ts) {
     if (!ts) return '';
-    // ISO 8601 → HH:MM:SS.mmm
     try {
       const d = new Date(ts);
       return d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
@@ -735,7 +712,11 @@
           <Sparkles size={18} />
           <span>Chat</span>
         </button>
-        <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left {activePage === 'logs' ? 'nav-link-active' : ''}" onclick={() => { activePage = 'logs'; if (!logsStreaming && logsAdminKey) startLogsStream(); }}>
+        <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left {activePage === 'providers' ? 'nav-link-active' : ''}" onclick={() => { activePage = 'providers'; }}>
+          <KeyRound size={18} />
+          <span>Providers</span>
+        </button>
+        <button class="nav-link flex items-center gap-3 w-full p-2-5 rounded-lg text-left {activePage === 'logs' ? 'nav-link-active' : ''}" onclick={() => { activePage = 'logs'; if (!logsStreaming && adminKey) startLogsStream(); }}>
           <Terminal size={18} />
           <span>Gateway Logs</span>
           {#if logsStreaming}
@@ -779,276 +760,64 @@
 
       {#if activePage === 'logs'}
         <!-- ═══════════════════════════════════════════════════════════════ -->
-        <!-- LOGS PAGE                                                       -->
+        <!-- LOGS PAGE (lazy loaded)                                         -->
         <!-- ═══════════════════════════════════════════════════════════════ -->
-        <header class="header flex items-center justify-between px-6 py-3 border-b shrink-0">
-          <div class="flex items-center gap-3">
-            <Terminal size={18} class="text-[#f97316]" />
-            <span class="font-bold text-sm">Gateway Core Logs</span>
-            {#if logsStreaming}
-              <span class="flex items-center gap-1.5">
-                <span class="log-pulse-dot"></span>
-                <span class="text-[10px] font-bold text-green-500 uppercase">Live</span>
-              </span>
-            {:else}
-              <span class="text-[10px] font-bold text-secondary uppercase">Offline</span>
-            {/if}
-          </div>
-          <div class="flex items-center gap-2">
-            {#if logsStreaming}
-              <button class="log-action-btn log-btn-stop" onclick={stopLogsStream} title="Pause stream">
-                <Square size={12} />
-                Pause
-              </button>
-            {:else}
-              <button class="log-action-btn log-btn-start" onclick={startLogsStream} title="Start stream">
-                <Play size={12} />
-                Connect
-              </button>
-            {/if}
-            <button class="log-action-btn log-btn-clear" onclick={clearLogs} title="Clear buffer">
-              <Eraser size={12} />
-              Clear
-            </button>
-            <button class="log-action-btn log-btn-download" onclick={downloadTodayLog} title="Download today's log file">
-              <Download size={12} />
-              Download
-            </button>
-            <label class="flex items-center gap-1.5 text-[10px] font-medium cursor-pointer select-none">
-              <input type="checkbox" bind:checked={logsAutoScroll} class="log-checkbox" />
-              Auto-scroll
-            </label>
-          </div>
-        </header>
+        {#await import('./lib/LogsPage.svelte') then { default: LogsPage }}
+          <LogsPage
+            bind:adminKey
+            bind:logLines
+            bind:logsStreaming
+            bind:logsAutoScroll
+            bind:logsError
+            {startLogsStream}
+            {stopLogsStream}
+            {clearLogs}
+            {downloadTodayLog}
+            {formatLogTime}
+            {logLevelClass}
+          />
+        {/await}
 
-        <!-- Admin key prompt if not set -->
-        {#if !logsAdminKey.trim()}
-          <div class="logs-key-prompt">
-            <div class="logs-key-card">
-              <Terminal size={32} class="text-[#f97316] mb-3" />
-              <h2 class="font-bold text-base mb-1">Admin Key Required</h2>
-              <p class="text-xs mb-4">The log stream is protected by your Admin API Key.</p>
-              <div class="flex gap-2 w-full max-w-sm">
-                <input
-                  type="password"
-                  class="input-box flex-grow p-2.5 rounded-lg border text-sm"
-                  placeholder="Enter Admin API Key..."
-                  bind:value={logsAdminKey}
-                  onkeydown={(e) => { if (e.key === 'Enter') startLogsStream(); }}
-                />
-                <button class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold text-xs" onclick={startLogsStream}>
-                  Connect
-                </button>
-              </div>
-              {#if logsError}
-                <p class="text-red-500 text-xs mt-3">{logsError}</p>
-              {/if}
-            </div>
-          </div>
-        {:else}
-          <!-- Log terminal -->
-          <div class="log-terminal-wrap">
-            <!-- Stats bar -->
-            <div class="log-stats-bar">
-              <span>Entries: <strong>{logLines.length}</strong></span>
-              <span>Buffer: <strong>{Math.min(logLines.length, 500)}/500</strong></span>
-              {#if logsError}
-                <span class="text-red-500 font-medium">{logsError}</span>
-              {/if}
-            </div>
-
-            <!-- Terminal body -->
-            <div
-              class="log-terminal"
-              bind:this={logsTerminalEl}
-              onscroll={() => {
-                if (!logsTerminalEl) return;
-                const atBottom = logsTerminalEl.scrollHeight - logsTerminalEl.scrollTop - logsTerminalEl.clientHeight < 40;
-                logsAutoScroll = atBottom;
-              }}
-            >
-              {#if logLines.length === 0}
-                <div class="log-empty">
-                  <Terminal size={40} class="opacity-20 mb-3" />
-                  <p class="opacity-40 text-xs">{logsStreaming ? 'Waiting for log entries…' : 'Click Connect to start streaming logs.'}</p>
-                </div>
-              {:else}
-                {#each logLines as log, i (i)}
-                  <div class="log-row {logLevelClass(log.level)}">
-                    <span class="log-time">{formatLogTime(log.timestamp)}</span>
-                    <span class="log-lvl">{(log.level || 'info').toUpperCase()}</span>
-                    <span class="log-msg">{log.msg || ''}</span>
-                    {#if log.caller}
-                      <span class="log-caller">{log.caller}</span>
-                    {/if}
-                    {#if log.model || log.provider}
-                      <span class="log-meta">
-                        {#if log.model}model={log.model}{/if}
-                        {#if log.model && log.provider} · {/if}
-                        {#if log.provider}provider={log.provider}{/if}
-                      </span>
-                    {/if}
-                    {#if log.error}
-                      <span class="log-err-detail">{log.error}</span>
-                    {/if}
-                  </div>
-                {/each}
-              {/if}
-            </div>
-          </div>
-        {/if}
+      {:else if activePage === 'providers'}
+        <!-- ═══════════════════════════════════════════════════════════════ -->
+        <!-- PROVIDERS PAGE (lazy loaded)                                    -->
+        <!-- ═══════════════════════════════════════════════════════════════ -->
+        {#await import('./lib/ProvidersPage.svelte') then { default: ProvidersPage }}
+          <ProvidersPage
+            bind:adminKey
+            {apiKey}
+            {loadModels}
+            {addToast}
+          />
+        {/await}
 
       {:else}
         <!-- ═══════════════════════════════════════════════════════════════ -->
-        <!-- CHAT PAGE (original content)                                    -->
+        <!-- CHAT PAGE (lazy loaded)                                         -->
         <!-- ═══════════════════════════════════════════════════════════════ -->
-        <!-- Top header bar -->
-        <header class="header flex items-center justify-between px-6 py-3 border-b shrink-0">
-          <div class="model-picker-container relative">
-            <button class="model-picker-btn flex items-center gap-2 font-semibold text-sm" onclick={handleModelPickerClick}>
-              <span>{selectedModel || 'Configure Gateway'}</span>
-              <ChevronDown size={14} />
-            </button>
-            
-            {#if showModelDropdown && models.length > 0}
-              <div class="model-dropdown absolute top-full left-0 mt-1 border rounded-lg shadow-xl z-20 w-56">
-                {#each models as model}
-                  <button class="model-option flex items-center w-full px-4 py-2-5 text-left text-xs {selectedModel === model.id ? 'active' : ''}" onclick={() => { selectedModel = model.id; showModelDropdown = false; }}>
-                    {model.id}
-                  </button>
-                {/each}
-              </div>
-            {/if}
-          </div>
-
-          <div class="flex items-center gap-2">
-            <button class="icon-button" onclick={() => showCodePanel = !showCodePanel} title="Toggle Integration Snippets">
-              <ExternalLink size={16} />
-            </button>
-            <button class="share-btn text-xs font-semibold px-3 py-1-5 rounded-lg border">Share</button>
-          </div>
-        </header>
-
-      <!-- Live telemetry HUD panel -->
-      <div class="telemetry-bar flex gap-6 px-6 py-2.5 border-b font-mono text-[10px] overflow-x-auto whitespace-nowrap shrink-0">
-        <div>Status: <span class="hud-value">{statusHUD}</span></div>
-        <div>Provider: <span class="hud-value text-[#f97316]">{providerHUD}</span></div>
-        <div>Model: <span class="hud-value text-[#f97316]">{modelHUD}</span></div>
-        <div>TTFT: <span class="hud-value">{ttftHUD}</span></div>
-        <div>Latency: <span class="hud-value">{latencyHUD}</span></div>
-        <div>Speed: <span class="hud-value">{speedHUD}</span></div>
-      </div>
-
-      <!-- Chat Scrollable Area -->
-      <div class="chat-scroll-area flex-grow overflow-y-auto">
-        {#if messages.length === 0}
-          <!-- Initial landing screen layout -->
-          <div class="landing-container flex flex-col items-center justify-center text-center px-6">
-            
-            <h1 class="text-3xl font-extrabold tracking-tight mb-8">What's on your mind today?</h1>
-
-            <!-- Prompt Card (Pill styled) -->
-            <div class="prompt-pill-card mb-6">
-              <textarea 
-                class="prompt-textarea w-full text-sm outline-none resize-none" 
-                placeholder="Ask me anything..." 
-                rows="3"
-                bind:value={inputText}
-                onkeydown={(e) => { if(e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitPrompt(); } }}
-              ></textarea>
-              
-              <div class="flex items-center justify-between pt-2 border-t">
-                <div class="flex items-center gap-2">
-                  <button class="deeper-btn flex items-center gap-1 text-[10px] font-bold uppercase px-3 py-1.5 rounded-full border {isDeeperResearch ? 'active' : ''}" onclick={() => isDeeperResearch = !isDeeperResearch}>
-                    <Globe size={11} />
-                    Deeper Research
-                  </button>
-                  <button class="action-icon-btn"><Search size={14} /></button>
-                  <button class="action-icon-btn"><Cpu size={14} /></button>
-                </div>
-                
-                <div class="flex items-center gap-2">
-                  <button class="action-icon-btn"><Paperclip size={14} /></button>
-                  <button class="action-icon-btn"><Mic size={14} /></button>
-                  <button class="send-circle-btn flex items-center justify-center rounded-full w-8 h-8 text-white bg-[#f97316]" onclick={submitPrompt} disabled={!inputText.trim() || !apiKey}>
-                    <Send size={14} />
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <!-- Bottom Presets Row -->
-            <div class="presets-container flex gap-3 justify-center flex-wrap max-w-3xl">
-              <button class="preset-pill flex items-center gap-2 px-4 py-2.5 rounded-full border text-xs font-medium" onclick={() => applyPreset("Summarize this article for me:")}>
-                <FileText size={14} class="text-[#f97316]" />
-                <span>Summarize Text</span>
-              </button>
-              
-              <button class="preset-pill flex items-center gap-2 px-4 py-2.5 rounded-full border text-xs font-medium" onclick={() => applyPreset("Write a blog post outline on: ")}>
-                <RefreshCw size={14} class="text-[#f97316]" />
-                <span>Creative Writing</span>
-              </button>
-              
-              <button class="preset-pill flex items-center gap-2 px-4 py-2.5 rounded-full border text-xs font-medium" onclick={() => applyPreset("Answer this complex question: ")}>
-                <HelpCircle size={14} class="text-[#f97316]" />
-                <span>Answer Questions</span>
-              </button>
-            </div>
-          </div>
-        {:else}
-          <!-- Chat flow display -->
-          <div class="chat-content-container">
-            {#each messages as msg}
-              <div class="message-bubble flex flex-col gap-2 {msg.role === 'user' ? 'align-end' : ''}">
-                <div class="text-[10px] font-bold uppercase tracking-wider text-secondary">{msg.role === 'user' ? 'You' : 'Assistant'}</div>
-                
-                <div class="bubble-content p-4 rounded-xl border text-sm max-w-full">
-                  {#if msg.reasoning_content}
-                    <div class="reasoning-container p-3 rounded-lg border-l-2 mb-3">
-                      <div class="text-[10px] font-bold text-orange-500 uppercase tracking-wider mb-2">🧠 Thinking Process</div>
-                      <div class="text-xs italic leading-relaxed whitespace-pre-wrap">{msg.reasoning_content}</div>
-                    </div>
-                  {/if}
-                  <div class="leading-relaxed whitespace-pre-wrap">{msg.content || (isSending && !msg.reasoning_content ? 'Connecting...' : '')}</div>
-                </div>
-              </div>
-            {/each}
-          </div>
-        {/if}
-      </div>
-
-      <!-- Floating bottom input bar (Fixed overlay at bottom) -->
-      {#if messages.length > 0}
-        <div class="bottom-input-container">
-          <div class="prompt-pill-card">
-            <textarea 
-              class="prompt-textarea w-full text-sm outline-none resize-none" 
-              placeholder="Ask me anything..." 
-              rows="1"
-              bind:value={inputText}
-              onkeydown={(e) => { if(e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitPrompt(); } }}
-            ></textarea>
-            <div class="flex items-center justify-between pt-2 border-t">
-              <div class="flex items-center gap-2">
-                <button class="action-icon-btn"><Paperclip size={14} /></button>
-                <button class="action-icon-btn"><Mic size={14} /></button>
-              </div>
-              <button class="send-circle-btn flex items-center justify-center rounded-full w-8 h-8 text-white bg-[#f97316]" onclick={submitPrompt} disabled={!inputText.trim() || isSending}>
-                <Send size={14} />
-              </button>
-            </div>
-          </div>
-          <div class="footer-disclaimer text-[10px] opacity-60 mt-2 text-center">
-            Cognivo can make mistakes. Check important info.
-          </div>
-        </div>
-      {:else}
-        <!-- Simple small footer when on landing screen -->
-        <footer class="footer text-center py-3 text-[10px] border-t shrink-0">
-          Cognivo can make mistakes. Check important info. See Cookie Preferences.
-        </footer>
-      {/if}
-
+        {#await import('./lib/ChatPage.svelte') then { default: ChatPage }}
+          <ChatPage
+            {apiKey}
+            {models}
+            bind:selectedModel
+            bind:showModelDropdown
+            bind:showCodePanel
+            bind:activeCodeTab
+            bind:messages
+            bind:inputText
+            bind:isDeeperResearch
+            bind:isSending
+            {handleModelPickerClick}
+            {submitPrompt}
+            {applyPreset}
+            {statusHUD}
+            {providerHUD}
+            {modelHUD}
+            {ttftHUD}
+            {latencyHUD}
+            {speedHUD}
+          />
+        {/await}
       {/if}
     </main>
 
@@ -1102,133 +871,33 @@
   </div>
 </div>
 
-<!-- Settings Key Config Modal -->
+<!-- Settings Key Config Modal (lazy loaded) -->
 {#if !isInitializing && (showSettingsModal || !apiKey)}
-  <div class="modal-backdrop fixed inset-0 flex items-center justify-center p-4 z-50 bg-black-trans backdrop-blur-sm">
-    <div class="modal-content w-full max-w-sm rounded-xl border p-6 shadow-2xl relative">
-      <!-- Tabs Selector -->
-      <div class="flex border-b text-[10px] mb-4">
-        <button 
-          class="tab-btn px-4 py-2 flex-grow font-semibold text-center {activeSettingsTab === 'tenant' ? 'active' : ''}" 
-          onclick={() => { activeSettingsTab = 'tenant'; }}
-        >
-          Tenant Key
-        </button>
-        <button 
-          class="tab-btn px-4 py-2 flex-grow font-semibold text-center {activeSettingsTab === 'admin' ? 'active' : ''}" 
-          onclick={() => { activeSettingsTab = 'admin'; }}
-        >
-          Admin: NVIDIA Key
-        </button>
-      </div>
-
-      {#if activeSettingsTab === 'tenant'}
-        <h3 class="font-bold text-lg mb-2">Connect Gateway</h3>
-        <p class="text-xs mb-4">Please input your Clever AI Gate Tenant API key (e.g. <code>cag_xxxx</code>) to load your chat sessions and start calling active routing models.</p>
-        
-        <div class="form-group flex flex-col gap-2 mb-5">
-          <label class="text-xs font-bold uppercase tracking-wider" for="gw-api-key">Tenant API Key</label>
-          <div class="relative flex items-center">
-            <input 
-              type={visibleApiKey ? 'text' : 'password'} 
-              id="gw-api-key" 
-              class="input-box w-full p-2.5 rounded-lg border text-sm" 
-              placeholder="cag_xxxx..." 
-              bind:value={apiKey} 
-              onkeydown={(e) => { if(e.key === 'Enter') { e.preventDefault(); handleSaveKey(); } }}
-            />
-            <button class="absolute right-3" onclick={() => visibleApiKey = !visibleApiKey}>
-              {#if visibleApiKey}🔒{:else}👁️{/if}
-            </button>
-          </div>
-        </div>
-
-        {#if connectError}
-          <div class="text-red-500 text-xs mb-4 font-medium">{connectError}</div>
-        {/if}
-
-        <div class="flex justify-end gap-2 text-xs">
-          {#if apiKey.trim() && localStorage.getItem('cag_playground_api_key') && !isConnecting}
-            <button class="px-4 py-2 rounded-lg border" onclick={() => { showSettingsModal = false; connectError = ''; }}>Cancel</button>
-          {/if}
-          <button 
-            class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold flex items-center justify-center gap-1.5 min-w-[120px]" 
-            onclick={handleSaveKey} 
-            disabled={!apiKey.trim() || isConnecting}
-          >
-            {#if isConnecting}
-              <span class="animate-spin">🔄</span> Connecting...
-            {:else}
-              Save & Connect
-            {/if}
-          </button>
-        </div>
-      {:else}
-        <h3 class="font-bold text-lg mb-2">Register NVIDIA NIM</h3>
-        <p class="text-xs mb-4">Register NVIDIA key. This auto-discovers all active model configurations and synchronizes them to our AI Gateway.</p>
-        
-        <div class="flex flex-col gap-3 mb-5">
-          <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="admin-key">Admin API Key</label>
-            <input 
-              type="password" 
-              id="admin-key" 
-              class="input-box w-full p-2.5 rounded-lg border text-sm" 
-              placeholder="Enter Admin API Key..." 
-              bind:value={adminApiKey} 
-            />
-          </div>
-
-          <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="nv-key">NVIDIA API Key</label>
-            <input 
-              type="password" 
-              id="nv-key" 
-              class="input-box w-full p-2.5 rounded-lg border text-sm" 
-              placeholder="nvapi-..." 
-              bind:value={nvidiaApiKey} 
-            />
-          </div>
-
-          <div class="form-group flex flex-col gap-1">
-            <label class="text-[10px] font-bold uppercase tracking-wider" for="nv-url">Base URL</label>
-            <input 
-              type="text" 
-              id="nv-url" 
-              class="input-box w-full p-2.5 rounded-lg border text-sm" 
-              placeholder="https://integrate.api.nvidia.com/v1" 
-              bind:value={nvidiaBaseUrl} 
-            />
-          </div>
-        </div>
-
-        {#if adminConnectError}
-          <div class="text-red-500 text-xs mb-4 font-medium">{adminConnectError}</div>
-        {/if}
-        {#if adminConnectSuccess}
-          <div class="text-green-500 text-xs mb-4 font-medium">{adminConnectSuccess}</div>
-        {/if}
-
-        <div class="flex justify-end gap-2 text-xs">
-          {#if apiKey.trim() && localStorage.getItem('cag_playground_api_key')}
-            <button class="px-4 py-2 rounded-lg border" onclick={() => { showSettingsModal = false; adminConnectError = ''; adminConnectSuccess = ''; }}>Close</button>
-          {/if}
-          <button 
-            class="px-4 py-2 rounded-lg text-white bg-[#f97316] font-semibold flex items-center justify-center gap-1.5 min-w-[120px]" 
-            onclick={handleRegisterNvidia} 
-            disabled={isAdminConnecting}
-          >
-            {#if isAdminConnecting}
-              <span class="animate-spin">🔄</span> Registering...
-            {:else}
-              Register Provider
-            {/if}
-          </button>
-        </div>
-      {/if}
-    </div>
-  </div>
+  {#await import('./lib/SettingsModal.svelte') then { default: SettingsModal }}
+    <SettingsModal
+      bind:showSettingsModal
+      bind:apiKey
+      bind:activeSettingsTab
+      bind:visibleApiKey
+      bind:connectError
+      bind:isConnecting
+      {handleSaveKey}
+      bind:adminApiKey
+      bind:nvidiaApiKey
+      bind:nvidiaBaseUrl
+      bind:isAdminConnecting
+      bind:adminConnectSuccess
+      bind:adminConnectError
+      {handleRegisterNvidia}
+      {isInitializing}
+    />
+  {/await}
 {/if}
+
+<!-- Toast Notifications overlay (lazy loaded) -->
+{#await import('./lib/Toasts.svelte') then { default: ToastsComponent }}
+  <ToastsComponent {toasts} {removeToast} />
+{/await}
 
 <style>
   :global(body) {
@@ -1264,11 +933,11 @@
     --shadow-color: rgba(0, 0, 0, 0.4);
   }
 
-  .app-wrapper {
+  :global(.app-wrapper) {
     background-color: var(--bg-color);
   }
 
-  .cognivo-frame {
+  :global(.cognivo-frame) {
     background-color: var(--frame-bg);
     border-color: var(--border-color);
     box-shadow: none;
@@ -1277,21 +946,21 @@
   }
 
   /* Sidebar styling */
-  .sidebar {
+  :global(.sidebar) {
     background-color: var(--sidebar-bg);
     border-color: var(--border-color);
   }
 
-  .new-chat-btn {
+  :global(.new-chat-btn) {
     background-color: #f97316;
     box-shadow: 0 4px 12px rgba(249, 115, 22, 0.25);
     transition: transform 0.1s, opacity 0.2s;
   }
-  .new-chat-btn:hover {
+  :global(.new-chat-btn:hover) {
     opacity: 0.95;
     transform: translateY(-0.5px);
   }
-  .btn-shortcut {
+  :global(.btn-shortcut) {
     font-size: 8px;
     background-color: rgba(255, 255, 255, 0.2);
     padding: 2px 4px;
@@ -1299,32 +968,32 @@
     font-weight: bold;
   }
 
-  .nav-link {
+  :global(.nav-link) {
     color: var(--text-secondary);
     font-size: 12px;
     font-weight: 500;
     transition: background-color 0.15s, color 0.15s;
   }
-  .nav-link:hover {
+  :global(.nav-link:hover) {
     background-color: var(--item-hover);
     color: var(--text-primary);
   }
 
-  .history-label {
+  :global(.history-label) {
     color: var(--text-secondary);
     opacity: 0.6;
   }
 
-  .history-item {
+  :global(.history-item) {
     color: var(--text-secondary);
     font-size: 11px;
     transition: all 0.15s;
   }
-  .history-item:hover {
+  :global(.history-item:hover) {
     background-color: var(--item-hover);
     color: var(--text-primary);
   }
-  .history-item.active {
+  :global(.history-item.active) {
     background-color: rgba(249, 115, 22, 0.08);
     color: #f97316;
     font-weight: 600;
@@ -1337,13 +1006,13 @@
     opacity: 0.7;
   }
 
-  .profile-card {
+  :global(.profile-card) {
     background-color: var(--frame-bg);
     border-color: var(--border-color);
   }
 
   /* Main Workspace styling */
-  .main-panel {
+  :global(.main-panel) {
     background-color: var(--main-bg);
     height: 100%;
     position: relative;
@@ -1351,52 +1020,52 @@
     flex-direction: column;
     overflow: hidden;
   }
-  .header, .telemetry-bar, .footer {
+  :global(.header), :global(.telemetry-bar), :global(.footer) {
     border-color: var(--border-color);
   }
 
-  .model-picker-btn {
+  :global(.model-picker-btn) {
     color: var(--text-primary);
     background: var(--item-hover);
     padding: 6px 12px;
     border-radius: 20px;
     transition: opacity 0.15s;
   }
-  .model-picker-btn:hover {
+  :global(.model-picker-btn:hover) {
     opacity: 0.9;
   }
 
-  .model-dropdown {
+  :global(.model-dropdown) {
     background-color: var(--card-bg);
     border-color: var(--border-color);
   }
-  .model-option {
+  :global(.model-option) {
     color: var(--text-primary);
     transition: background-color 0.15s;
   }
-  .model-option:hover {
+  :global(.model-option:hover) {
     background-color: var(--item-hover);
   }
-  .model-option.active {
+  :global(.model-option.active) {
     color: #f97316;
     background-color: rgba(249, 115, 22, 0.06);
     font-weight: bold;
   }
 
-  .hud-value {
+  :global(.hud-value) {
     color: var(--text-primary);
     font-weight: 600;
   }
 
   /* Chat Scrollable Area & Layout Centering */
-  .chat-scroll-area {
+  :global(.chat-scroll-area) {
     flex-grow: 1;
     overflow-y: auto;
     width: 100%;
     position: relative;
   }
 
-  .landing-container {
+  :global(.landing-container) {
     width: 100%;
     max-width: 768px;
     margin: 0 auto;
@@ -1404,19 +1073,19 @@
     box-sizing: border-box;
   }
 
-  .chat-content-container {
+  :global(.chat-content-container) {
     width: 100%;
     max-width: 768px;
     margin: 0 auto;
     display: flex;
     flex-direction: column;
     gap: 1.5rem;
-    padding: 2rem 1.5rem 150px 1.5rem; /* Padding bottom to scroll past bottom floating input */
+    padding: 2rem 1.5rem 150px 1.5rem;
     box-sizing: border-box;
   }
 
   /* Prompt Pill Card (ChatGPT input styling) */
-  .prompt-pill-card {
+  :global(.prompt-pill-card) {
     background-color: var(--card-bg);
     border: 1px solid var(--border-color);
     border-radius: 26px;
@@ -1431,7 +1100,7 @@
     box-sizing: border-box;
   }
 
-  .prompt-textarea {
+  :global(.prompt-textarea) {
     background: transparent;
     color: var(--text-primary);
     border: none;
@@ -1442,7 +1111,7 @@
     line-height: 1.5;
   }
 
-  .action-icon-btn {
+  :global(.action-icon-btn) {
     color: var(--text-secondary);
     padding: 6px;
     border-radius: 50%;
@@ -1451,12 +1120,12 @@
     align-items: center;
     justify-content: center;
   }
-  .action-icon-btn:hover {
+  :global(.action-icon-btn:hover) {
     color: var(--text-primary);
     background: var(--item-hover);
   }
 
-  .deeper-btn {
+  :global(.deeper-btn) {
     color: var(--text-secondary);
     border-color: var(--border-color);
     transition: all 0.2s;
@@ -1465,18 +1134,18 @@
     font-size: 10px;
     font-weight: 700;
   }
-  .deeper-btn:hover {
+  :global(.deeper-btn:hover) {
     color: var(--text-primary);
     border-color: var(--text-secondary);
   }
-  .deeper-btn.active {
+  :global(.deeper-btn.active) {
     color: #f97316;
     border-color: #f97316;
     background: rgba(249, 115, 22, 0.05);
   }
 
   /* Presets horizontal layout styling */
-  .presets-container {
+  :global(.presets-container) {
     display: flex;
     gap: 10px;
     justify-content: center;
@@ -1484,7 +1153,7 @@
     width: 100%;
   }
 
-  .preset-pill {
+  :global(.preset-pill) {
     background-color: var(--card-bg);
     border: 1px solid var(--border-color);
     color: var(--text-secondary);
@@ -1495,7 +1164,7 @@
     justify-content: center;
     gap: 8px;
   }
-  .preset-pill:hover {
+  :global(.preset-pill:hover) {
     border-color: #f97316;
     color: var(--text-primary);
     background-color: var(--item-hover);
@@ -1503,7 +1172,7 @@
   }
 
   /* Floating Bottom Input Bar Container */
-  .bottom-input-container {
+  :global(.bottom-input-container) {
     position: absolute;
     bottom: 0;
     left: 0;
@@ -1518,48 +1187,48 @@
   }
 
   /* Chat Bubble flow elements */
-  .bubble-content {
+  :global(.bubble-content) {
     background-color: var(--card-bg);
     border-color: var(--border-color);
     color: var(--text-primary);
     box-shadow: 0 2px 8px var(--shadow-color);
   }
-  .reasoning-container {
+  :global(.reasoning-container) {
     background-color: rgba(249, 115, 22, 0.03);
     border-left-color: rgba(249, 115, 22, 0.3);
   }
 
   /* Sidebar Code Panel */
-  .code-panel {
+  :global(.code-panel) {
     background-color: var(--sidebar-bg);
     border-color: var(--border-color);
   }
-  .tab-btn {
+  :global(.tab-btn) {
     border: none;
     color: var(--text-secondary);
     background: transparent;
     transition: all 0.2s;
     font-weight: 500;
   }
-  .tab-btn.active {
+  :global(.tab-btn.active) {
     color: #f97316;
     border-bottom: 2px solid #f97316;
   }
 
   /* Modal Settings */
-  .modal-content {
+  :global(.modal-content) {
     background-color: var(--card-bg);
     border-color: var(--border-color);
     color: var(--text-primary);
   }
-  .input-box {
+  :global(.input-box) {
     background-color: var(--frame-bg);
     border-color: var(--border-color);
     color: var(--text-primary);
   }
 
   /* Shared Utility icons button style */
-  .icon-button {
+  :global(.icon-button) {
     color: var(--text-secondary);
     padding: 6px;
     border-radius: 6px;
@@ -1568,7 +1237,7 @@
     align-items: center;
     justify-content: center;
   }
-  .icon-button:hover {
+  :global(.icon-button:hover) {
     color: var(--text-primary);
     background: var(--item-hover);
   }
@@ -1577,19 +1246,19 @@
     from { transform: rotate(0deg); }
     to { transform: rotate(360deg); }
   }
-  .animate-spin {
+  :global(.animate-spin) {
     animation: spin 1s linear infinite;
     display: inline-block;
   }
   /* ── Logs Page ──────────────────────────────────────────────────────────── */
 
-  .nav-link-active {
+  :global(.nav-link-active) {
     color: #f97316 !important;
     background-color: rgba(249, 115, 22, 0.08);
     font-weight: 600;
   }
 
-  .logs-live-badge {
+  :global(.logs-live-badge) {
     font-size: 8px;
     font-weight: 800;
     letter-spacing: 0.08em;
@@ -1603,7 +1272,7 @@
   }
 
   /* Pulsing live indicator dot */
-  .log-pulse-dot {
+  :global(.log-pulse-dot) {
     width: 8px;
     height: 8px;
     border-radius: 50%;
@@ -1620,169 +1289,382 @@
   }
 
   /* Action buttons in log header */
-  .log-action-btn {
+  :global(.log-action-btn) {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    padding: 5px 10px;
+    padding: 4px 8px;
     border-radius: 6px;
-    font-size: 11px;
-    font-weight: 600;
     border: 1px solid var(--border-color);
-    cursor: pointer;
-    transition: all 0.15s;
+    font-size: 10px;
+    font-weight: 600;
     background: var(--item-hover);
     color: var(--text-secondary);
-  }
-  .log-action-btn:hover { color: var(--text-primary); border-color: var(--text-secondary); }
-  .log-btn-start  { border-color: rgba(4, 211, 97, 0.4); color: #04d361; background: rgba(4, 211, 97, 0.06); }
-  .log-btn-start:hover { background: rgba(4, 211, 97, 0.12); }
-  .log-btn-stop   { border-color: rgba(247, 64, 64, 0.4); color: #f74040; background: rgba(247, 64, 64, 0.06); }
-  .log-btn-stop:hover  { background: rgba(247, 64, 64, 0.12); }
-  .log-btn-download { border-color: rgba(75, 163, 255, 0.4); color: #4ba3ff; background: rgba(75, 163, 255, 0.06); }
-  .log-btn-download:hover { background: rgba(75, 163, 255, 0.12); }
-  .log-btn-clear { }
-
-  .log-checkbox {
-    accent-color: #f97316;
-    width: 12px;
-    height: 12px;
+    transition: all 0.15s;
     cursor: pointer;
   }
+  :global(.log-action-btn:hover) {
+    color: var(--text-primary);
+    background: var(--border-color);
+  }
+  :global(.log-btn-start) {
+    border-color: rgba(4, 211, 97, 0.4);
+    color: #04d361;
+    background: rgba(4, 211, 97, 0.06);
+  }
+  :global(.log-btn-start:hover) {
+    background: rgba(4, 211, 97, 0.12);
+  }
+  :global(.log-btn-stop) {
+    border-color: rgba(247, 64, 64, 0.4);
+    color: #f74040;
+    background: rgba(247, 64, 64, 0.06);
+  }
+  :global(.log-btn-stop:hover) {
+    background: rgba(247, 64, 64, 0.12);
+  }
 
-  /* Log key prompt (shown when admin key is missing) */
-  .logs-key-prompt {
+  :global(.log-checkbox) {
+    accent-color: #f97316;
+  }
+
+  /* Log Terminal layout */
+  :global(.log-terminal-wrap) {
     flex: 1;
     display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 2rem;
+    flex-direction: column;
+    background: #09090b;
+    border-top: 1px solid var(--border-color);
+    overflow: hidden;
   }
-  .logs-key-card {
+  :global(.log-stats-bar) {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 6px 16px;
+    background: #18181b;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    font-family: monospace;
+    font-size: 9px;
+    color: #a1a1aa;
+  }
+  :global(.log-terminal) {
+    flex: 1;
+    padding: 16px;
+    overflow-y: auto;
+    font-family: 'Fira Code', 'Courier New', Courier, monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    color: #e4e4e7;
+    background: #09090b;
+  }
+
+  :global(.log-empty) {
     display: flex;
     flex-direction: column;
     align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: #71717a;
     text-align: center;
-    padding: 2.5rem;
-    border: 1px solid var(--border-color);
-    border-radius: 16px;
-    background: var(--card-bg);
-    max-width: 420px;
-    width: 100%;
-    box-shadow: 0 8px 32px var(--shadow-color);
   }
 
-  /* Terminal layout */
-  .log-terminal-wrap {
+  /* Log rows by severity level */
+  :global(.log-row) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.02);
+  }
+  :global(.log-time) {
+    color: #71717a;
+    font-size: 10px;
+    width: 95px;
+    flex-shrink: 0;
+  }
+  :global(.log-lvl) {
+    font-weight: 700;
+    font-size: 9px;
+    padding: 1px 4px;
+    border-radius: 4px;
+    width: 40px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+  :global(.lvl-debug .log-lvl) { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
+  :global(.lvl-info .log-lvl)  { background: rgba(255, 255, 255, 0.08); color: #e4e4e7; }
+  :global(.lvl-warn .log-lvl)  { background: rgba(234, 179, 8, 0.15); color: #facc15; }
+  :global(.lvl-error .log-lvl) { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+  :global(.lvl-fatal .log-lvl) { background: rgba(236, 72, 153, 0.2); color: #f472b6; border: 1px solid rgba(236, 72, 153, 0.4); }
+
+  :global(.log-msg) {
+    color: #e4e4e7;
+    word-break: break-all;
+    flex: 1;
+    min-width: 200px;
+  }
+  :global(.log-caller) {
+    color: #52525b;
+    font-size: 9px;
+    margin-left: auto;
+    font-style: italic;
+  }
+
+  /* Meta fields (model, provider) */
+  :global(.log-meta) {
+    color: #404050;
+    font-size: 10px;
+  }
+
+  /* Error detail */
+  :global(.log-err-detail) {
+    color: #f74040;
+    font-size: 11px;
+    width: 100%;
+    padding-left: calc(95px + 40px + 16px);
+    margin-top: 1px;
+  }
+
+  /* ── Providers Management Page ─────────────────────────────────────────── */
+
+  :global(.providers-grid-wrap) {
     flex: 1;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     padding: 0;
   }
-  .log-stats-bar {
-    display: flex;
-    align-items: center;
-    gap: 1.5rem;
-    padding: 6px 20px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 10px;
-    color: var(--text-secondary);
-    border-bottom: 1px solid var(--border-color);
-    background: var(--sidebar-bg);
-    flex-shrink: 0;
-  }
-  .log-terminal {
-    flex: 1;
-    overflow-y: auto;
-    background: #09090b;
-    padding: 12px 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  :global(.dark) .log-terminal { background: #05050a; }
 
-  .log-empty {
+  :global(.providers-loading) {
     flex: 1;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    color: #a8a8b3;
-    margin-top: 6rem;
+    padding: 4rem 2rem;
+    color: var(--text-secondary);
   }
 
-  /* Log row base */
-  .log-row {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 12px;
-    line-height: 1.6;
-    padding: 1px 0;
-    border-radius: 3px;
-    word-break: break-all;
-    flex-wrap: wrap;
-  }
-  .log-row:hover { background: rgba(255,255,255,0.03); }
-
-  /* Timestamp */
-  .log-time {
-    color: #4a4a55;
-    font-size: 11px;
-    flex-shrink: 0;
-    min-width: 95px;
-  }
-
-  /* Level badge */
-  .log-lvl {
-    font-size: 10px;
-    font-weight: 800;
-    letter-spacing: 0.04em;
-    flex-shrink: 0;
-    width: 40px;
-    text-align: center;
-    border-radius: 3px;
-    padding: 0 3px;
-  }
-  .lvl-info  .log-lvl { color: #4ba3ff; background: rgba(75, 163, 255, 0.1); }
-  .lvl-debug .log-lvl { color: #8257e5; background: rgba(130, 87, 229, 0.1); }
-  .lvl-warn  .log-lvl { color: #ffb84d; background: rgba(255, 184, 77, 0.1); }
-  .lvl-error .log-lvl { color: #f74040; background: rgba(247, 64, 64, 0.12); }
-  .lvl-fatal .log-lvl { color: #ff0000; background: rgba(255, 0, 0, 0.15); font-weight: 900; }
-
-  /* Main message */
-  .log-msg {
-    color: #c8c8d4;
+  :global(.providers-table-container) {
     flex: 1;
-    min-width: 120px;
-  }
-  .lvl-error .log-msg,
-  .lvl-fatal .log-msg { color: #ff9090; }
-  .lvl-warn  .log-msg { color: #ffd080; }
-
-  /* Caller (source file:line) */
-  .log-caller {
-    color: #3a3a48;
-    font-size: 10px;
-    flex-shrink: 0;
+    overflow: auto;
+    padding: 0;
   }
 
-  /* Meta fields (model, provider) */
-  .log-meta {
-    color: #404050;
-    font-size: 10px;
-  }
-
-  /* Error detail */
-  .log-err-detail {
-    color: #f74040;
-    font-size: 11px;
+  :global(.providers-table) {
     width: 100%;
-    padding-left: calc(95px + 40px + 16px); /* align under msg */
-    margin-top: 1px;
+    border-collapse: collapse;
+    font-size: 12px;
   }
 
+  :global(.providers-table thead) {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background-color: var(--sidebar-bg);
+  }
+
+  :global(.providers-table th) {
+    padding: 10px 14px;
+    text-align: left;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border-color);
+    white-space: nowrap;
+  }
+
+  :global(.providers-table td) {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-primary);
+    vertical-align: middle;
+  }
+
+  :global(.provider-row) {
+    transition: background-color 0.15s;
+  }
+  :global(.provider-row:hover) {
+    background-color: var(--item-hover);
+  }
+
+  /* Provider Badges */
+  :global(.provider-badge) {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  :global(.badge-openai) {
+    background: rgba(16, 163, 127, 0.1);
+    color: #10a37f;
+    border: 1px solid rgba(16, 163, 127, 0.25);
+  }
+  :global(.badge-nvidia) {
+    background: rgba(118, 185, 0, 0.1);
+    color: #76b900;
+    border: 1px solid rgba(118, 185, 0, 0.25);
+  }
+  :global(.badge-ollama) {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+  }
+  :global(.badge-anthropic) {
+    background: rgba(204, 143, 82, 0.1);
+    color: #cc8f52;
+    border: 1px solid rgba(204, 143, 82, 0.25);
+  }
+  :global(.badge-default) {
+    background: rgba(107, 114, 128, 0.1);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+  }
+
+  /* Health Indicator Dot */
+  :global(.health-dot) {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    cursor: help;
+  }
+  :global(.health-dot.healthy) {
+    background: #04d361;
+    box-shadow: 0 0 6px rgba(4, 211, 97, 0.4);
+  }
+  :global(.health-dot.unhealthy) {
+    background: #f74040;
+    box-shadow: 0 0 6px rgba(247, 64, 64, 0.4);
+  }
+
+  /* Toggle Switch */
+  :global(.toggle-switch) {
+    position: relative;
+    display: inline-block;
+    width: 36px;
+    height: 20px;
+  }
+  :global(.toggle-switch input) {
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+  :global(.toggle-slider) {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(107, 114, 128, 0.3);
+    transition: 0.2s;
+    border-radius: 20px;
+  }
+  :global(.toggle-slider:before) {
+    position: absolute;
+    content: "";
+    height: 14px;
+    width: 14px;
+    left: 3px;
+    bottom: 3px;
+    background-color: white;
+    transition: 0.2s;
+    border-radius: 50%;
+  }
+  :global(.toggle-switch input:checked + .toggle-slider) {
+    background-color: #04d361;
+  }
+  :global(.toggle-switch input:checked + .toggle-slider:before) {
+    transform: translateX(16px);
+  }
+
+  /* Select styling */
+  :global(select.input-box) {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+    background-position: right 8px center;
+    background-repeat: no-repeat;
+    background-size: 16px 16px;
+    padding-right: 28px;
+  }
+
+  /* ── Toast Notifications ───────────────────────────────────────────────── */
+
+  :global(.toast-container) {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: 380px;
+  }
+
+  :global(.toast) {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 1px solid transparent;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+    animation: toast-slide-in 0.3s ease-out;
+    backdrop-filter: blur(12px);
+  }
+
+  :global(.toast-success) {
+    background: rgba(4, 211, 97, 0.12);
+    border-color: rgba(4, 211, 97, 0.3);
+    color: #04d361;
+  }
+  :global(.toast-error) {
+    background: rgba(247, 64, 64, 0.12);
+    border-color: rgba(247, 64, 64, 0.3);
+    color: #f74040;
+  }
+  :global(.toast-info) {
+    background: rgba(75, 163, 255, 0.12);
+    border-color: rgba(75, 163, 255, 0.3);
+    color: #4ba3ff;
+  }
+
+  :global(.toast-close) {
+    opacity: 0.6;
+    padding: 2px;
+    border-radius: 4px;
+    transition: opacity 0.15s;
+    cursor: pointer;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: inherit;
+  }
+  :global(.toast-close:hover) {
+    opacity: 1;
+  }
+
+  @keyframes toast-slide-in {
+    from {
+      opacity: 0;
+      transform: translateX(40px) scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0) scale(1);
+    }
+  }
 </style>

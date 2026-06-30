@@ -54,7 +54,7 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 	// --- Swagger UI (no auth) ---
 	engine.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
-	// --- Developer Playground (no auth) ---
+	// --- Developer Playground (protected by HTTP Basic Auth) ---
 	subFS, err := fs.Sub(playground.DistFS, "dist")
 	if err != nil {
 		panic("failed to read embedded playground dist: " + err.Error())
@@ -71,18 +71,23 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		panic("failed to read embedded playground index.html: " + err.Error())
 	}
 
-	// Serve Svelte client compiled CSS/JS from /assets/*
-	engine.StaticFS("/assets", http.FS(assetsFS))
+	// All playground routes are protected by HTTP Basic Auth.
+	// This secures both the SPA HTML and the compiled JS/CSS bundles.
+	playgroundGroup := engine.Group("", middleware.PlaygroundBasicAuth(deps.Config.PlaygroundUser, deps.Config.PlaygroundPass))
+	{
+		// Serve Svelte client compiled CSS/JS from /assets/*
+		playgroundGroup.StaticFS("/assets", http.FS(assetsFS))
 
-	// Serve Svelte index.html for requests to /playground and /playground/*any
-	// This explicitly serves the client on both paths to avoid Gin's automatic trailing slash
-	// HTTP redirects which fail behind Clever Cloud's reverse proxy, while also resolving SPA 404s.
-	engine.GET("/playground", func(c *gin.Context) {
-		c.Data(200, "text/html; charset=utf-8", indexContent)
-	})
-	engine.GET("/playground/*any", func(c *gin.Context) {
-		c.Data(200, "text/html; charset=utf-8", indexContent)
-	})
+		// Serve Svelte index.html for requests to /playground and /playground/*any
+		// This explicitly serves the client on both paths to avoid Gin's automatic trailing slash
+		// HTTP redirects which fail behind Clever Cloud's reverse proxy, while also resolving SPA 404s.
+		playgroundGroup.GET("/playground", func(c *gin.Context) {
+			c.Data(200, "text/html; charset=utf-8", indexContent)
+		})
+		playgroundGroup.GET("/playground/*any", func(c *gin.Context) {
+			c.Data(200, "text/html; charset=utf-8", indexContent)
+		})
+	}
 
 	// --- Proxy routes (minimal middleware for maximum throughput) ---
 	proxyGroup := engine.Group("")
@@ -135,6 +140,7 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 
 		// Credential management
 		credHandler := admin.NewCredentialHandler(deps.DB, deps.Vault)
+		adminGroup.GET("/credentials", credHandler.List)
 		adminGroup.POST("/credentials", credHandler.Create)
 		adminGroup.GET("/credentials/:id", credHandler.Get)
 		adminGroup.PUT("/credentials/:id", credHandler.Update)

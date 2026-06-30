@@ -28,15 +28,16 @@ type PoolResponse struct {
 // CredentialResponse represents a provider credential in API responses.
 // The API key is always masked for security.
 type CredentialResponse struct {
-	ID        int     `json:"id" example:"1"`
-	PoolID    int     `json:"pool_id" example:"1"`
-	Provider  string  `json:"provider" example:"openai"`
-	BaseURL   string  `json:"base_url" example:"https://api.openai.com"`
-	Weight    int     `json:"weight" example:"1"`
-	IsHealthy bool    `json:"is_healthy" example:"true"`
-	LastError *string `json:"last_error,omitempty"`
-	KeyMask   string  `json:"key_mask" example:"sk-...xxxx"`
-	CreatedAt string  `json:"created_at" example:"2024-01-15T10:30:00Z"`
+	ID           int     `json:"id" example:"1"`
+	PoolID       int     `json:"pool_id" example:"1"`
+	Provider     string  `json:"provider" example:"openai"`
+	BaseURL      string  `json:"base_url" example:"https://api.openai.com"`
+	Weight       int     `json:"weight" example:"1"`
+	IsHealthy    bool    `json:"is_healthy" example:"true"`
+	LastError    *string `json:"last_error,omitempty"`
+	KeyMask      string  `json:"key_mask" example:"sk-...xxxx"`
+	ModelPattern string  `json:"model_pattern,omitempty" example:"gpt-4o"`
+	CreatedAt    string  `json:"created_at" example:"2024-01-15T10:30:00Z"`
 }
 
 // TenantInfoResponse represents detailed info about the tenant, returned on /playground/tenant.
