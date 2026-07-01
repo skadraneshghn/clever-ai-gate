@@ -95,6 +95,13 @@ func DiscoverAndRegisterCloudflareModels(
 	accountID, apiToken string,
 	weight int,
 ) (int, []string, error) {
+	accountID = strings.TrimSpace(accountID)
+	apiToken = strings.TrimSpace(apiToken)
+	if strings.HasPrefix(apiToken, "Bearer ") {
+		apiToken = strings.TrimPrefix(apiToken, "Bearer ")
+		apiToken = strings.TrimSpace(apiToken)
+	}
+
 	if accountID == "" {
 		return 0, nil, fmt.Errorf("cloudflare account_id is required")
 	}
