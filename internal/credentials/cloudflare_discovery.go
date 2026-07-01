@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
 
-	"github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v7"
+	"github.com/cloudflare/cloudflare-go/v7/ai"
+	"github.com/cloudflare/cloudflare-go/v7/option"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 )
@@ -222,41 +223,16 @@ func DiscoverAndRegisterCloudflareModels(
 // If Cloudflare returns 401/403, an explicit auth error is returned so
 // the admin panel can surface a clear rejection message.
 func fetchCloudflareModels(ctx context.Context, accountID, apiToken string) ([]cloudflareModel, error) {
-	// 1. Initialize client using the official cloudflare-go SDK
-	api, err := cloudflare.NewWithAPIToken(apiToken)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize cloudflare SDK: %w", err)
+	// 1. Initialize client using the official cloudflare-go v7 SDK
+	client := cloudflare.NewClient(option.WithAPIToken(apiToken))
+
+	// 2. Configure List Params with Account ID using cloudflare.F
+	params := ai.ModelListParams{
+		AccountID: cloudflare.F(accountID),
 	}
 
-	// 2. Perform an implicit token validation check using VerifyAPIToken
-	_, err = api.VerifyAPIToken(ctx)
-	if err != nil {
-		tokenSnippet := ""
-		if len(apiToken) >= 6 {
-			tokenSnippet = apiToken[:6]
-		} else {
-			tokenSnippet = apiToken
-		}
-		if prodLogger, logErr := zap.NewProduction(); logErr == nil {
-			prodLogger.Error("Cloudflare API token verification failed",
-				zap.String("token_prefix", tokenSnippet),
-				zap.Error(err),
-			)
-			_ = prodLogger.Sync()
-		}
-		return nil, fmt.Errorf(
-			"cloudflare rejected the api token (401 unauthorized) — " +
-				"verify your token has Workers AI read permissions at dash.cloudflare.com: %w",
-			err,
-		)
-	}
-
-	// 3. Leverage the SDK's resource container abstraction
-	_ = cloudflare.AccountIdentifier(accountID)
-
-	// 4. Invoke API.Raw to fetch the catalog
-	url := fmt.Sprintf("/accounts/%s/ai/models/search?per_page=1000", accountID)
-	rawResp, err := api.Raw(ctx, http.MethodGet, url, nil, nil)
+	// 3. Invoke List using the SDK client (which wraps validation and endpoint path)
+	res, err := client.AI.Models.List(ctx, params)
 	if err != nil {
 		tokenSnippet := ""
 		if len(apiToken) >= 6 {
@@ -265,36 +241,32 @@ func fetchCloudflareModels(ctx context.Context, accountID, apiToken string) ([]c
 			tokenSnippet = apiToken
 		}
 		if prodLogger, logErr := zap.NewProduction(); logErr == nil {
-			prodLogger.Error("Cloudflare models request failed",
+			prodLogger.Error("Cloudflare auto-discovery request failed via Go SDK v7",
 				zap.String("token_prefix", tokenSnippet),
 				zap.Error(err),
 			)
 			_ = prodLogger.Sync()
 		}
-		return nil, fmt.Errorf("cloudflare models endpoint request failed: %w", err)
+		return nil, fmt.Errorf("cloudflare Workers AI auto-discovery failed: %w", err)
 	}
 
-	if !rawResp.Success {
-		msgs := make([]string, 0, len(rawResp.Errors))
-		for _, e := range rawResp.Errors {
-			msgs = append(msgs, e.Message)
-		}
-		return nil, fmt.Errorf("cloudflare api returned errors: %s", strings.Join(msgs, "; "))
-	}
-
-	var catalog struct {
-		Result []cloudflareModel `json:"result"`
-	}
-	if err := json.Unmarshal(rawResp.Result, &catalog); err != nil {
-		return nil, fmt.Errorf("failed to parse cloudflare model catalog: %w", err)
-	}
-
-	if len(catalog.Result) == 0 {
+	if res == nil || len(res.Result) == 0 {
 		return nil, fmt.Errorf(
 			"cloudflare returned an empty model catalog — " +
 				"verify your account has Workers AI access enabled",
 		)
 	}
 
-	return catalog.Result, nil
+	// 4. Serialize list elements to JSON and unmarshal into cloudflareModel structs
+	jsonBytes, err := json.Marshal(res.Result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize SDK result: %w", err)
+	}
+
+	var models []cloudflareModel
+	if err := json.Unmarshal(jsonBytes, &models); err != nil {
+		return nil, fmt.Errorf("failed to parse cloudflare model catalog: %w", err)
+	}
+
+	return models, nil
 }
