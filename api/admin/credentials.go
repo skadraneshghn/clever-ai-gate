@@ -730,3 +730,32 @@ func (h *CredentialHandler) RefreshAllProviders(c *gin.Context) {
 		DiscoveredIDs: allDiscovered,
 	})
 }
+
+// BulkDelete deletes multiple credentials at once.
+// @Summary      Bulk delete credentials
+// @Description  Permanently removes multiple provider credentials by their IDs
+// @Tags         Credentials
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        request   body      dto.BulkDeleteRequest  true  "IDs of credentials to delete"
+// @Success      200       {object}  dto.SuccessResponse
+// @Failure      400       {object}  dto.ErrorResponse
+// @Failure      500       {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/credentials/bulk-delete [post]
+func (h *CredentialHandler) BulkDelete(c *gin.Context) {
+	var req dto.BulkDeleteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
+		return
+	}
+
+	err := database.DeleteCredentialsBulk(c.Request.Context(), h.db, req.IDs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to delete credentials in bulk", Details: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.SuccessResponse{Message: fmt.Sprintf("%d credentials deleted successfully", len(req.IDs))})
+}
+

@@ -61,6 +61,11 @@
   let deleteTargetId = $state(null);
   let deleteLoading = $state(false);
 
+  // Bulk selection and deletion state
+  let selectedPoolIds = $state([]);
+  let showBulkDeletePoolsConfirm = $state(false);
+  let bulkDeletePoolsLoading = $state(false);
+
   // Auto-fetch when adminKey changes
   $effect(() => {
     if (appState.adminKey.trim() && !selectedPool) {
@@ -84,6 +89,7 @@
       const res = await fetch('/api/v1/admin/pools', { headers: adminHeaders() });
       if (res.ok) {
         pools = await res.json();
+        selectedPoolIds = selectedPoolIds.filter(id => pools.some(p => p.id === id));
       } else {
         const err = await res.json();
         error = err.error || `Error ${res.status}`;
@@ -334,10 +340,10 @@
       if (res.ok) {
         appState.addToast('success', 'Model pool deleted successfully');
         showDeleteConfirm = false;
-        deleteTargetId = null;
         if (selectedPool && selectedPool.id === deleteTargetId) {
           selectedPool = null;
         }
+        deleteTargetId = null;
         loadPools();
       } else {
         const err = await res.json();
@@ -347,6 +353,42 @@
       appState.addToast('error', `Network error: ${e.message}`);
     } finally {
       deleteLoading = false;
+      appState.apiLoading = false;
+    }
+  }
+
+  function confirmBulkDeletePools() {
+    showBulkDeletePoolsConfirm = true;
+  }
+
+  async function deletePoolsBulk() {
+    bulkDeletePoolsLoading = true;
+    appState.apiLoading = true;
+    try {
+      const res = await fetch('/api/v1/admin/pools/bulk-delete', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...adminHeaders()
+        },
+        body: JSON.stringify({ ids: selectedPoolIds })
+      });
+      if (res.ok) {
+        appState.addToast('success', `${selectedPoolIds.length} model pools deleted successfully`);
+        showBulkDeletePoolsConfirm = false;
+        if (selectedPool && selectedPoolIds.includes(selectedPool.id)) {
+          selectedPool = null;
+        }
+        selectedPoolIds = [];
+        loadPools();
+      } else {
+        const err = await res.json();
+        appState.addToast('error', err.details || err.error || 'Failed to delete pools');
+      }
+    } catch (e) {
+      appState.addToast('error', `Network error: ${e.message}`);
+    } finally {
+      bulkDeletePoolsLoading = false;
       appState.apiLoading = false;
     }
   }
@@ -389,6 +431,12 @@
           Refresh Details
         </Button>
       {:else}
+        {#if selectedPoolIds.length > 0}
+          <Button variant="danger" size="sm" onclick={confirmBulkDeletePools} title="Delete selected pools">
+            <Trash2 size={14} />
+            Delete Selected ({selectedPoolIds.length})
+          </Button>
+        {/if}
         <Button variant="secondary" size="sm" onclick={() => { loadPools(); appState.addToast('info', 'Refreshing capabilities...'); }} title="Re-classify all model capabilities">
           <Sparkles size={14} />
           Refresh Capabilities
@@ -763,6 +811,20 @@
         <table class="providers-table">
           <thead>
             <tr>
+              <th style="width: 40px; text-align: center;">
+                <input
+                  type="checkbox"
+                  class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
+                  checked={selectedPoolIds.length === pools.length && pools.length > 0}
+                  onchange={(e) => {
+                    if (e.target.checked) {
+                      selectedPoolIds = pools.map(p => p.id);
+                    } else {
+                      selectedPoolIds = [];
+                    }
+                  }}
+                />
+              </th>
               <th style="font-size: 11px;">ID</th>
               <th style="font-size: 11px;">Model Pattern</th>
               <th style="font-size: 11px;">Capabilities</th>
@@ -777,6 +839,15 @@
               <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
               <!-- svelte-ignore a11y_click_events_have_key_events -->
               <tr class="provider-row cursor-pointer" onclick={() => openPoolDetails(pool)}>
+                <td style="text-align: center; width: 40px;" onclick={(e) => e.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
+                    value={pool.id}
+                    bind:group={selectedPoolIds}
+                    onclick={(e) => e.stopPropagation()}
+                  />
+                </td>
                 <td class="font-mono text-xs opacity-60">#{pool.id}</td>
                 <td class="font-bold text-sm text-[#f97316]">{pool.model_pattern}</td>
                 <td>
@@ -911,6 +982,31 @@
           <span class="animate-spin">⟳</span>
         {:else}
           Delete Pool
+        {/if}
+      </Button>
+    </div>
+  {/snippet}
+</Modal>
+
+<!-- ─── BULK DELETE POOLS CONFIRMATION DIALOG ─────────────────────────────────────────── -->
+<Modal bind:show={showBulkDeletePoolsConfirm} title="Delete Model Pools?">
+  <div class="flex flex-col items-center gap-4 text-center">
+    <AlertTriangle size={48} class="text-red-500 mb-2" />
+    <p class="text-sm text-secondary">
+      Are you sure you want to permanently delete the {selectedPoolIds.length} selected model pools?
+      All routing configurations and associated provider keys assigned to these pools will be deleted.
+    </p>
+    <p class="text-xs text-red-500 font-bold">This action is permanent and cannot be undone.</p>
+  </div>
+
+  {#snippet footer()}
+    <div class="flex justify-center gap-3 w-full">
+      <Button variant="outline" onclick={() => { showBulkDeletePoolsConfirm = false; }}>Cancel</Button>
+      <Button variant="danger" onclick={deletePoolsBulk} disabled={bulkDeletePoolsLoading}>
+        {#if bulkDeletePoolsLoading}
+          <span class="animate-spin">⟳</span>
+        {:else}
+          Delete ({selectedPoolIds.length})
         {/if}
       </Button>
     </div>

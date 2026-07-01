@@ -189,6 +189,18 @@ func DeleteModelPool(ctx context.Context, pool *pgxpool.Pool, id int) error {
 	return nil
 }
 
+// DeleteModelPoolsBulk removes multiple model pools by their IDs (CASCADE).
+func DeleteModelPoolsBulk(ctx context.Context, pool *pgxpool.Pool, ids []int) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := pool.Exec(ctx, `DELETE FROM model_pools WHERE id = ANY($1)`, ids)
+	if err != nil {
+		return fmt.Errorf("failed to delete pools in bulk: %w", err)
+	}
+	return nil
+}
+
 // --- Credential Queries ---
 
 // CredentialRow represents a provider credential record.
@@ -316,6 +328,18 @@ func DeleteCredential(ctx context.Context, pool *pgxpool.Pool, id int) error {
 	_, err := pool.Exec(ctx, `DELETE FROM credentials WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete credential: %w", err)
+	}
+	return nil
+}
+
+// DeleteCredentialsBulk removes multiple credentials by their IDs.
+func DeleteCredentialsBulk(ctx context.Context, pool *pgxpool.Pool, ids []int) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := pool.Exec(ctx, `DELETE FROM credentials WHERE id = ANY($1)`, ids)
+	if err != nil {
+		return fmt.Errorf("failed to delete credentials in bulk: %w", err)
 	}
 	return nil
 }

@@ -446,3 +446,32 @@ func (h *PoolHandler) GetLogs(c *gin.Context) {
 	c.JSON(http.StatusOK, logs)
 }
 
+// BulkDelete deletes multiple model pools at once.
+// @Summary      Bulk delete model pools
+// @Description  Permanently removes multiple model pools by their IDs and cascades to their credentials
+// @Tags         Pools
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        request   body      dto.BulkDeleteRequest  true  "IDs of model pools to delete"
+// @Success      200       {object}  dto.SuccessResponse
+// @Failure      400       {object}  dto.ErrorResponse
+// @Failure      500       {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/pools/bulk-delete [post]
+func (h *PoolHandler) BulkDelete(c *gin.Context) {
+	var req dto.BulkDeleteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
+		return
+	}
+
+	err := database.DeleteModelPoolsBulk(c.Request.Context(), h.db, req.IDs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to delete pools in bulk", Details: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.SuccessResponse{Message: fmt.Sprintf("%d model pools deleted successfully", len(req.IDs))})
+}
+
+

@@ -33,6 +33,11 @@
   let deleteTargetId = $state(null);
   let deleteLoading = $state(false);
 
+  // Bulk selection and deletion
+  let selectedIds = $state([]);
+  let showBulkDeleteConfirm = $state(false);
+  let bulkDeleteLoading = $state(false);
+
   // Refresh all providers
   let refreshLoading = $state(false);
 
@@ -60,6 +65,7 @@
       const res = await fetch('/api/v1/admin/credentials', { headers: adminHeaders() });
       if (res.ok) {
         providerCredentials = await res.json();
+        selectedIds = selectedIds.filter(id => providerCredentials.some(c => c.id === id));
       } else {
         const err = await res.json();
         providerError = err.error || `Error ${res.status}`;
@@ -263,6 +269,41 @@
     }
   }
 
+  function confirmBulkDelete() {
+    showBulkDeleteConfirm = true;
+  }
+
+  async function deleteCredentialsBulk() {
+    bulkDeleteLoading = true;
+    appState.apiLoading = true;
+    try {
+      const res = await fetch('/api/v1/admin/credentials/bulk-delete', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...adminHeaders()
+        },
+        body: JSON.stringify({ ids: selectedIds })
+      });
+      if (res.ok) {
+        appState.addToast('success', `${selectedIds.length} credentials deleted successfully`);
+        showBulkDeleteConfirm = false;
+        selectedIds = [];
+        loadCredentials();
+        loadPools();
+        if (appState.apiKey) appState.loadModels();
+      } else {
+        const err = await res.json();
+        appState.addToast('error', err.details || err.error || 'Failed to delete credentials');
+      }
+    } catch (e) {
+      appState.addToast('error', `Network error: ${e.message}`);
+    } finally {
+      bulkDeleteLoading = false;
+      appState.apiLoading = false;
+    }
+  }
+
   function providerBadgeClass(provider) {
     switch ((provider || '').toLowerCase()) {
       case 'openai': return 'badge-openai';
@@ -329,6 +370,12 @@
   
   {#if appState.adminKey.trim()}
     <div class="flex items-center gap-2 animate-fade-in">
+      {#if selectedIds.length > 0}
+        <Button variant="danger" size="sm" onclick={confirmBulkDelete} title="Delete selected credentials">
+          <Trash2 size={14} />
+          Delete Selected ({selectedIds.length})
+        </Button>
+      {/if}
       <Button variant="secondary" size="sm" onclick={refreshAllProviders} disabled={refreshLoading} title="Re-run discovery for all stored provider keys and provision any missing alias pools">
         <RefreshCw size={14} class={refreshLoading ? 'animate-spin' : ''} />
         {refreshLoading ? 'Refreshing...' : 'Refresh'}
@@ -393,6 +440,20 @@
         <table class="providers-table">
           <thead>
             <tr>
+              <th style="width: 40px; text-align: center;">
+                <input
+                  type="checkbox"
+                  class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
+                  checked={selectedIds.length === providerCredentials.length && providerCredentials.length > 0}
+                  onchange={(e) => {
+                    if (e.target.checked) {
+                      selectedIds = providerCredentials.map(c => c.id);
+                    } else {
+                      selectedIds = [];
+                    }
+                  }}
+                />
+              </th>
               <th style="font-size: 11px;">ID</th>
               <th style="font-size: 11px;">Provider</th>
               <th style="font-size: 11px;">Model Pattern</th>
@@ -406,6 +467,14 @@
           <tbody>
             {#each providerCredentials as cred (cred.id)}
               <tr class="provider-row">
+                <td style="text-align: center; width: 40px;">
+                  <input
+                    type="checkbox"
+                    class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
+                    value={cred.id}
+                    bind:group={selectedIds}
+                  />
+                </td>
                 <td class="font-mono text-xs opacity-60">#{cred.id}</td>
                 <td>
                   <span class="provider-badge {providerBadgeClass(cred.provider)}">{cred.provider}</span>
@@ -662,6 +731,31 @@
           <span class="animate-spin">⟳</span>
         {:else}
           Delete
+        {/if}
+      </Button>
+    </div>
+  {/snippet}
+</Modal>
+
+<!-- ─── BULK DELETE CONFIRMATION DIALOG ─────────────────────────────────────────── -->
+<Modal bind:show={showBulkDeleteConfirm} title="Delete Credentials?">
+  <div class="flex flex-col items-center gap-4 text-center">
+    <AlertTriangle size={48} class="text-red-500 mb-2" />
+    <p class="text-sm text-secondary">
+      Are you sure you want to permanently delete the {selectedIds.length} selected credentials?
+      They will be removed from gateway routing immediately.
+    </p>
+    <p class="text-xs text-red-500 font-bold">This action is permanent and cannot be undone.</p>
+  </div>
+
+  {#snippet footer()}
+    <div class="flex justify-center gap-3 w-full">
+      <Button variant="outline" onclick={() => { showBulkDeleteConfirm = false; }}>Cancel</Button>
+      <Button variant="danger" onclick={deleteCredentialsBulk} disabled={bulkDeleteLoading}>
+        {#if bulkDeleteLoading}
+          <span class="animate-spin">⟳</span>
+        {:else}
+          Delete ({selectedIds.length})
         {/if}
       </Button>
     </div>

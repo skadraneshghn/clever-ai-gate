@@ -74,3 +74,9 @@ type DiscoverCloudflareRequest struct {
 	APIToken  string `json:"api_token"  binding:"required" example:"..."`
 	Weight    int    `json:"weight,omitempty" example:"1"`
 }
+
+// BulkDeleteRequest represents a request containing multiple IDs to be deleted.
+type BulkDeleteRequest struct {
+	IDs []int `json:"ids" binding:"required,min=1" example:"[1,2,3]"`
+}
+

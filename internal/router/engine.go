@@ -194,6 +194,7 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		adminGroup.GET("/pools/:id", poolHandler.Get)
 		adminGroup.PUT("/pools/:id", poolHandler.Update)
 		adminGroup.DELETE("/pools/:id", poolHandler.Delete)
+		adminGroup.POST("/pools/bulk-delete", poolHandler.BulkDelete)
 		adminGroup.GET("/pools/:id/logs", poolHandler.GetLogs)
 		adminGroup.POST("/pools/:id/credentials/:cred_id/test", poolHandler.TestCredential)
 
@@ -204,6 +205,7 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		adminGroup.GET("/credentials/:id", credHandler.Get)
 		adminGroup.PUT("/credentials/:id", credHandler.Update)
 		adminGroup.DELETE("/credentials/:id", credHandler.Delete)
+		adminGroup.POST("/credentials/bulk-delete", credHandler.BulkDelete)
 
 		// Provider auto-discovery (registers all models for a given provider key)
 		adminGroup.POST("/providers/nvidia", credHandler.RegisterNvidiaProvider)
