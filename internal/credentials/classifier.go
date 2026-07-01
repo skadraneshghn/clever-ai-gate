@@ -13,6 +13,7 @@ type ModelCapabilities struct {
 	Vision          bool `json:"vision,omitempty"`
 	ImageGeneration bool `json:"image_generation,omitempty"`
 	Audio           bool `json:"audio,omitempty"`
+	Video           bool `json:"video,omitempty"`
 	Code            bool `json:"code,omitempty"`
 	Embedding       bool `json:"embedding,omitempty"`
 }
@@ -36,6 +37,7 @@ func ClassifyModel(modelID string) ModelCapabilities {
 		Vision:          hasVision(lower),
 		ImageGeneration: hasImageGeneration(lower),
 		Audio:           hasAudio(lower),
+		Video:           hasVideo(lower),
 		Code:            hasCode(lower),
 		Embedding:       hasEmbedding(lower),
 	}
@@ -43,13 +45,13 @@ func ClassifyModel(modelID string) ModelCapabilities {
 
 // HasAnyCapability returns true if at least one capability flag is set.
 func (c ModelCapabilities) HasAnyCapability() bool {
-	return c.Reasoning || c.Vision || c.ImageGeneration || c.Audio || c.Code || c.Embedding
+	return c.Reasoning || c.Vision || c.ImageGeneration || c.Audio || c.Video || c.Code || c.Embedding
 }
 
 // ToMap converts capabilities to a map[string]bool for JSON serialization.
 // Only true flags are included to keep the JSONB payload compact.
 func (c ModelCapabilities) ToMap() map[string]bool {
-	m := make(map[string]bool, 6)
+	m := make(map[string]bool, 7)
 	if c.Reasoning {
 		m["reasoning"] = true
 	}
@@ -61,6 +63,9 @@ func (c ModelCapabilities) ToMap() map[string]bool {
 	}
 	if c.Audio {
 		m["audio"] = true
+	}
+	if c.Video {
+		m["video"] = true
 	}
 	if c.Code {
 		m["code"] = true
@@ -120,6 +125,10 @@ func hasImageGeneration(lower string) bool {
 		"playground",          // Playground AI
 		"dreamshaper",         // DreamShaper
 		"sd-",                 // SD-prefix models
+		"ideogram",            // Ideogram
+		"recraft",             // Recraft
+		"sd-3.5",              // Stable Diffusion 3.5
+		"stable-image",        // Stability AI stable-image
 	)
 }
 
@@ -133,6 +142,22 @@ func hasAudio(lower string) bool {
 		"eleven",              // ElevenLabs style
 		"bark",                // Bark TTS
 		"coqui",               // Coqui TTS
+	)
+}
+
+func hasVideo(lower string) bool {
+	return containsAny(lower,
+		"kling",               // Kling video
+		"hunyuan",             // Hunyuan video
+		"veo3",                // Google Veo3
+		"sora",                // OpenAI Sora
+		"hailuo",              // Hailuo video
+		"pika",                // Pika video
+		"luma",                // Luma video
+		"tongyi",              // Tongyi video
+		"wanx",                // Alibaba Wanx (can be image or video)
+		"animatediff",         // AnimateDiff
+		"text-to-video",       // Generic text-to-video
 	)
 }
 

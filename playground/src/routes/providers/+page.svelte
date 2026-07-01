@@ -132,6 +132,8 @@
       endpoint = '/api/v1/admin/providers/ollama';
     } else if (autoDiscoverForm.provider === 'openrouter') {
       endpoint = '/api/v1/admin/providers/openrouter';
+    } else if (autoDiscoverForm.provider === '1minai') {
+      endpoint = '/api/v1/admin/providers/1minai';
     } else {
       endpoint = '/api/v1/admin/providers/custom';
     }
@@ -154,6 +156,7 @@
         const data = await res.json();
         const displayName = autoDiscoverForm.provider === 'custom'
           ? (autoDiscoverForm.label || 'Custom')
+          : autoDiscoverForm.provider === '1minai' ? '1min.ai'
           : autoDiscoverForm.provider.toUpperCase();
         appState.addToast('success', `Successfully synchronized ${data.models_count || 0} ${displayName} models`);
         showAddProviderModal = false;
@@ -251,6 +254,7 @@
       case 'ollama': return 'badge-ollama';
       case 'anthropic': return 'badge-anthropic';
       case 'openrouter': return 'badge-openrouter';
+      case '1minai': return 'badge-1minai';
       case 'custom': return 'badge-custom';
       default: return 'badge-default';
     }
@@ -425,6 +429,7 @@
         <option value="nvidia">NVIDIA</option>
         <option value="ollama">Ollama</option>
         <option value="openrouter">OpenRouter</option>
+        <option value="1minai">1min.ai</option>
         <option value="google">Google</option>
         <option value="custom">Custom</option>
       </Input>
@@ -446,6 +451,8 @@
           autoDiscoverForm.base_url = 'https://ollama.com';
         } else if (autoDiscoverForm.provider === 'openrouter') {
           autoDiscoverForm.base_url = 'https://openrouter.ai/api/v1';
+        } else if (autoDiscoverForm.provider === '1minai') {
+          autoDiscoverForm.base_url = 'https://api.1min.ai';
         } else {
           autoDiscoverForm.base_url = '';
         }
@@ -454,12 +461,19 @@
         <option value="openrouter">OpenRouter (Free Models)</option>
         <option value="nvidia">NVIDIA NIM</option>
         <option value="ollama">Ollama Cloud</option>
+        <option value="1minai">1min.ai (Multi-Modal)</option>
         <option value="custom">OpenAI-Compatible (Custom)</option>
       </Input>
 
       {#if autoDiscoverForm.provider === 'openrouter'}
         <div class="rounded-lg border border-indigo-500/20 bg-indigo-500/5 px-4 py-3 text-xs text-indigo-400 leading-relaxed">
           🆓 Only <strong>free-tier models</strong> will be registered (those with a <code>:free</code> identifier). No paid models will be added. Get your API key at <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener noreferrer" class="underline">openrouter.ai/settings/keys</a>.
+        </div>
+      {/if}
+
+      {#if autoDiscoverForm.provider === '1minai'}
+        <div class="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-xs text-emerald-400 leading-relaxed">
+          🤖 <strong>1min.ai</strong> supports all modalities: Writing, Image, Audio, Video, and Code. All models are auto-discovered from a static manifest — just enter your API key. Get your key at <a href="https://app.1min.ai" target="_blank" rel="noopener noreferrer" class="underline">app.1min.ai</a>.
         </div>
       {/if}
 
@@ -474,12 +488,13 @@
           autoDiscoverForm.provider === 'nvidia' ? 'nvapi-...' :
           autoDiscoverForm.provider === 'ollama' ? 'Ollama Cloud API key...' :
           autoDiscoverForm.provider === 'openrouter' ? 'sk-or-v1-...' :
+          autoDiscoverForm.provider === '1minai' ? '1min.ai API key...' :
           'Bearer API key...'
         } 
         bind:value={autoDiscoverForm.api_key} 
       />
       
-      {#if autoDiscoverForm.provider !== 'openrouter'}
+      {#if autoDiscoverForm.provider !== 'openrouter' && autoDiscoverForm.provider !== '1minai'}
         <Input type="text" label="Base URL" placeholder={autoDiscoverForm.provider === 'custom' ? 'https://api.together.xyz/v1' : ''} bind:value={autoDiscoverForm.base_url} />
       {/if}
       
@@ -520,6 +535,7 @@
       <option value="nvidia">NVIDIA</option>
       <option value="ollama">Ollama</option>
       <option value="openrouter">OpenRouter</option>
+      <option value="1minai">1min.ai</option>
       <option value="google">Google</option>
       <option value="custom">Custom</option>
     </Input>
@@ -600,5 +616,12 @@
     background: rgba(99, 102, 241, 0.12);
     color: #818cf8;
     border: 1px solid rgba(99, 102, 241, 0.25);
+  }
+
+  /* 1min.ai badge — emerald tone */
+  :global(.badge-1minai) {
+    background: rgba(16, 185, 129, 0.12);
+    color: #34d399;
+    border: 1px solid rgba(16, 185, 129, 0.25);
   }
 </style>

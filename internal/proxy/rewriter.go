@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
 )
 
 // Rewriter handles URL path and header translation for different AI providers.
@@ -60,6 +62,9 @@ func NewRewriter() *Rewriter {
 
 	// Cohere
 	r.pathTransformers["cohere"] = coherePath
+
+	// 1min.ai: multi-modal Feature API (chat, code, image, audio, video)
+	r.pathTransformers["1minai"] = oneminaiPath
 
 	return r
 }
@@ -126,6 +131,10 @@ func (r *Rewriter) RewriteHeaders(req *http.Request, provider, apiKey string, so
 	case "bedrock":
 		// AWS Bedrock uses SigV4 signing — the API key here is a pre-signed token
 		req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	case "1minai":
+		// 1min.ai uses a custom API-KEY header (not Bearer)
+		req.Header.Set("API-KEY", apiKey)
 
 	default:
 		// OpenAI and OpenAI-compatible providers
@@ -208,6 +217,39 @@ func coherePath(baseURL, requestPath, _ string) string {
 // Note: NVIDIA NIM uses passthroughPath since it is OpenAI-compatible.
 // Base URL should be configured as https://integrate.api.nvidia.com/v1
 // and the path /v1/chat/completions passes through directly.
+
+// oneminaiPath transforms OpenAI-compatible paths to 1min.ai's Feature API format.
+//
+//   /v1/chat/completions  → /api/chat-with-ai  (chat models)
+//                        → /api/features       (code & video models)
+//   /v1/images/generations → /api/features      (image models)
+//   /v1/audio/speech       → /api/features      (TTS models)
+//   /v1/audio/transcriptions → /api/features    (STT models)
+//
+// The modality is determined by looking up the model in the 1min.ai manifest.
+// Code and video models are routed to /api/features even when the incoming
+// path is /v1/chat/completions, because they use the Feature API.
+func oneminaiPath(baseURL, requestPath, model string) string {
+	// Image and audio endpoints always go to the Feature API
+	if strings.Contains(requestPath, "/images/") ||
+		strings.Contains(requestPath, "/audio/") {
+		return baseURL + "/api/features"
+	}
+
+	// Chat completions: route to chat-with-ai or features depending on modality
+	if strings.Contains(requestPath, "/chat/completions") ||
+		strings.Contains(requestPath, "/completions") {
+		if entry, ok := credentials.LookupOneMinAIModel(model); ok {
+			if entry.Modality == "code" || entry.Modality == "video" {
+				return baseURL + "/api/features"
+			}
+		}
+		return baseURL + "/api/chat-with-ai"
+	}
+
+	// Default: Feature API
+	return baseURL + "/api/features"
+}
 
 // ollamaPath routes requests to the correct Ollama endpoint based on the
 // base URL. Ollama Cloud (https://ollama.com) exposes a native REST API:

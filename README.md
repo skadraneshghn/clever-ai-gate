@@ -182,6 +182,7 @@ Point your IDE extension (Cline, Continue, etc.) to `http://your-server:8080/v1`
 | Fireworks | Passthrough | Bearer | ✅ SSE |
 | Perplexity | Passthrough | Bearer | ✅ SSE |
 | OpenRouter | Passthrough | Bearer | ✅ SSE |
+| 1min.ai | Translated | API-KEY | ✅ SSE |
 
 ## 📂 Project Structure
 

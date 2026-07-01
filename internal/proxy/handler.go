@@ -70,6 +70,7 @@ type proxyContext struct {
 	model      string
 	isStream   bool
 	isNvidia   bool   // True when model uses nvidia/ prefix — triggers reasoning injection
+	isOneMinAI bool   // True when model uses 1min/ prefix — triggers body/response translation
 	body       []byte
 	credential *credentials.AcquireResult
 	pool       *credentials.BalancedChannelPool
@@ -195,6 +196,19 @@ func (h *Handler) Handle(c *gin.Context) {
 		)
 	}
 
+	// --- 1min.ai Prefix Detection ---
+	// Models prefixed with "1min/" are routed through the 1min.ai Feature API
+	// translation engine. The proxy body translator converts the OpenAI-compatible
+	// request into 1min.ai's type/model/promptObject format, and the response
+	// translator converts the aiRecord envelope back to OpenAI format.
+	isOneMinAI := false
+	if strings.HasPrefix(model, "1min/") {
+		isOneMinAI = true
+		h.logger.Debug("1min.ai model detected",
+			zap.String("model", model),
+		)
+	}
+
 	// --- Access log: first thing we know enough to emit a useful Info entry ---
 	// This fires for EVERY request and is the primary tool for diagnosing
 	// Kilo Code instability: you can see exactly what model/tenant/path was
@@ -209,6 +223,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		zap.Bool("stream", isStream),
 		zap.Bool("is_nvidia", strings.HasPrefix(model, "nvidia/")),
 		zap.Bool("is_ollama", strings.HasPrefix(model, "ollama/")),
+		zap.Bool("is_1minai", isOneMinAI),
 		zap.Int("body_bytes", len(body)),
 		zap.String("client_ip", c.ClientIP()),
 	)
@@ -272,11 +287,12 @@ func (h *Handler) Handle(c *gin.Context) {
 	// Note: The FULL body (not scanSlice) is forwarded to the upstream provider.
 	// Only the metadata extraction was bounded — the binary payload is piped as-is.
 	pctx := &proxyContext{
-		model:    model,
-		isStream: isStream,
-		isNvidia: isNvidia,
-		body:     body,
-		pool:     pool,
+		model:      model,
+		isStream:   isStream,
+		isNvidia:   isNvidia,
+		isOneMinAI: isOneMinAI,
+		body:       body,
+		pool:       pool,
 	}
 
 	// Retrieve tenant ID from context (set by auth middleware)
@@ -617,7 +633,35 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		}
 	}
 
+	// --- 1min.ai Request Body Translation ---
+	// The 1min.ai API uses a completely different request format
+	// (type/model/promptObject). The translator converts the OpenAI-compatible
+	// body into the 1min.ai Feature API format. For multipart requests (audio
+	// transcription), the audio file is uploaded to the 1min.ai Asset API first.
+	var contentTypeOverride string
+	if cred.Provider == "1minai" {
+		translated, ctOverride, trErr := translateOneMinAIRequest(
+			pctx.model, c.Request.URL.Path, bodyBytes,
+			c.Request.Header.Get("Content-Type"), cred.APIKey, h.client,
+		)
+		if trErr != nil {
+			h.logger.Error("1min.ai request translation failed",
+				zap.String("model", pctx.model),
+				zap.Error(trErr),
+			)
+			return http.StatusInternalServerError, upstreamURL, nil, trErr
+		}
+		bodyBytes = translated
+		contentTypeOverride = ctOverride
+	}
+
 	upstreamURL = h.rewriter.RewriteURL(cred.Provider, cred.BaseURL, c.Request.URL.Path, modelName)
+
+	// --- 1min.ai Streaming ---
+	// 1min.ai enables streaming via the ?isStreaming=true query parameter
+	if cred.Provider == "1minai" && pctx.isStream {
+		upstreamURL += "?isStreaming=true"
+	}
 
 	upstreamReq, err := http.NewRequestWithContext(
 		c.Request.Context(),
@@ -630,6 +674,11 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	}
 
 	h.rewriter.RewriteHeaders(upstreamReq, cred.Provider, cred.APIKey, c.Request.Header)
+
+	// Override Content-Type for 1min.ai (e.g., multipart STT → JSON)
+	if contentTypeOverride != "" {
+		upstreamReq.Header.Set("Content-Type", contentTypeOverride)
+	}
 
 	resp, err := h.client.Do(upstreamReq)
 	if err != nil {
@@ -713,6 +762,40 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 			return resp.StatusCode, upstreamURL, respBody, nil
 		}
 		// Ollama response didn't match native format — fall through to stream as-is
+		for key, vals := range resp.Header {
+			for _, val := range vals {
+				c.Writer.Header().Add(key, val)
+			}
+		}
+		c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+		c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+		c.Writer.WriteHeader(resp.StatusCode)
+		c.Writer.Write(respBody) //nolint:errcheck
+		return resp.StatusCode, upstreamURL, respBody, nil
+	}
+
+	// --- 1min.ai Response Translation (non-streaming) ---
+	// The 1min.ai API returns responses in an aiRecord envelope that must be
+	// translated back to OpenAI-compatible format (chat completions, images, etc.)
+	if cred.Provider == "1minai" {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return http.StatusInternalServerError, upstreamURL, nil, readErr
+		}
+		translated, contentType, trErr := translateOneMinAIResponse(pctx.model, respBody)
+		if trErr == nil && translated != nil {
+			c.Writer.Header().Set("Content-Type", contentType)
+			c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+			c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+			c.Writer.WriteHeader(resp.StatusCode)
+			c.Writer.Write(translated) //nolint:errcheck
+			return resp.StatusCode, upstreamURL, translated, nil
+		}
+		// Translation failed — write original body as fallback
+		h.logger.Warn("1min.ai response translation failed, passing through original",
+			zap.String("model", pctx.model),
+			zap.Error(trErr),
+		)
 		for key, vals := range resp.Header {
 			for _, val := range vals {
 				c.Writer.Header().Add(key, val)
@@ -867,6 +950,21 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 		}
 		// Also try just the provider namespace key "ollama"
 		if val, found := h.cache.Get(cache.PoolKey("ollama")); found {
+			return val, true
+		}
+	}
+
+	// Handle 1min.ai slash-separated model names (e.g., "1min/gpt-4o", "1min/flux-schnell")
+	if strings.HasPrefix(model, "1min/") {
+		slashParts := strings.Split(model, "/")
+		for i := len(slashParts) - 1; i >= 1; i-- {
+			prefix := strings.Join(slashParts[:i], "/")
+			if val, found := h.cache.Get(cache.PoolKey(prefix)); found {
+				return val, true
+			}
+		}
+		// Also try just the provider namespace key "1min"
+		if val, found := h.cache.Get(cache.PoolKey("1min")); found {
 			return val, true
 		}
 	}

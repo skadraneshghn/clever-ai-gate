@@ -43,6 +43,9 @@ func NewTransmuxer(provider string) Transmuxer {
 		// Local Ollama in OpenAI-compat mode also benefits from this since it
 		// can emit native NDJSON when called via /api/* endpoints.
 		return NewOllamaTransmuxer()
+	case "1minai":
+		// 1min.ai uses named SSE events (content/result/done/error).
+		return NewOneMinAITransmuxer()
 	default:
 		// OpenAI-compatible providers (openai, deepseek, groq, together, etc.)
 		return NewOpenAITransmuxer()

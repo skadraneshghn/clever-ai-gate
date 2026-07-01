@@ -454,3 +454,58 @@ func (h *CredentialHandler) RegisterCustomProvider(c *gin.Context) {
 		DiscoveredIDs: models,
 	})
 }
+
+// RegisterOneMinAIProvider auto-discovers all models available on 1min.ai
+// across all five modalities (chat, code, image, audio, video), creates model
+// pools for each, and binds the credential to all of them in one transaction.
+//
+// 1min.ai does not expose a /v1/models endpoint, so the full catalog is maintained
+// as a static manifest. The API key is validated via a lightweight chat request
+// before registration begins. Adding the provider requires only the API key —
+// the base URL is hardcoded to https://api.1min.ai.
+//
+// @Summary      Auto-discover 1min.ai Models
+// @Description  Submits a 1min.ai key, validates it, and registers all models across all modalities automatically
+// @Tags         Credentials
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        body  body      dto.DiscoverProviderRequest  true  "1min.ai provider details (api_key required, base_url ignored)"
+// @Success      200   {object}  dto.DiscoverProviderResponse
+// @Failure      400   {object}  dto.ErrorResponse
+// @Failure      500   {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/providers/1minai [post]
+func (h *CredentialHandler) RegisterOneMinAIProvider(c *gin.Context) {
+	var req dto.DiscoverProviderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
+		return
+	}
+
+	if req.APIKey == "" {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "api_key is required for 1min.ai auto-discovery"})
+		return
+	}
+
+	if req.Weight <= 0 {
+		req.Weight = 1
+	}
+
+	count, models, err := credentials.DiscoverAndRegisterOneMinAIModels(
+		c.Request.Context(),
+		h.db,
+		h.vault,
+		req.APIKey,
+		req.Weight,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "1min.ai auto-discovery failed", Details: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.DiscoverProviderResponse{
+		Message:       fmt.Sprintf("Successfully synchronized %d 1min.ai models across all modalities", count),
+		ModelsCount:   count,
+		DiscoveredIDs: models,
+	})
+}

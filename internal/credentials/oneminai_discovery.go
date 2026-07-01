@@ -1,0 +1,153 @@
+package credentials
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// DiscoverAndRegisterOneMinAIModels validates the 1min.ai API key, then iterates
+// over the static model manifest to auto-provision model_pools and bind the
+// credential to every model across all five modalities (chat, code, image,
+// audio, video) in a single atomic transaction.
+//
+// Unlike OpenAI-compatible providers, 1min.ai does not expose a /v1/models
+// endpoint. Instead, the full catalog is maintained as a hardcoded manifest
+// (oneminai_manifest.go). Key validity is confirmed via a lightweight chat
+// request before registration begins.
+//
+// Returns the count of registered models, their patterns, and any error.
+func DiscoverAndRegisterOneMinAIModels(ctx context.Context, db *pgxpool.Pool, vault *Vault, apiKey string, weight int) (int, []string, error) {
+	if apiKey == "" {
+		return 0, nil, fmt.Errorf("1min.ai api key is required for model discovery")
+	}
+
+	if weight <= 0 {
+		weight = 1
+	}
+
+	// 1. Validate the API key with a minimal chat request
+	if err := validateOneMinAIKey(ctx, apiKey); err != nil {
+		return 0, nil, err
+	}
+
+	// 2. Encrypt the API key once before the database loop
+	encryptedKey, err := vault.Encrypt(apiKey)
+	if err != nil {
+		return 0, nil, fmt.Errorf("vault encryption failed: %w", err)
+	}
+
+	manifest := OneMinAIManifest()
+
+	// 3. Open a transaction to atomically write all pools and credentials
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck — intentional deferred cleanup
+
+	var discoveredModels []string
+
+	for _, entry := range manifest {
+		modelPattern := entry.Pattern
+
+		// 4. Classify capabilities from the model identifier, then apply
+		//    modality-specific overrides so the gateway knows exactly what
+		//    each model supports.
+		caps := ClassifyModel(modelPattern)
+		applyOneMinAIOverrides(&caps, entry.Modality)
+
+		capsJSON, err := json.Marshal(caps.ToMap())
+		if err != nil {
+			capsJSON = []byte("{}")
+		}
+
+		// 5. Upsert the model_pool — updates capabilities on re-discovery
+		var poolID int
+		err = tx.QueryRow(ctx,
+			`INSERT INTO model_pools (model_pattern, strategy, capabilities)
+			 VALUES ($1, 'round-robin', $2)
+			 ON CONFLICT (model_pattern) DO UPDATE
+			 SET capabilities = EXCLUDED.capabilities
+			 RETURNING id`,
+			modelPattern, capsJSON,
+		).Scan(&poolID)
+		if err != nil {
+			return 0, nil, fmt.Errorf("failed to upsert model pool for %s: %w", modelPattern, err)
+		}
+
+		// 6. Bind the 1min.ai credential to this pool (idempotent via ON CONFLICT)
+		_, err = tx.Exec(ctx,
+			`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
+			 VALUES ($1, '1minai', $2, $3, $4, true)
+			 ON CONFLICT DO NOTHING`,
+			poolID, encryptedKey, OneMinAIBaseURL, weight,
+		)
+		if err != nil {
+			return 0, nil, fmt.Errorf("failed to bind credential for pool %s: %w", modelPattern, err)
+		}
+
+		discoveredModels = append(discoveredModels, modelPattern)
+	}
+
+	// 7. Notify the SyncManager to instantly hot-reload the routing cache
+	if _, err = tx.Exec(ctx, "NOTIFY config_change, 'model_pools:reload'"); err != nil {
+		return 0, nil, fmt.Errorf("failed to broadcast config change notification: %w", err)
+	}
+
+	return len(discoveredModels), discoveredModels, tx.Commit(ctx)
+}
+
+// validateOneMinAIKey sends a minimal chat request to 1min.ai to confirm the
+// API key is valid. This consumes a tiny amount of credits but is the most
+// reliable validation method since 1min.ai has no dedicated key-check endpoint.
+func validateOneMinAIKey(ctx context.Context, apiKey string) error {
+	client := &http.Client{Timeout: 15 * time.Second}
+
+	body := `{"type":"UNIFY_CHAT_WITH_AI","model":"gpt-4o-mini","promptObject":{"prompt":"hi"}}`
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		OneMinAIBaseURL+"/api/chat-with-ai", strings.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to build validation request: %w", err)
+	}
+
+	req.Header.Set("API-KEY", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("1min.ai connection failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("1min.ai rejected the api key (%d) — verify your key at app.1min.ai", resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("1min.ai returned unexpected status during validation: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// applyOneMinAIOverrides sets capability flags based on the modality declared
+// in the manifest entry. This ensures correct capability metadata even when the
+// heuristic classifier might miss a model (e.g. "ideogram" for image generation).
+func applyOneMinAIOverrides(caps *ModelCapabilities, modality string) {
+	switch modality {
+	case "image":
+		caps.ImageGeneration = true
+	case "audio_tts", "audio_stt":
+		caps.Audio = true
+	case "video":
+		caps.Video = true
+	case "code":
+		caps.Code = true
+	}
+}
