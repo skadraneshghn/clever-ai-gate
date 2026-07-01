@@ -150,7 +150,7 @@ func DiscoverAndRegisterCloudflareModels(
 	var discoveredModels []string
 
 	for _, m := range models {
-		if m.ID == "" {
+		if m.Name == "" {
 			continue
 		}
 
@@ -162,7 +162,7 @@ func DiscoverAndRegisterCloudflareModels(
 		}
 
 		// Register under two pool patterns for maximum client compatibility.
-		patterns := []string{"cloudflare/" + m.ID, m.ID}
+		patterns := []string{"cloudflare/" + m.Name, m.Name}
 
 		for _, modelPattern := range patterns {
 			var poolID int
