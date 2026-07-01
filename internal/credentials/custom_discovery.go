@@ -100,51 +100,66 @@ func DiscoverAndRegisterCustomModels(ctx context.Context, db *pgxpool.Pool, vaul
 			continue
 		}
 
-		var poolID int
+		// Determine what pool patterns to register for this model.
+		//
+		// Without a prefix: store the model under its raw name only (no alias
+		// needed — the name is already clean and has no provider-specific tag).
+		//
+		// With a prefix: register BOTH the prefixed form (e.g. "my-pvdr/gpt-4o")
+		// AND the clean form (e.g. "gpt-4o"). Client tools that enforce strict
+		// model name whitelists will use the clean form and bypass client-side
+		// validation errors. The forwardRequest handler's cred.Prefix strip only
+		// fires when the request model starts with "prefix/"; the clean alias
+		// skips it — which is correct because the upstream model name in the JSON
+		// body is already the clean ID the provider expects.
+		trimmedPrefix := strings.TrimSpace(strings.Trim(strings.TrimSpace(prefix), "/"))
 
-		// Store models under their RAW name (or with prefix if specified).
-		modelPattern := m.ID
-		trimmedPrefix := strings.TrimSpace(prefix)
-		trimmedPrefix = strings.Trim(trimmedPrefix, "/")
+		var poolPatterns []string
 		if trimmedPrefix != "" {
-			modelPattern = trimmedPrefix + "/" + m.ID
+			pooledPattern := trimmedPrefix + "/" + m.ID
+			poolPatterns = []string{pooledPattern, m.ID}
+		} else {
+			poolPatterns = []string{m.ID}
 		}
 
-		// Classify the model capabilities from its identifier
-		caps := ClassifyModel(modelPattern)
-		capsJSON, err := json.Marshal(caps.ToMap())
-		if err != nil {
-			capsJSON = []byte("{}")
+		for _, modelPattern := range poolPatterns {
+			var poolID int
+
+			// Classify the model capabilities from its identifier
+			caps := ClassifyModel(modelPattern)
+			capsJSON, err := json.Marshal(caps.ToMap())
+			if err != nil {
+				capsJSON = []byte("{}")
+			}
+
+			// Upsert the model pool. ON CONFLICT updates capabilities so that
+			// re-running discovery refreshes detected feature flags live.
+			err = tx.QueryRow(ctx,
+				`INSERT INTO model_pools (model_pattern, strategy, capabilities)
+				 VALUES ($1, 'round-robin', $2)
+				 ON CONFLICT (model_pattern) DO UPDATE
+				 SET capabilities = EXCLUDED.capabilities
+				 RETURNING id`,
+				modelPattern, capsJSON,
+			).Scan(&poolID)
+			if err != nil {
+				return 0, nil, fmt.Errorf("failed to upsert model pool for %s: %w", modelPattern, err)
+			}
+
+			// Bind the credential to the pool.
+			// ON CONFLICT prevents duplicates if the same key is submitted twice.
+			_, err = tx.Exec(ctx,
+				`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy, prefix)
+				 VALUES ($1, $2, $3, $4, $5, true, $6)
+				 ON CONFLICT DO NOTHING`,
+				poolID, providerLabel, encryptedKey, baseURL, weight, prefix,
+			)
+			if err != nil {
+				return 0, nil, fmt.Errorf("failed to bind credential to pool %s: %w", modelPattern, err)
+			}
+
+			discoveredModels = append(discoveredModels, modelPattern)
 		}
-
-		// Upsert the model pool. ON CONFLICT updates capabilities so that
-		// re-running discovery refreshes detected feature flags live.
-		err = tx.QueryRow(ctx,
-			`INSERT INTO model_pools (model_pattern, strategy, capabilities)
-			 VALUES ($1, 'round-robin', $2)
-			 ON CONFLICT (model_pattern) DO UPDATE
-			 SET capabilities = EXCLUDED.capabilities
-			 RETURNING id`,
-			modelPattern, capsJSON,
-		).Scan(&poolID)
-
-		if err != nil {
-			return 0, nil, fmt.Errorf("failed to upsert model pool for %s: %w", modelPattern, err)
-		}
-
-		// Bind the credential to the pool.
-		// ON CONFLICT prevents duplicates if the same key is submitted twice.
-		_, err = tx.Exec(ctx,
-			`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy, prefix)
-			 VALUES ($1, $2, $3, $4, $5, true, $6)
-			 ON CONFLICT DO NOTHING`,
-			poolID, providerLabel, encryptedKey, baseURL, weight, prefix,
-		)
-		if err != nil {
-			return 0, nil, fmt.Errorf("failed to bind credential to pool %s: %w", modelPattern, err)
-		}
-
-		discoveredModels = append(discoveredModels, modelPattern)
 	}
 
 	// 3. Trigger instant cache reload across all gateway instances

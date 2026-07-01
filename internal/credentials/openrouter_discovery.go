@@ -92,41 +92,67 @@ func DiscoverAndRegisterOpenRouterModels(ctx context.Context, db *pgxpool.Pool, 
 			continue
 		}
 
-		modelPattern := m.ID // Use as-is: OpenRouter routes on the full slug
+		// For each free-tier model we register two pool patterns:
+		//
+		//   1. Full slug      e.g. "deepseek/deepseek-r1:free" — the canonical
+		//      OpenRouter routing key. Clients that select this form get exact
+		//      routing. The JSON body is forwarded as-is to OpenRouter.
+		//
+		//   2. Clean alias    e.g. "deepseek/deepseek-r1" — the ":free" tier
+		//      suffix is rejected by many client tools (Cline, LobeChat, …)
+		//      that treat it as an unknown model. The clean form passes client
+		//      validation. When forwarded to OpenRouter the ":free" suffix is
+		//      stripped from the body, but OpenRouter accepts both forms for
+		//      free-tier models and routes them identically.
+		fullSlug := m.ID
+		cleanSlug := strings.TrimSuffix(fullSlug, ":free")
 
-		// 5. Classify capabilities from the model identifier
-		caps := ClassifyModel(modelPattern)
-		capsJSON, err := json.Marshal(caps.ToMap())
-		if err != nil {
-			capsJSON = []byte("{}")
+		type patternEntry struct {
+			pattern string
+			modelInBody string // what to put in the JSON "model" field sent upstream
 		}
 
-		// 6. Upsert the model_pool — updates capabilities on re-discovery
-		var poolID int
-		err = tx.QueryRow(ctx,
-			`INSERT INTO model_pools (model_pattern, strategy, capabilities)
-			 VALUES ($1, 'round-robin', $2)
-			 ON CONFLICT (model_pattern) DO UPDATE
-			 SET capabilities = EXCLUDED.capabilities
-			 RETURNING id`,
-			modelPattern, capsJSON,
-		).Scan(&poolID)
-		if err != nil {
-			return 0, nil, fmt.Errorf("failed to upsert model pool for %s: %w", modelPattern, err)
+		var patterns []patternEntry
+		patterns = append(patterns, patternEntry{pattern: fullSlug, modelInBody: fullSlug})
+		if cleanSlug != fullSlug {
+			patterns = append(patterns, patternEntry{pattern: cleanSlug, modelInBody: cleanSlug})
 		}
 
-		// 7. Bind the OpenRouter credential to this pool (idempotent via ON CONFLICT)
-		_, err = tx.Exec(ctx,
-			`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
-			 VALUES ($1, 'openrouter', $2, $3, $4, true)
-			 ON CONFLICT DO NOTHING`,
-			poolID, encryptedKey, openRouterBaseURL, weight,
-		)
-		if err != nil {
-			return 0, nil, fmt.Errorf("failed to bind credential for pool %s: %w", modelPattern, err)
-		}
+		for _, pe := range patterns {
+			// 5. Classify capabilities from the model identifier
+			caps := ClassifyModel(pe.pattern)
+			capsJSON, err := json.Marshal(caps.ToMap())
+			if err != nil {
+				capsJSON = []byte("{}")
+			}
 
-		discoveredModels = append(discoveredModels, modelPattern)
+			// 6. Upsert the model_pool — updates capabilities on re-discovery
+			var poolID int
+			err = tx.QueryRow(ctx,
+				`INSERT INTO model_pools (model_pattern, strategy, capabilities)
+				 VALUES ($1, 'round-robin', $2)
+				 ON CONFLICT (model_pattern) DO UPDATE
+				 SET capabilities = EXCLUDED.capabilities
+				 RETURNING id`,
+				pe.pattern, capsJSON,
+			).Scan(&poolID)
+			if err != nil {
+				return 0, nil, fmt.Errorf("failed to upsert model pool for %s: %w", pe.pattern, err)
+			}
+
+			// 7. Bind the OpenRouter credential to this pool (idempotent via ON CONFLICT)
+			_, err = tx.Exec(ctx,
+				`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
+				 VALUES ($1, 'openrouter', $2, $3, $4, true)
+				 ON CONFLICT DO NOTHING`,
+				poolID, encryptedKey, openRouterBaseURL, weight,
+			)
+			if err != nil {
+				return 0, nil, fmt.Errorf("failed to bind credential for pool %s: %w", pe.pattern, err)
+			}
+
+			discoveredModels = append(discoveredModels, pe.pattern)
+		}
 	}
 
 	// 8. Notify the SyncManager to instantly hot-reload the routing cache

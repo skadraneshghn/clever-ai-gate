@@ -33,6 +33,9 @@
   let deleteTargetId = $state(null);
   let deleteLoading = $state(false);
 
+  // Refresh all providers
+  let refreshLoading = $state(false);
+
   // ─── Load state on adminKey change ─────────────────────────────────────────
   $effect(() => {
     if (appState.adminKey.trim()) {
@@ -268,6 +271,31 @@
     loadPools();
   }
 
+  async function refreshAllProviders() {
+    refreshLoading = true;
+    appState.apiLoading = true;
+    try {
+      const res = await fetch('/api/v1/admin/providers/refresh', {
+        method: 'POST',
+        headers: adminHeaders()
+      });
+      if (res.ok) {
+        const data = await res.json();
+        appState.addToast('success', data.message || `Re-synced ${data.models_count ?? 0} model pools`);
+        await loadCredentials();
+        if (appState.apiKey) appState.loadModels();
+      } else {
+        const err = await res.json();
+        appState.addToast('error', err.details || err.error || 'Refresh failed');
+      }
+    } catch (e) {
+      appState.addToast('error', `Network error: ${e.message}`);
+    } finally {
+      refreshLoading = false;
+      appState.apiLoading = false;
+    }
+  }
+
   onMount(() => {
     if (appState.adminKey.trim()) {
       loadCredentials();
@@ -287,9 +315,9 @@
   
   {#if appState.adminKey.trim()}
     <div class="flex items-center gap-2 animate-fade-in">
-      <Button variant="secondary" size="sm" onclick={() => { loadCredentials(); appState.addToast('info', 'Refreshing credentials...'); }}>
-        <RefreshCw size={14} />
-        Refresh
+      <Button variant="secondary" size="sm" onclick={refreshAllProviders} disabled={refreshLoading} title="Re-run discovery for all stored provider keys and provision any missing alias pools">
+        <RefreshCw size={14} class={refreshLoading ? 'animate-spin' : ''} />
+        {refreshLoading ? 'Refreshing...' : 'Refresh'}
       </Button>
       <Button variant="primary" size="sm" onclick={openAddProviderModal}>
         <Plus size={14} />

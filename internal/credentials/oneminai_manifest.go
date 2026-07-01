@@ -92,18 +92,32 @@ var oneminaiManifest = []OneMinAIModelEntry{
 	{Model: "pika", Pattern: "1min/pika", Feature: "TEXT_TO_VIDEO", Modality: "video"},
 }
 
-// oneminaiModelMap is built once at package init for O(1) lookups by pattern.
+// oneminaiModelMap is built once at package init for O(1) lookups.
+// Each entry is indexed by BOTH its gateway routing pattern (e.g. "1min/dall-e-3")
+// AND its clean upstream model name (e.g. "dall-e-3"). This allows the proxy
+// body/response translators to resolve feature metadata regardless of whether
+// the client sends the prefixed form ("1min/dall-e-3") or the clean standard
+// name ("dall-e-3") — which is required when clean-name alias pools are registered
+// during discovery so that client tools with hardcoded model name whitelists work.
 var oneminaiModelMap = func() map[string]OneMinAIModelEntry {
-	m := make(map[string]OneMinAIModelEntry, len(oneminaiManifest))
+	// Allocate double capacity: one slot per pattern + one slot per clean model name.
+	m := make(map[string]OneMinAIModelEntry, len(oneminaiManifest)*2)
 	for _, e := range oneminaiManifest {
+		// Primary key: full gateway routing pattern (e.g. "1min/dall-e-3")
 		m[e.Pattern] = e
+		// Alias key: clean upstream model name (e.g. "dall-e-3").
+		// Only add if it differs from the pattern to avoid a redundant write.
+		if e.Model != e.Pattern {
+			m[e.Model] = e
+		}
 	}
 	return m
 }()
 
-// LookupOneMinAIModel returns the manifest entry for a given gateway pattern
-// (e.g. "1min/gpt-4o"). The second return value is false if the pattern is not
-// a registered 1min.ai model.
+// LookupOneMinAIModel returns the manifest entry for a given key. The key may
+// be either the gateway routing pattern (e.g. "1min/gpt-4o") or the clean
+// upstream model name (e.g. "dall-e-3", "whisper-1"). The second return value
+// is false if the key does not match any registered 1min.ai model.
 //
 // Used by:
 //   - The proxy path transformer (rewriter.go) to decide /api/chat-with-ai vs /api/features

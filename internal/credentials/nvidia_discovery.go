@@ -60,45 +60,55 @@ func DiscoverAndRegisterNvidiaModels(ctx context.Context, db *pgxpool.Pool, vaul
 	defer tx.Rollback(ctx)
 
 	for _, m := range modelList.Data {
-		var poolID int
+		// Register each model under two pool patterns:
+		//
+		//   1. Prefixed form  "nvidia/X" — used by clients that select NVIDIA
+		//      explicitly. The handler.go isNvidia block detects this prefix and
+		//      strips it from the JSON body before forwarding to NVIDIA NIM.
+		//
+		//   2. Clean form     "X"        — required for client tools (Cline,
+		//      LobeChat, Open WebUI …) that hardcode model name whitelists and
+		//      reject any unknown prefix. When the clean form is used the handler
+		//      skips the isNvidia body-rewrite, but that is correct: the JSON
+		//      body already contains the clean model ID that NVIDIA NIM expects.
+		patterns := []string{"nvidia/" + m.ID, m.ID}
 
-		// Ensure model_pattern contains the required prefix for routing matching logic
-		// We prepend "nvidia/" prefix so that they automatically hit the NVIDIA proxy routes!
-		modelPattern := "nvidia/" + m.ID
+		for _, modelPattern := range patterns {
+			var poolID int
 
-		// Classify capabilities — NVIDIA models are often reasoning-capable
-		caps := ClassifyModel(modelPattern)
-		capsJSON, err := json.Marshal(caps.ToMap())
-		if err != nil {
-			capsJSON = []byte("{}")
+			// Classify capabilities — NVIDIA models are often reasoning-capable
+			caps := ClassifyModel(modelPattern)
+			capsJSON, err := json.Marshal(caps.ToMap())
+			if err != nil {
+				capsJSON = []byte("{}")
+			}
+
+			// Insert or fetch the model pool ID, updating capabilities on conflict
+			err = tx.QueryRow(ctx,
+				`INSERT INTO model_pools (model_pattern, strategy, capabilities)
+				 VALUES ($1, 'round-robin', $2)
+				 ON CONFLICT (model_pattern) DO UPDATE
+				 SET capabilities = EXCLUDED.capabilities
+				 RETURNING id`,
+				modelPattern, capsJSON,
+			).Scan(&poolID)
+			if err != nil {
+				return 0, nil, fmt.Errorf("failed to upsert model pool row for %s: %w", modelPattern, err)
+			}
+
+			// Connect the discovered model pool directly to our hardware key credential
+			_, err = tx.Exec(ctx,
+				`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
+				 VALUES ($1, 'nvidia', $2, $3, $4, true)
+				 ON CONFLICT DO NOTHING`, // prevents duplicates if the same key is submitted twice
+				poolID, encryptedKey, baseURL, weight,
+			)
+			if err != nil {
+				return 0, nil, fmt.Errorf("failed to bind credential to pool %s: %w", modelPattern, err)
+			}
+
+			discoveredModels = append(discoveredModels, modelPattern)
 		}
-
-		// Insert or fetch the model pool ID, updating capabilities on conflict
-		err = tx.QueryRow(ctx,
-			`INSERT INTO model_pools (model_pattern, strategy, capabilities)
-			 VALUES ($1, 'round-robin', $2)
-			 ON CONFLICT (model_pattern) DO UPDATE
-			 SET capabilities = EXCLUDED.capabilities
-			 RETURNING id`,
-			modelPattern, capsJSON,
-		).Scan(&poolID)
-
-		if err != nil {
-			return 0, nil, fmt.Errorf("failed to upsert model pool row for %s: %w", modelPattern, err)
-		}
-
-		// Connect the discovered model pool directly to our hardware key credential
-		_, err = tx.Exec(ctx,
-			`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
-			 VALUES ($1, 'nvidia', $2, $3, $4, true)
-			 ON CONFLICT DO NOTHING`, // prevents duplicates if the same key is submitted twice
-			poolID, encryptedKey, baseURL, weight,
-		)
-		if err != nil {
-			return 0, nil, fmt.Errorf("failed to bind credential to pool %s: %w", modelPattern, err)
-		}
-
-		discoveredModels = append(discoveredModels, modelPattern)
 	}
 
 	// 3. Emit PostgreSQL NOTIFY channel statement to instantly trigger SyncManager cache swap

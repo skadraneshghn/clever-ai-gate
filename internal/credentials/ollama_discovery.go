@@ -97,49 +97,58 @@ func DiscoverAndRegisterOllamaModels(ctx context.Context, db *pgxpool.Pool, vaul
 	defer tx.Rollback(ctx)
 
 	for _, modelID := range modelIDs {
-		var poolID int
+		// Register each model under two pool patterns:
+		//
+		//   1. Prefixed form  "ollama/X" — used by clients that select Ollama
+		//      explicitly. The handler.go isOllama block detects this prefix and
+		//      strips it from the JSON body before forwarding to the Ollama API.
+		//
+		//   2. Clean form     "X"         — required for client tools (Cline,
+		//      LobeChat, Open WebUI …) that hardcode model name whitelists and
+		//      reject unknown prefixes. When the clean form is used the handler
+		//      skips the isOllama body-rewrite, but that is correct: the JSON
+		//      body already contains the clean model ID that Ollama expects.
+		patterns := []string{"ollama/" + modelID, modelID}
 
-		// Ensure model_pattern contains the required prefix for routing matching
-		// logic. We prepend "ollama/" so models automatically hit the Ollama
-		// proxy routes in the handler.
-		modelPattern := "ollama/" + modelID
+		for _, modelPattern := range patterns {
+			var poolID int
 
-		// Classify capabilities from the model name
-		caps := ClassifyModel(modelPattern)
-		capsJSON, err := json.Marshal(caps.ToMap())
-		if err != nil {
-			capsJSON = []byte("{}")
+			// Classify capabilities from the model name
+			caps := ClassifyModel(modelPattern)
+			capsJSON, err := json.Marshal(caps.ToMap())
+			if err != nil {
+				capsJSON = []byte("{}")
+			}
+
+			// Insert or fetch the model pool ID, updating capabilities on conflict.
+			// If another Ollama account already registered this model, the ON CONFLICT
+			// clause updates capabilities and returns the existing pool ID — the new
+			// credential is then bound to the same pool for multi-account load balancing.
+			err = tx.QueryRow(ctx,
+				`INSERT INTO model_pools (model_pattern, strategy, capabilities)
+				 VALUES ($1, 'round-robin', $2)
+				 ON CONFLICT (model_pattern) DO UPDATE
+				 SET capabilities = EXCLUDED.capabilities
+				 RETURNING id`,
+				modelPattern, capsJSON,
+			).Scan(&poolID)
+			if err != nil {
+				return 0, nil, fmt.Errorf("failed to upsert model pool row for %s: %w", modelPattern, err)
+			}
+
+			// Connect the discovered model pool directly to our Ollama instance credential
+			_, err = tx.Exec(ctx,
+				`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
+				 VALUES ($1, 'ollama', $2, $3, $4, true)
+				 ON CONFLICT DO NOTHING`, // prevents duplicates if the same account is submitted twice
+				poolID, encryptedKey, baseURL, weight,
+			)
+			if err != nil {
+				return 0, nil, fmt.Errorf("failed to bind credential to pool %s: %w", modelPattern, err)
+			}
+
+			discoveredModels = append(discoveredModels, modelPattern)
 		}
-
-		// Insert or fetch the model pool ID, updating capabilities on conflict.
-		// If another Ollama account already registered this model, the ON CONFLICT
-		// clause updates capabilities and returns the existing pool ID — the new
-		// credential is then bound to the same pool for multi-account load balancing.
-		err = tx.QueryRow(ctx,
-			`INSERT INTO model_pools (model_pattern, strategy, capabilities)
-			 VALUES ($1, 'round-robin', $2)
-			 ON CONFLICT (model_pattern) DO UPDATE
-			 SET capabilities = EXCLUDED.capabilities
-			 RETURNING id`,
-			modelPattern, capsJSON,
-		).Scan(&poolID)
-
-		if err != nil {
-			return 0, nil, fmt.Errorf("failed to upsert model pool row for %s: %w", modelPattern, err)
-		}
-
-		// Connect the discovered model pool directly to our Ollama instance credential
-		_, err = tx.Exec(ctx,
-			`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
-			 VALUES ($1, 'ollama', $2, $3, $4, true)
-			 ON CONFLICT DO NOTHING`, // prevents duplicates if the same account is submitted twice
-			poolID, encryptedKey, baseURL, weight,
-		)
-		if err != nil {
-			return 0, nil, fmt.Errorf("failed to bind credential to pool %s: %w", modelPattern, err)
-		}
-
-		discoveredModels = append(discoveredModels, modelPattern)
 	}
 
 	// Emit PostgreSQL NOTIFY to instantly trigger SyncManager cache swap

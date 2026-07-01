@@ -54,45 +54,62 @@ func DiscoverAndRegisterOneMinAIModels(ctx context.Context, db *pgxpool.Pool, va
 	var discoveredModels []string
 
 	for _, entry := range manifest {
-		modelPattern := entry.Pattern
-
-		// 4. Classify capabilities from the model identifier, then apply
-		//    modality-specific overrides so the gateway knows exactly what
-		//    each model supports.
-		caps := ClassifyModel(modelPattern)
-		applyOneMinAIOverrides(&caps, entry.Modality)
-
-		capsJSON, err := json.Marshal(caps.ToMap())
-		if err != nil {
-			capsJSON = []byte("{}")
+		// Each manifest entry is registered under two pool patterns:
+		//
+		//   1. The prefixed gateway pattern  (e.g. "1min/dall-e-3") — used by
+		//      clients that explicitly select the 1min.ai provider.
+		//   2. The clean upstream model name (e.g. "dall-e-3") — required for
+		//      client tools (Cline, LobeChat, Open WebUI …) that hardcode a
+		//      whitelist of known model names and reject any prefixed variant.
+		//
+		// Both pools bind the same encrypted 1min.ai credential, so the
+		// load-balancer ring treats them independently (and if a native OpenAI
+		// key is also configured for "dall-e-3", it joins the same pool and
+		// the gateway naturally load-balances across both providers).
+		patterns := []string{entry.Pattern}
+		if entry.Model != entry.Pattern {
+			patterns = append(patterns, entry.Model)
 		}
 
-		// 5. Upsert the model_pool — updates capabilities on re-discovery
-		var poolID int
-		err = tx.QueryRow(ctx,
-			`INSERT INTO model_pools (model_pattern, strategy, capabilities)
-			 VALUES ($1, 'round-robin', $2)
-			 ON CONFLICT (model_pattern) DO UPDATE
-			 SET capabilities = EXCLUDED.capabilities
-			 RETURNING id`,
-			modelPattern, capsJSON,
-		).Scan(&poolID)
-		if err != nil {
-			return 0, nil, fmt.Errorf("failed to upsert model pool for %s: %w", modelPattern, err)
-		}
+		for _, modelPattern := range patterns {
+			// 4. Classify capabilities from the model identifier, then apply
+			//    modality-specific overrides so the gateway knows exactly what
+			//    each model supports.
+			caps := ClassifyModel(modelPattern)
+			applyOneMinAIOverrides(&caps, entry.Modality)
 
-		// 6. Bind the 1min.ai credential to this pool (idempotent via ON CONFLICT)
-		_, err = tx.Exec(ctx,
-			`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
-			 VALUES ($1, '1minai', $2, $3, $4, true)
-			 ON CONFLICT DO NOTHING`,
-			poolID, encryptedKey, OneMinAIBaseURL, weight,
-		)
-		if err != nil {
-			return 0, nil, fmt.Errorf("failed to bind credential for pool %s: %w", modelPattern, err)
-		}
+			capsJSON, err := json.Marshal(caps.ToMap())
+			if err != nil {
+				capsJSON = []byte("{}")
+			}
 
-		discoveredModels = append(discoveredModels, modelPattern)
+			// 5. Upsert the model_pool — updates capabilities on re-discovery
+			var poolID int
+			err = tx.QueryRow(ctx,
+				`INSERT INTO model_pools (model_pattern, strategy, capabilities)
+				 VALUES ($1, 'round-robin', $2)
+				 ON CONFLICT (model_pattern) DO UPDATE
+				 SET capabilities = EXCLUDED.capabilities
+				 RETURNING id`,
+				modelPattern, capsJSON,
+			).Scan(&poolID)
+			if err != nil {
+				return 0, nil, fmt.Errorf("failed to upsert model pool for %s: %w", modelPattern, err)
+			}
+
+			// 6. Bind the 1min.ai credential to this pool (idempotent via ON CONFLICT)
+			_, err = tx.Exec(ctx,
+				`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
+				 VALUES ($1, '1minai', $2, $3, $4, true)
+				 ON CONFLICT DO NOTHING`,
+				poolID, encryptedKey, OneMinAIBaseURL, weight,
+			)
+			if err != nil {
+				return 0, nil, fmt.Errorf("failed to bind credential for pool %s: %w", modelPattern, err)
+			}
+
+			discoveredModels = append(discoveredModels, modelPattern)
+		}
 	}
 
 	// 7. Notify the SyncManager to instantly hot-reload the routing cache
