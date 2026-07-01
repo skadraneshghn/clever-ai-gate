@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.uber.org/zap"
 )
 
 const cloudflareAPIBase = "https://api.cloudflare.com/client/v4"
@@ -243,24 +245,43 @@ func fetchCloudflareModels(ctx context.Context, accountID, apiToken string) ([]c
 	}
 	defer resp.Body.Close()
 
-	switch resp.StatusCode {
-	case http.StatusUnauthorized:
-		return nil, fmt.Errorf(
-			"cloudflare rejected the api token (401 unauthorized) — " +
-				"verify your token has Workers AI read permissions at dash.cloudflare.com",
-		)
-	case http.StatusForbidden:
-		return nil, fmt.Errorf(
-			"cloudflare access denied (403 forbidden) — " +
-				"verify the account_id is correct and the token has Workers AI permissions",
-		)
-	}
-
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf(
-			"cloudflare models endpoint returned unexpected status: %d",
-			resp.StatusCode,
-		)
+		tokenSnippet := ""
+		if len(apiToken) >= 6 {
+			tokenSnippet = apiToken[:6]
+		} else {
+			tokenSnippet = apiToken
+		}
+
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		bodyStr := string(bodyBytes)
+
+		if prodLogger, err := zap.NewProduction(); err == nil {
+			prodLogger.Error("Cloudflare auto-discovery request failed",
+				zap.Int("status_code", resp.StatusCode),
+				zap.String("token_prefix", tokenSnippet),
+				zap.String("error_body", bodyStr),
+			)
+			_ = prodLogger.Sync()
+		}
+
+		switch resp.StatusCode {
+		case http.StatusUnauthorized:
+			return nil, fmt.Errorf(
+				"cloudflare rejected the api token (401 unauthorized) — " +
+					"verify your token has Workers AI read permissions at dash.cloudflare.com",
+			)
+		case http.StatusForbidden:
+			return nil, fmt.Errorf(
+				"cloudflare access denied (403 forbidden) — " +
+					"verify the account_id is correct and the token has Workers AI permissions",
+			)
+		default:
+			return nil, fmt.Errorf(
+				"cloudflare models endpoint returned unexpected status: %d",
+				resp.StatusCode,
+			)
+		}
 	}
 
 	var catalog cloudflareModelSearchResponse
