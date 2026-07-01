@@ -67,14 +67,15 @@ func NewHandler(client *http.Client, cacheStore *cache.Store, logger *zap.Logger
 
 // proxyContext carries extracted fields through the hot-path without allocations.
 type proxyContext struct {
-	model      string
-	isStream   bool
-	isNvidia   bool   // True when model uses nvidia/ prefix — triggers reasoning injection
-	isOneMinAI bool   // True when model uses 1min/ prefix — triggers body/response translation
-	body       []byte
-	credential *credentials.AcquireResult
-	pool       *credentials.BalancedChannelPool
-	tenantID   string
+	model        string
+	isStream     bool
+	isNvidia     bool   // True when model uses nvidia/ prefix — triggers reasoning injection
+	isOneMinAI   bool   // True when model uses 1min/ prefix — triggers body/response translation
+	isCloudflare bool   // True when model uses cloudflare/ prefix — triggers prefix stripping
+	body          []byte
+	credential   *credentials.AcquireResult
+	pool         *credentials.BalancedChannelPool
+	tenantID     string
 }
 
 // Handle processes incoming AI requests on the hot-path.
@@ -209,6 +210,18 @@ func (h *Handler) Handle(c *gin.Context) {
 		)
 	}
 
+	// --- Cloudflare Workers AI Prefix Detection ---
+	// Models prefixed with "cloudflare/" are routed to Cloudflare Workers AI.
+	// The prefix is stripped from the JSON body before forwarding so the upstream
+	// receives the clean model ID (e.g. "@cf/meta/llama-3.1-8b-instruct").
+	isCloudflare := false
+	if strings.HasPrefix(model, "cloudflare/") {
+		isCloudflare = true
+		h.logger.Debug("cloudflare workers ai model detected",
+			zap.String("model", model),
+		)
+	}
+
 	// --- Access log: first thing we know enough to emit a useful Info entry ---
 	// This fires for EVERY request and is the primary tool for diagnosing
 	// Kilo Code instability: you can see exactly what model/tenant/path was
@@ -224,6 +237,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		zap.Bool("is_nvidia", strings.HasPrefix(model, "nvidia/")),
 		zap.Bool("is_ollama", strings.HasPrefix(model, "ollama/")),
 		zap.Bool("is_1minai", isOneMinAI),
+		zap.Bool("is_cloudflare", isCloudflare),
 		zap.Int("body_bytes", len(body)),
 		zap.String("client_ip", c.ClientIP()),
 	)
@@ -283,16 +297,30 @@ func (h *Handler) Handle(c *gin.Context) {
 		body = bytes.Replace(body, oldToken, newToken, 1)
 	}
 
+	// --- Cloudflare Payload Sanitization ---
+	// For Cloudflare-prefixed models the "cloudflare/" routing prefix must be
+	// stripped from the JSON "model" field so Cloudflare receives the clean
+	// model ID (e.g. "@cf/meta/llama-3.1-8b-instruct" instead of
+	// "cloudflare/@cf/meta/llama-3.1-8b-instruct").
+	// Uses the same single-pass O(n) byte-level replacement.
+	if isCloudflare {
+		upstreamModel := strings.TrimPrefix(model, "cloudflare/")
+		oldToken := []byte(`"` + model + `"`)
+		newToken := []byte(`"` + upstreamModel + `"`)
+		body = bytes.Replace(body, oldToken, newToken, 1)
+	}
+
 	// Step 5-8: Attempt with automatic failover
 	// Note: The FULL body (not scanSlice) is forwarded to the upstream provider.
 	// Only the metadata extraction was bounded — the binary payload is piped as-is.
 	pctx := &proxyContext{
-		model:      model,
-		isStream:   isStream,
-		isNvidia:   isNvidia,
-		isOneMinAI: isOneMinAI,
-		body:       body,
-		pool:       pool,
+		model:        model,
+		isStream:     isStream,
+		isNvidia:     isNvidia,
+		isOneMinAI:   isOneMinAI,
+		isCloudflare: isCloudflare,
+		body:         body,
+		pool:         pool,
 	}
 
 	// Retrieve tenant ID from context (set by auth middleware)
@@ -984,6 +1012,22 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 		}
 		// Also try just the provider namespace key "1min"
 		if val, found := h.cache.Get(cache.PoolKey("1min")); found {
+			return val, true
+		}
+	}
+
+	// Handle Cloudflare slash-separated model names
+	// e.g. "cloudflare/@cf/meta/llama-3.1-8b-instruct"
+	if strings.HasPrefix(model, "cloudflare/") {
+		slashParts := strings.Split(model, "/")
+		for i := len(slashParts) - 1; i >= 1; i-- {
+			prefix := strings.Join(slashParts[:i], "/")
+			if val, found := h.cache.Get(cache.PoolKey(prefix)); found {
+				return val, true
+			}
+		}
+		// Also try just the provider namespace key "cloudflare"
+		if val, found := h.cache.Get(cache.PoolKey("cloudflare")); found {
 			return val, true
 		}
 	}

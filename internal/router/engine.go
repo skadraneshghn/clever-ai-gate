@@ -211,6 +211,7 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		adminGroup.POST("/providers/custom", credHandler.RegisterCustomProvider)
 		adminGroup.POST("/providers/openrouter", credHandler.RegisterOpenRouterProvider)
 		adminGroup.POST("/providers/1minai", credHandler.RegisterOneMinAIProvider)
+		adminGroup.POST("/providers/cloudflare", credHandler.RegisterCloudflareProvider)
 		// Re-run discovery for ALL existing provider keys → provisions clean alias pools
 		adminGroup.POST("/providers/refresh", credHandler.RefreshAllProviders)
 

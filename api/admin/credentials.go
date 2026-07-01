@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -510,6 +511,74 @@ func (h *CredentialHandler) RegisterOneMinAIProvider(c *gin.Context) {
 	})
 }
 
+// RegisterCloudflareProvider auto-discovers all Cloudflare Workers AI models
+// available under the given Account ID, creates model pools for each one,
+// and binds the API token credential to all of them in a single atomic transaction.
+//
+// Credential storage convention (zero schema migration):
+//   - The API Token is encrypted and stored in credentials.encrypted_key.
+//   - The Account ID is stored in credentials.base_url as "cloudflare:<accountID>".
+//     The rewriter parses it at request time with strings.TrimPrefix.
+//
+// Each model is registered under two pool patterns for maximum client compatibility:
+//   - "cloudflare/@cf/meta/llama-3.1-8b-instruct" (explicit prefix form)
+//   - "@cf/meta/llama-3.1-8b-instruct" (clean form)
+//
+// @Summary      Auto-discover Cloudflare Workers AI Models
+// @Description  Connects to Cloudflare, fetches all Workers AI models for the account, and registers them
+// @Tags         Credentials
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        body  body      dto.DiscoverCloudflareRequest  true  "Cloudflare account_id and api_token"
+// @Success      200   {object}  dto.DiscoverProviderResponse
+// @Failure      400   {object}  dto.ErrorResponse
+// @Failure      500   {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/providers/cloudflare [post]
+func (h *CredentialHandler) RegisterCloudflareProvider(c *gin.Context) {
+	var req dto.DiscoverCloudflareRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
+		return
+	}
+
+	if req.AccountID == "" {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "account_id is required for Cloudflare Workers AI"})
+		return
+	}
+
+	if req.APIToken == "" {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "api_token is required for Cloudflare Workers AI"})
+		return
+	}
+
+	if req.Weight <= 0 {
+		req.Weight = 1
+	}
+
+	count, models, err := credentials.DiscoverAndRegisterCloudflareModels(
+		c.Request.Context(),
+		h.db,
+		h.vault,
+		req.AccountID,
+		req.APIToken,
+		req.Weight,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{
+			Error:   "Cloudflare Workers AI auto-discovery failed",
+			Details: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.DiscoverProviderResponse{
+		Message:       fmt.Sprintf("Successfully synchronized %d Cloudflare Workers AI models", count),
+		ModelsCount:   count,
+		DiscoveredIDs: models,
+	})
+}
+
 // RefreshAllProviders re-runs auto-discovery for every distinct provider key
 // already registered in the database. This is the "sync all" action: it reads
 // every unique (provider, encrypted_key, base_url, prefix) combination from the
@@ -623,6 +692,13 @@ func (h *CredentialHandler) RefreshAllProviders(c *gin.Context) {
 		case "1minai":
 			count, discovered, discErr = credentials.DiscoverAndRegisterOneMinAIModels(
 				ctx, h.db, h.vault, apiKey, weight)
+
+		case "cloudflare":
+			// Recover the account ID from the stored base_url convention.
+			// base_url is stored as "cloudflare:<accountID>" by RegisterCloudflareProvider.
+			accountID := strings.TrimPrefix(acc.BaseURL, "cloudflare:")
+			count, discovered, discErr = credentials.DiscoverAndRegisterCloudflareModels(
+				ctx, h.db, h.vault, accountID, apiKey, weight)
 
 		default:
 			// Any OpenAI-compatible provider (openai, anthropic, deepseek, custom, …)

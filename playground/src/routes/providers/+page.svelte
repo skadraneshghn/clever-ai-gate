@@ -20,7 +20,7 @@
   let addProviderLoading = $state(false);
 
   // Auto-discovery form
-  let autoDiscoverForm = $state({ provider: 'openrouter', api_key: '', base_url: 'https://openrouter.ai/api/v1', weight: 1, label: '' });
+  let autoDiscoverForm = $state({ provider: 'openrouter', api_key: '', base_url: 'https://openrouter.ai/api/v1', weight: 1, label: '', account_id: '', api_token: '' });
   let autoDiscoverLoading = $state(false);
 
   // Edit modal
@@ -88,7 +88,7 @@
 
   function openAddProviderModal() {
     addProviderForm = { pool_id: '', provider: 'openai', api_key: '', base_url: 'https://api.openai.com', weight: 1 };
-    autoDiscoverForm = { provider: 'nvidia', api_key: '', base_url: 'https://integrate.api.nvidia.com/v1', weight: 1, label: '' };
+    autoDiscoverForm = { provider: 'nvidia', api_key: '', base_url: 'https://integrate.api.nvidia.com/v1', weight: 1, label: '', account_id: '', api_token: '' };
     addProviderTab = 'standard';
     showAddProviderModal = true;
     loadPools();
@@ -137,18 +137,30 @@
       endpoint = '/api/v1/admin/providers/openrouter';
     } else if (autoDiscoverForm.provider === '1minai') {
       endpoint = '/api/v1/admin/providers/1minai';
+    } else if (autoDiscoverForm.provider === 'cloudflare') {
+      endpoint = '/api/v1/admin/providers/cloudflare';
     } else {
       endpoint = '/api/v1/admin/providers/custom';
     }
     try {
-      const payload = {
-        provider: autoDiscoverForm.provider,
-        api_key: autoDiscoverForm.api_key,
-        base_url: autoDiscoverForm.base_url,
-        weight: autoDiscoverForm.weight || 1
-      };
-      if (autoDiscoverForm.provider === 'custom' && autoDiscoverForm.label) {
-        payload.label = autoDiscoverForm.label;
+      let payload;
+      if (autoDiscoverForm.provider === 'cloudflare') {
+        // Cloudflare uses a dedicated DTO with account_id + api_token
+        payload = {
+          account_id: autoDiscoverForm.account_id,
+          api_token: autoDiscoverForm.api_token,
+          weight: autoDiscoverForm.weight || 1
+        };
+      } else {
+        payload = {
+          provider: autoDiscoverForm.provider,
+          api_key: autoDiscoverForm.api_key,
+          base_url: autoDiscoverForm.base_url,
+          weight: autoDiscoverForm.weight || 1
+        };
+        if (autoDiscoverForm.provider === 'custom' && autoDiscoverForm.label) {
+          payload.label = autoDiscoverForm.label;
+        }
       }
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -160,6 +172,7 @@
         const displayName = autoDiscoverForm.provider === 'custom'
           ? (autoDiscoverForm.label || 'Custom')
           : autoDiscoverForm.provider === '1minai' ? '1min.ai'
+          : autoDiscoverForm.provider === 'cloudflare' ? 'Cloudflare Workers AI'
           : autoDiscoverForm.provider.toUpperCase();
         appState.addToast('success', `Successfully synchronized ${data.models_count || 0} ${displayName} models`);
         showAddProviderModal = false;
@@ -258,6 +271,7 @@
       case 'anthropic': return 'badge-anthropic';
       case 'openrouter': return 'badge-openrouter';
       case '1minai': return 'badge-1minai';
+      case 'cloudflare': return 'badge-cloudflare';
       case 'custom': return 'badge-custom';
       default: return 'badge-default';
     }
@@ -458,6 +472,7 @@
         <option value="ollama">Ollama</option>
         <option value="openrouter">OpenRouter</option>
         <option value="1minai">1min.ai</option>
+        <option value="cloudflare">Cloudflare Workers AI</option>
         <option value="google">Google</option>
         <option value="custom">Custom</option>
       </Input>
@@ -481,15 +496,21 @@
           autoDiscoverForm.base_url = 'https://openrouter.ai/api/v1';
         } else if (autoDiscoverForm.provider === '1minai') {
           autoDiscoverForm.base_url = 'https://api.1min.ai';
+        } else if (autoDiscoverForm.provider === 'cloudflare') {
+          autoDiscoverForm.base_url = '';
         } else {
           autoDiscoverForm.base_url = '';
         }
         autoDiscoverForm.label = '';
+        autoDiscoverForm.account_id = '';
+        autoDiscoverForm.api_token = '';
+        autoDiscoverForm.api_key = '';
       }}>
         <option value="openrouter">OpenRouter (Free Models)</option>
         <option value="nvidia">NVIDIA NIM</option>
         <option value="ollama">Ollama Cloud</option>
         <option value="1minai">1min.ai (Multi-Modal)</option>
+        <option value="cloudflare">Cloudflare Workers AI</option>
         <option value="custom">OpenAI-Compatible (Custom)</option>
       </Input>
 
@@ -505,25 +526,47 @@
         </div>
       {/if}
 
+      {#if autoDiscoverForm.provider === 'cloudflare'}
+        <div class="rounded-lg border border-orange-500/20 bg-orange-500/5 px-4 py-3 text-xs text-orange-400 leading-relaxed">
+          ☁️ <strong>Cloudflare Workers AI</strong> requires your <strong>Account ID</strong> and an <strong>API Token</strong> with Workers AI permissions. All available models (Text, Image, Audio, Embeddings) are discovered automatically. Find your Account ID and create an API token at <a href="https://dash.cloudflare.com" target="_blank" rel="noopener noreferrer" class="underline">dash.cloudflare.com</a>.
+        </div>
+      {/if}
+
       {#if autoDiscoverForm.provider === 'custom'}
         <Input type="text" label="Label (optional)" placeholder="e.g. Together AI, DeepInfra" bind:value={autoDiscoverForm.label} />
       {/if}
 
-      <Input 
-        type="password" 
-        label="API Key" 
-        placeholder={
-          autoDiscoverForm.provider === 'nvidia' ? 'nvapi-...' :
-          autoDiscoverForm.provider === 'ollama' ? 'Ollama Cloud API key...' :
-          autoDiscoverForm.provider === 'openrouter' ? 'sk-or-v1-...' :
-          autoDiscoverForm.provider === '1minai' ? '1min.ai API key...' :
-          'Bearer API key...'
-        } 
-        bind:value={autoDiscoverForm.api_key} 
-      />
-      
-      {#if autoDiscoverForm.provider !== 'openrouter' && autoDiscoverForm.provider !== '1minai'}
-        <Input type="text" label="Base URL" placeholder={autoDiscoverForm.provider === 'custom' ? 'https://api.together.xyz/v1' : ''} bind:value={autoDiscoverForm.base_url} />
+      {#if autoDiscoverForm.provider === 'cloudflare'}
+        <!-- Cloudflare needs Account ID + API Token instead of the generic api_key/base_url -->
+        <Input
+          type="text"
+          label="Account ID"
+          placeholder="a1b2c3d4e5f6..."
+          bind:value={autoDiscoverForm.account_id}
+        />
+        <Input
+          type="password"
+          label="API Token"
+          placeholder="Workers AI API Token..."
+          bind:value={autoDiscoverForm.api_token}
+        />
+      {:else}
+        <Input 
+          type="password" 
+          label="API Key" 
+          placeholder={
+            autoDiscoverForm.provider === 'nvidia' ? 'nvapi-...' :
+            autoDiscoverForm.provider === 'ollama' ? 'Ollama Cloud API key...' :
+            autoDiscoverForm.provider === 'openrouter' ? 'sk-or-v1-...' :
+            autoDiscoverForm.provider === '1minai' ? '1min.ai API key...' :
+            'Bearer API key...'
+          } 
+          bind:value={autoDiscoverForm.api_key} 
+        />
+        
+        {#if autoDiscoverForm.provider !== 'openrouter' && autoDiscoverForm.provider !== '1minai'}
+          <Input type="text" label="Base URL" placeholder={autoDiscoverForm.provider === 'custom' ? 'https://api.together.xyz/v1' : ''} bind:value={autoDiscoverForm.base_url} />
+        {/if}
       {/if}
       
       <Input type="number" label="Weight" min="1" bind:value={autoDiscoverForm.weight} />
@@ -564,6 +607,7 @@
       <option value="ollama">Ollama</option>
       <option value="openrouter">OpenRouter</option>
       <option value="1minai">1min.ai</option>
+      <option value="cloudflare">Cloudflare Workers AI</option>
       <option value="google">Google</option>
       <option value="custom">Custom</option>
     </Input>
@@ -651,5 +695,12 @@
     background: rgba(16, 185, 129, 0.12);
     color: #34d399;
     border: 1px solid rgba(16, 185, 129, 0.25);
+  }
+
+  /* Cloudflare brand badge — orange/amber tone matching Cloudflare visual identity */
+  :global(.badge-cloudflare) {
+    background: rgba(249, 115, 22, 0.12);
+    color: #fb923c;
+    border: 1px solid rgba(249, 115, 22, 0.25);
   }
 </style>

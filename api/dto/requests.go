@@ -65,3 +65,12 @@ type DiscoverProviderResponse struct {
 	ModelsCount   int      `json:"models_count" example:"45"`
 	DiscoveredIDs []string `json:"discovered_models"`
 }
+
+// DiscoverCloudflareRequest is the request body for POST /api/v1/admin/providers/cloudflare.
+// Cloudflare Workers AI requires both an Account ID and an API Token, which are distinct
+// credentials — using a dedicated DTO avoids misuse of the generic api_key/base_url fields.
+type DiscoverCloudflareRequest struct {
+	AccountID string `json:"account_id" binding:"required" example:"a1b2c3d4e5f6..."`
+	APIToken  string `json:"api_token"  binding:"required" example:"..."`
+	Weight    int    `json:"weight,omitempty" example:"1"`
+}

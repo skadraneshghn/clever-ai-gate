@@ -66,6 +66,9 @@ func NewRewriter() *Rewriter {
 	// 1min.ai: multi-modal Feature API (chat, code, image, audio, video)
 	r.pathTransformers["1minai"] = oneminaiPath
 
+	// Cloudflare Workers AI: OpenAI-compatible completions + universal run endpoint
+	r.pathTransformers["cloudflare"] = cloudflarePath
+
 	return r
 }
 
@@ -278,4 +281,36 @@ func ollamaPath(baseURL, requestPath, _ string) string {
 	}
 	// Local / self-hosted Ollama: passthrough OpenAI-compatible paths unchanged.
 	return baseURL + requestPath
+}
+
+// cloudflarePath routes requests to the correct Cloudflare Workers AI endpoint.
+//
+// The base_url convention used by this gateway is "cloudflare:<accountID>".
+// The account ID is extracted via strings.TrimPrefix.
+//
+// Two downstream paths exist:
+//
+//   Text completions (/v1/chat/completions, /v1/completions):
+//     → https://api.cloudflare.com/client/v4/accounts/{accountID}/ai/v1/chat/completions
+//     (Cloudflare's native OpenAI-compatible endpoint, supports streaming SSE)
+//
+//   All other paths (/v1/embeddings, /v1/images/generations, /v1/audio/*):
+//     → https://api.cloudflare.com/client/v4/accounts/{accountID}/ai/run/{model}
+//     (Cloudflare's universal inference endpoint)
+func cloudflarePath(baseURL, requestPath, model string) string {
+	// Parse the account ID from the stored base_url convention.
+	accountID := strings.TrimPrefix(baseURL, "cloudflare:")
+	cfBase := "https://api.cloudflare.com/client/v4/accounts/" + accountID
+
+	if strings.Contains(requestPath, "/chat/completions") ||
+		strings.Contains(requestPath, "/completions") {
+		// OpenAI-compatible endpoint — supports streaming and all standard parameters.
+		return cfBase + "/ai/v1/chat/completions"
+	}
+
+	// All other modalities (embeddings, images, audio, etc.) use the universal
+	// /ai/run/{model} endpoint. The model value here is already the clean upstream
+	// ID (e.g. "@cf/baai/bge-base-en-v1.5") with the "cloudflare/" prefix stripped
+	// by the handler before calling RewriteURL.
+	return cfBase + "/ai/run/" + model
 }
