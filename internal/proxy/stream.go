@@ -183,6 +183,22 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 		sp.logger.Debug("stream scanner error", zap.Error(err))
 	}
 
+	// Gap 5 Fix: For 1min.ai, emit a synthetic stop chunk if the upstream
+	// connection dropped before the "done" event was transmitted. Without this,
+	// downstream clients hang waiting for the terminal finish_reason marker.
+	// If the "done" event was already processed, a duplicate stop chunk is
+	// harmless — OpenAI clients handle multiple finish_reason chunks gracefully.
+	if provider == "1minai" {
+		tmx.SetEventType("done")
+		stopChunk, _ := tmx.TranslateChunk([]byte(`{}`))
+		if len(stopChunk) > 0 {
+			c.Writer.Write([]byte("data: "))
+			c.Writer.Write(stopChunk)
+			c.Writer.Write([]byte("\n\n"))
+			flusher.Flush()
+		}
+	}
+
 	// Ensure [DONE] is sent even if upstream didn't send it
 	c.Writer.Write([]byte("data: [DONE]\n\n"))
 	flusher.Flush()

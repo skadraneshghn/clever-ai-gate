@@ -100,20 +100,34 @@ func translateOneMinAICode(entry credentials.OneMinAIModelEntry, body []byte) ([
 // translateOneMinAIImage converts an OpenAI images/generations request into a
 // 1min.ai IMAGE_GENERATOR feature request.
 //
-// OpenAI: {"model":"dall-e-3","prompt":"a cat","size":"1024x1024"}
-// 1min.ai: {"type":"IMAGE_GENERATOR","model":"dall-e-3","promptObject":{"prompt":"a cat"}}
+// OpenAI: {"model":"dall-e-3","prompt":"a cat","size":"1024x1024","quality":"hd"}
+// 1min.ai: {"type":"IMAGE_GENERATOR","model":"dall-e-3","promptObject":{"prompt":"a cat","aspect_ratio":"1:1"}}
+//
+// Gap 4 Fix: Maps OpenAI size to 1min.ai aspect_ratio, passes through quality.
 func translateOneMinAIImage(entry credentials.OneMinAIModelEntry, body []byte) ([]byte, string, error) {
 	prompt, _ := jsonparser.GetString(body, "prompt")
 	if prompt == "" {
 		return nil, "", fmt.Errorf("missing 'prompt' field in image generation request")
 	}
 
+	promptObj := map[string]interface{}{
+		"prompt": prompt,
+	}
+
+	// Map OpenAI size to 1min.ai aspect_ratio
+	if size, _ := jsonparser.GetString(body, "size"); size != "" {
+		promptObj["aspect_ratio"] = openAISizeToAspectRatio(size)
+	}
+
+	// Pass through quality if present
+	if quality, _ := jsonparser.GetString(body, "quality"); quality != "" {
+		promptObj["quality"] = quality
+	}
+
 	req := map[string]interface{}{
-		"type":  entry.Feature,
-		"model": entry.Model,
-		"promptObject": map[string]interface{}{
-			"prompt": prompt,
-		},
+		"type":         entry.Feature,
+		"model":        entry.Model,
+		"promptObject": promptObj,
 	}
 
 	out, err := json.Marshal(req)
@@ -123,11 +137,36 @@ func translateOneMinAIImage(entry credentials.OneMinAIModelEntry, body []byte) (
 	return out, "application/json", nil
 }
 
+// openAISizeToAspectRatio maps OpenAI image size strings to 1min.ai aspect_ratio values.
+func openAISizeToAspectRatio(size string) string {
+	switch size {
+	case "1024x1024", "512x512", "256x256":
+		return "1:1"
+	case "1792x1024":
+		return "16:9"
+	case "1024x1792":
+		return "9:16"
+	case "768x512":
+		return "3:2"
+	case "512x768":
+		return "2:3"
+	case "832x624":
+		return "4:5"
+	case "624x832":
+		return "5:4"
+	default:
+		return "1:1"
+	}
+}
+
 // translateOneMinAITTS converts an OpenAI audio/speech request into a
 // 1min.ai TEXT_TO_SPEECH feature request.
 //
-// OpenAI: {"model":"tts-1","input":"Hello world","voice":"alloy"}
-// 1min.ai: {"type":"TEXT_TO_SPEECH","model":"tts-1","promptObject":{"prompt":"Hello world"}}
+// OpenAI: {"model":"tts-1","input":"Hello world","voice":"alloy","response_format":"mp3","speed":1}
+// 1min.ai: {"type":"TEXT_TO_SPEECH","model":"tts-1","promptObject":{"text":"Hello world","voice":"alloy","response_format":"mp3","speed":1}}
+//
+// Gap 4 Fix: Passes through voice, response_format, and speed parameters.
+// Uses "text" field name (not "prompt") per the 1min.ai TTS API spec.
 func translateOneMinAITTS(entry credentials.OneMinAIModelEntry, body []byte) ([]byte, string, error) {
 	input, _ := jsonparser.GetString(body, "input")
 	if input == "" {
@@ -135,7 +174,7 @@ func translateOneMinAITTS(entry credentials.OneMinAIModelEntry, body []byte) ([]
 	}
 
 	promptObj := map[string]interface{}{
-		"prompt": input,
+		"text": input,
 	}
 
 	// Pass through optional OpenAI TTS parameters
@@ -247,6 +286,9 @@ func translateOneMinAISTT(entry credentials.OneMinAIModelEntry, body []byte, con
 
 // translateOneMinAIVideo converts a video generation request into a
 // 1min.ai TEXT_TO_VIDEO feature request.
+//
+// Gap 4 Fix: Passes through duration and aspectRatio from the request body
+// instead of using hardcoded defaults.
 func translateOneMinAIVideo(entry credentials.OneMinAIModelEntry, body []byte) ([]byte, string, error) {
 	prompt, _ := jsonparser.GetString(body, "prompt")
 	if prompt == "" {
@@ -264,6 +306,23 @@ func translateOneMinAIVideo(entry credentials.OneMinAIModelEntry, body []byte) (
 		promptObj["modelName"] = entry.SubModel
 	}
 
+	// Pass through optional video parameters from the request body
+	if duration, _ := jsonparser.GetString(body, "duration"); duration != "" {
+		promptObj["duration"] = duration
+	} else {
+		promptObj["duration"] = "5s" // sensible default
+	}
+	if aspectRatio, _ := jsonparser.GetString(body, "aspect_ratio"); aspectRatio != "" {
+		promptObj["aspectRatio"] = aspectRatio
+	} else if aspectRatio, _ := jsonparser.GetString(body, "aspectRatio"); aspectRatio != "" {
+		promptObj["aspectRatio"] = aspectRatio
+	} else {
+		promptObj["aspectRatio"] = "16:9" // sensible default
+	}
+	if resolution, _ := jsonparser.GetString(body, "resolution"); resolution != "" {
+		promptObj["resolution"] = resolution
+	}
+
 	req := map[string]interface{}{
 		"type":         entry.Feature,
 		"model":        entry.Model,
@@ -278,32 +337,29 @@ func translateOneMinAIVideo(entry credentials.OneMinAIModelEntry, body []byte) (
 }
 
 // buildPromptFromMessages extracts a plain-text prompt from the OpenAI messages
-// array. It concatenates all message contents with role prefixes for context.
+// array using jsonparser.ArrayEach (zero-reflection, no heap slice allocation).
+// It concatenates all message contents with role prefixes for context.
 func buildPromptFromMessages(body []byte) string {
-	var messages []struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-	if err := json.Unmarshal(body, &messages); err != nil {
-		// If messages array isn't found, try "prompt" field directly
-		prompt, _ := jsonparser.GetString(body, "prompt")
-		if prompt != "" {
-			return prompt
-		}
-		return ""
-	}
-
-	if len(messages) == 0 {
-		prompt, _ := jsonparser.GetString(body, "prompt")
-		return prompt
-	}
-
 	var sb strings.Builder
-	for i, msg := range messages {
-		if i > 0 {
+	first := true
+
+	jsonparser.ArrayEach(body, func(value []byte, _ jsonparser.ValueType, _ int, err error) {
+		if err != nil {
+			return
+		}
+		role, _ := jsonparser.GetString(value, "role")
+		content, _ := jsonparser.GetString(value, "content")
+
+		if content == "" {
+			return
+		}
+
+		if !first {
 			sb.WriteString("\n\n")
 		}
-		switch msg.Role {
+		first = false
+
+		switch role {
 		case "system":
 			sb.WriteString("[System] ")
 		case "user":
@@ -311,8 +367,15 @@ func buildPromptFromMessages(body []byte) string {
 		case "assistant":
 			sb.WriteString("[Assistant] ")
 		}
-		sb.WriteString(msg.Content)
+		sb.WriteString(content)
+	}, "messages")
+
+	if sb.Len() == 0 {
+		// Fallback: try "prompt" field directly
+		prompt, _ := jsonparser.GetString(body, "prompt")
+		return prompt
 	}
+
 	return sb.String()
 }
 
@@ -332,30 +395,49 @@ func extractBoundary(contentType string) string {
 // uploadOneMinAIAsset uploads a file to the 1min.ai Asset API and returns the
 // asset URL/path that can be referenced in feature requests.
 // Endpoint: POST https://api.1min.ai/api/assets with multipart form field "asset".
+//
+// Gap 3 Fix: Uses io.Pipe to stream the multipart body directly to the HTTP
+// client, avoiding a full duplicate copy of the audio data in a bytes.Buffer.
+// The pipe writer runs in a goroutine; the pipe reader is the request body.
 func uploadOneMinAIAsset(data []byte, filename string, apiKey string, httpClient *http.Client) (string, error) {
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
 
-	part, err := writer.CreateFormFile("asset", filename)
-	if err != nil {
-		return "", fmt.Errorf("failed to create multipart form file: %w", err)
-	}
-	if _, err := part.Write(data); err != nil {
-		return "", fmt.Errorf("failed to write audio data to multipart: %w", err)
-	}
-	writer.Close()
+	// Get the content type (with boundary) before starting the writer goroutine.
+	// The boundary is generated by NewWriter, so this is safe to call here.
+	contentType := writer.FormDataContentType()
+
+	// Writer goroutine: creates the form file and streams the audio data
+	// through the pipe. Errors are propagated via CloseWithError, which
+	// causes the HTTP client's Do() to fail with the same error.
+	go func() {
+		defer pw.Close()
+		defer writer.Close()
+
+		part, err := writer.CreateFormFile("asset", filename)
+		if err != nil {
+			pw.CloseWithError(fmt.Errorf("failed to create multipart form file: %w", err))
+			return
+		}
+		if _, err := part.Write(data); err != nil {
+			pw.CloseWithError(fmt.Errorf("failed to write audio data to multipart: %w", err))
+			return
+		}
+	}()
 
 	req, err := http.NewRequest(http.MethodPost,
-		credentials.OneMinAIBaseURL+"/api/assets", body)
+		credentials.OneMinAIBaseURL+"/api/assets", pr)
 	if err != nil {
+		pr.Close()
 		return "", fmt.Errorf("failed to create asset upload request: %w", err)
 	}
 
 	req.Header.Set("API-KEY", apiKey)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Content-Type", contentType)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		pr.Close()
 		return "", fmt.Errorf("asset upload request failed: %w", err)
 	}
 	defer resp.Body.Close()
@@ -387,13 +469,7 @@ func uploadOneMinAIAsset(data []byte, filename string, apiKey string, httpClient
 	}
 	if assetURL == "" {
 		// Last resort: try resultObject[0] (1min.ai envelope pattern)
-		result, _, _, err := jsonparser.Get(respBody, "aiRecord", "aiRecordDetail", "resultObject", "[0]")
-		if err == nil && len(result) > 0 {
-			var str string
-			if json.Unmarshal(result, &str) == nil {
-				assetURL = str
-			}
-		}
+		assetURL, _ = jsonparser.GetString(respBody, "aiRecord", "aiRecordDetail", "resultObject", "[0]")
 	}
 	if assetURL == "" {
 		return "", fmt.Errorf("asset upload response did not contain a URL: %s", string(respBody))
@@ -578,15 +654,8 @@ func extractOneMinAIOutput(body []byte) string {
 	}
 
 	// 2. Try resultObject[0] (text content or asset path)
-	result, _, _, err := jsonparser.Get(body, "aiRecord", "aiRecordDetail", "resultObject", "[0]")
-	if err == nil && len(result) > 0 {
-		// result is raw JSON — could be a string or an object
-		var str string
-		if err := json.Unmarshal(result, &str); err == nil {
-			return str
-		}
-		// If it's not a string, return the raw JSON
-		return string(result)
+	if str, err := jsonparser.GetString(body, "aiRecord", "aiRecordDetail", "resultObject", "[0]"); err == nil && str != "" {
+		return str
 	}
 
 	// 3. Try responseObject (some features put output here)

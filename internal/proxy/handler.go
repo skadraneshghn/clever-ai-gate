@@ -782,6 +782,25 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		if readErr != nil {
 			return http.StatusInternalServerError, upstreamURL, nil, readErr
 		}
+
+		// Gap 1 Fix: 1min.ai can return HTTP 200 with an internal failure inside
+		// the aiRecord envelope (e.g. insufficient credits, model unavailable).
+		// Detect this and route through the retry loop so the credential is
+		// penalized and failover can occur — same as a real HTTP error.
+		if status, _ := jsonparser.GetString(respBody, "aiRecord", "status"); status == "FAILED" {
+			errMsg, _ := jsonparser.GetString(respBody, "aiRecord", "aiRecordDetail", "resultObject", "[0]")
+			if errMsg == "" {
+				errMsg = "1min.ai internal failure"
+			}
+			h.logger.Warn("1min.ai returned internal failure (HTTP 200, status=FAILED)",
+				zap.String("model", pctx.model),
+				zap.String("error", errMsg),
+				zap.ByteString("response", respBody),
+			)
+			// Return 502 so executeWithRetry penalizes the key and rotates
+			return http.StatusBadGateway, upstreamURL, respBody, nil
+		}
+
 		translated, contentType, trErr := translateOneMinAIResponse(pctx.model, respBody)
 		if trErr == nil && translated != nil {
 			c.Writer.Header().Set("Content-Type", contentType)
