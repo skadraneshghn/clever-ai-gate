@@ -346,6 +346,57 @@ func (h *CredentialHandler) RegisterOllamaProvider(c *gin.Context) {
 	})
 }
 
+// RegisterOpenRouterProvider auto-discovers all FREE models available on OpenRouter,
+// creates model pools for each, and binds the credential to all of them in one transaction.
+// Free-tier models are identified by the `:free` suffix in their ID (OpenRouter's canonical
+// free-tier designation) and/or zero prompt/completion pricing.
+//
+// @Summary      Auto-discover OpenRouter Free Models
+// @Description  Connects to OpenRouter, fetches the model catalog, and registers only free-tier models
+// @Tags         Credentials
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        body  body      dto.DiscoverProviderRequest  true  "OpenRouter provider details (api_key required, base_url ignored)"
+// @Success      200   {object}  dto.DiscoverProviderResponse
+// @Failure      400   {object}  dto.ErrorResponse
+// @Failure      500   {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/providers/openrouter [post]
+func (h *CredentialHandler) RegisterOpenRouterProvider(c *gin.Context) {
+	var req dto.DiscoverProviderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
+		return
+	}
+
+	if req.APIKey == "" {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "api_key is required for OpenRouter auto-discovery"})
+		return
+	}
+
+	if req.Weight <= 0 {
+		req.Weight = 1
+	}
+
+	count, models, err := credentials.DiscoverAndRegisterOpenRouterModels(
+		c.Request.Context(),
+		h.db,
+		h.vault,
+		req.APIKey,
+		req.Weight,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "OpenRouter free-model discovery failed", Details: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.DiscoverProviderResponse{
+		Message:       fmt.Sprintf("Successfully synchronized %d free OpenRouter models", count),
+		ModelsCount:   count,
+		DiscoveredIDs: models,
+	})
+}
+
 // RegisterCustomProvider handles POST /api/v1/admin/providers/custom
 // It connects to any OpenAI-compatible provider, validates the API key,
 // discovers all available models, and registers them for load balancing.

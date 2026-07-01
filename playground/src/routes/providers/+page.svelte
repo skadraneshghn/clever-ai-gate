@@ -20,7 +20,7 @@
   let addProviderLoading = $state(false);
 
   // Auto-discovery form
-  let autoDiscoverForm = $state({ provider: 'nvidia', api_key: '', base_url: 'https://integrate.api.nvidia.com/v1', weight: 1, label: '' });
+  let autoDiscoverForm = $state({ provider: 'openrouter', api_key: '', base_url: 'https://openrouter.ai/api/v1', weight: 1, label: '' });
   let autoDiscoverLoading = $state(false);
 
   // Edit modal
@@ -130,6 +130,8 @@
       endpoint = '/api/v1/admin/providers/nvidia';
     } else if (autoDiscoverForm.provider === 'ollama') {
       endpoint = '/api/v1/admin/providers/ollama';
+    } else if (autoDiscoverForm.provider === 'openrouter') {
+      endpoint = '/api/v1/admin/providers/openrouter';
     } else {
       endpoint = '/api/v1/admin/providers/custom';
     }
@@ -248,6 +250,7 @@
       case 'nvidia': return 'badge-nvidia';
       case 'ollama': return 'badge-ollama';
       case 'anthropic': return 'badge-anthropic';
+      case 'openrouter': return 'badge-openrouter';
       case 'custom': return 'badge-custom';
       default: return 'badge-default';
     }
@@ -421,6 +424,7 @@
         <option value="anthropic">Anthropic</option>
         <option value="nvidia">NVIDIA</option>
         <option value="ollama">Ollama</option>
+        <option value="openrouter">OpenRouter</option>
         <option value="google">Google</option>
         <option value="custom">Custom</option>
       </Input>
@@ -433,22 +437,31 @@
     </div>
   {:else}
     <div class="flex flex-col gap-4">
-      <p class="text-sm text-secondary leading-relaxed">Auto-discover all models from an NVIDIA NIM, Ollama Cloud, or any OpenAI-compatible provider. Pools are created automatically.</p>
+      <p class="text-sm text-secondary leading-relaxed">Auto-discover models from NVIDIA NIM, Ollama Cloud, OpenRouter (free models only), or any OpenAI-compatible provider. Pools are created automatically.</p>
       
       <Input type="select" label="Provider Type" bind:value={autoDiscoverForm.provider} onchange={() => {
         if (autoDiscoverForm.provider === 'nvidia') {
           autoDiscoverForm.base_url = 'https://integrate.api.nvidia.com/v1';
         } else if (autoDiscoverForm.provider === 'ollama') {
           autoDiscoverForm.base_url = 'https://ollama.com';
+        } else if (autoDiscoverForm.provider === 'openrouter') {
+          autoDiscoverForm.base_url = 'https://openrouter.ai/api/v1';
         } else {
           autoDiscoverForm.base_url = '';
         }
         autoDiscoverForm.label = '';
       }}>
+        <option value="openrouter">OpenRouter (Free Models)</option>
         <option value="nvidia">NVIDIA NIM</option>
         <option value="ollama">Ollama Cloud</option>
         <option value="custom">OpenAI-Compatible (Custom)</option>
       </Input>
+
+      {#if autoDiscoverForm.provider === 'openrouter'}
+        <div class="rounded-lg border border-indigo-500/20 bg-indigo-500/5 px-4 py-3 text-xs text-indigo-400 leading-relaxed">
+          🆓 Only <strong>free-tier models</strong> will be registered (those with a <code>:free</code> identifier). No paid models will be added. Get your API key at <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener noreferrer" class="underline">openrouter.ai/settings/keys</a>.
+        </div>
+      {/if}
 
       {#if autoDiscoverForm.provider === 'custom'}
         <Input type="text" label="Label (optional)" placeholder="e.g. Together AI, DeepInfra" bind:value={autoDiscoverForm.label} />
@@ -457,11 +470,18 @@
       <Input 
         type="password" 
         label="API Key" 
-        placeholder={autoDiscoverForm.provider === 'nvidia' ? 'nvapi-...' : autoDiscoverForm.provider === 'ollama' ? 'Ollama Cloud API key...' : 'Bearer API key...'} 
+        placeholder={
+          autoDiscoverForm.provider === 'nvidia' ? 'nvapi-...' :
+          autoDiscoverForm.provider === 'ollama' ? 'Ollama Cloud API key...' :
+          autoDiscoverForm.provider === 'openrouter' ? 'sk-or-v1-...' :
+          'Bearer API key...'
+        } 
         bind:value={autoDiscoverForm.api_key} 
       />
       
-      <Input type="text" label="Base URL" placeholder={autoDiscoverForm.provider === 'custom' ? 'https://api.together.xyz/v1' : ''} bind:value={autoDiscoverForm.base_url} />
+      {#if autoDiscoverForm.provider !== 'openrouter'}
+        <Input type="text" label="Base URL" placeholder={autoDiscoverForm.provider === 'custom' ? 'https://api.together.xyz/v1' : ''} bind:value={autoDiscoverForm.base_url} />
+      {/if}
       
       <Input type="number" label="Weight" min="1" bind:value={autoDiscoverForm.weight} />
     </div>
@@ -499,6 +519,7 @@
       <option value="anthropic">Anthropic</option>
       <option value="nvidia">NVIDIA</option>
       <option value="ollama">Ollama</option>
+      <option value="openrouter">OpenRouter</option>
       <option value="google">Google</option>
       <option value="custom">Custom</option>
     </Input>
@@ -574,5 +595,10 @@
     border-bottom: 2px solid #f97316;
   }
 
-
+  /* OpenRouter brand badge — indigo tone matching openrouter.ai visual identity */
+  :global(.badge-openrouter) {
+    background: rgba(99, 102, 241, 0.12);
+    color: #818cf8;
+    border: 1px solid rgba(99, 102, 241, 0.25);
+  }
 </style>

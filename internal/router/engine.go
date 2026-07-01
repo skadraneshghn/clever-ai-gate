@@ -209,6 +209,7 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		adminGroup.POST("/providers/nvidia", credHandler.RegisterNvidiaProvider)
 		adminGroup.POST("/providers/ollama", credHandler.RegisterOllamaProvider)
 		adminGroup.POST("/providers/custom", credHandler.RegisterCustomProvider)
+		adminGroup.POST("/providers/openrouter", credHandler.RegisterOpenRouterProvider)
 
 		// Live log streaming and daily log file download
 		if deps.LogHub != nil {
