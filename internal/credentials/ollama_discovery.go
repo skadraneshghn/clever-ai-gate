@@ -89,6 +89,23 @@ func DiscoverAndRegisterOllamaModels(ctx context.Context, db *pgxpool.Pool, vaul
 
 	var discoveredModels []string
 
+	// Find which pools already have this apiKey bound to avoid duplicates.
+	alreadyBound := make(map[int]bool)
+	rows, err := db.Query(ctx, `SELECT pool_id, encrypted_key FROM credentials WHERE provider = $1 AND base_url = $2`, "ollama", baseURL)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var poolID int
+			var encKey string
+			if err := rows.Scan(&poolID, &encKey); err == nil {
+				decrypted, decErr := vault.Decrypt(encKey)
+				if decErr == nil && decrypted == keyToEncrypt {
+					alreadyBound[poolID] = true
+				}
+			}
+		}
+	}
+
 	// Open a transaction block to safely write configuration
 	tx, err := db.Begin(ctx)
 	if err != nil {
@@ -137,14 +154,16 @@ func DiscoverAndRegisterOllamaModels(ctx context.Context, db *pgxpool.Pool, vaul
 			}
 
 			// Connect the discovered model pool directly to our Ollama instance credential
-			_, err = tx.Exec(ctx,
-				`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
-				 VALUES ($1, 'ollama', $2, $3, $4, true)
-				 ON CONFLICT DO NOTHING`, // prevents duplicates if the same account is submitted twice
-				poolID, encryptedKey, baseURL, weight,
-			)
-			if err != nil {
-				return 0, nil, fmt.Errorf("failed to bind credential to pool %s: %w", modelPattern, err)
+			if !alreadyBound[poolID] {
+				_, err = tx.Exec(ctx,
+					`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
+					 VALUES ($1, 'ollama', $2, $3, $4, true)`,
+					poolID, encryptedKey, baseURL, weight,
+				)
+				if err != nil {
+					return 0, nil, fmt.Errorf("failed to bind credential to pool %s: %w", modelPattern, err)
+				}
+				alreadyBound[poolID] = true
 			}
 
 			discoveredModels = append(discoveredModels, modelPattern)

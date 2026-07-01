@@ -30,25 +30,27 @@ type ActiveModel struct {
 // fire a notification. This manager receives it and atomically swaps the
 // affected routing pool in cache — zero downtime, zero lock contention.
 type SyncManager struct {
-	pool   *pgxpool.Pool
-	cache  *cache.Store
-	vault  *Vault
-	logger *zap.Logger
-	pools  atomic.Pointer[map[string]*BalancedChannelPool] // Atomic pointer for lock-free reads
-	ctx    context.Context
-	cancel context.CancelFunc
+	pool       *pgxpool.Pool
+	cache      *cache.Store
+	vault      *Vault
+	logger     *zap.Logger
+	pools      atomic.Pointer[map[string]*BalancedChannelPool] // Atomic pointer for lock-free reads
+	ctx        context.Context
+	cancel     context.CancelFunc
+	reloadChan chan string // Queues notifications for debounced reload execution
 }
 
 // NewSyncManager creates a new configuration sync manager.
 func NewSyncManager(pool *pgxpool.Pool, cacheStore *cache.Store, vault *Vault, logger *zap.Logger) *SyncManager {
 	ctx, cancel := context.WithCancel(context.Background())
 	sm := &SyncManager{
-		pool:   pool,
-		cache:  cacheStore,
-		vault:  vault,
-		logger: logger,
-		ctx:    ctx,
-		cancel: cancel,
+		pool:       pool,
+		cache:      cacheStore,
+		vault:      vault,
+		logger:     logger,
+		ctx:        ctx,
+		cancel:     cancel,
+		reloadChan: make(chan string, 100),
 	}
 	// Initialize with empty map
 	emptyMap := make(map[string]*BalancedChannelPool)
@@ -180,6 +182,7 @@ func (sm *SyncManager) loadTenants(ctx context.Context) error {
 // Gap 3 Fix: The listener goroutine is wrapped in a panic defender
 // to prevent config reload errors from crashing the gateway container.
 func (sm *SyncManager) StartListener() {
+	go sm.debouncer()
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -244,19 +247,59 @@ func (sm *SyncManager) listen() error {
 
 		tableName := parts[0]
 
-		// Reload the affected data
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		switch tableName {
-		case "model_pools", "credentials":
-			if err := sm.reloadPools(ctx); err != nil {
-				sm.logger.Error("failed to reload pools", zap.Error(err))
-			}
-		case "tenants":
-			if err := sm.loadTenants(ctx); err != nil {
-				sm.logger.Error("failed to reload tenants", zap.Error(err))
-			}
+		// Queue the notification to the debounced processor
+		select {
+		case sm.reloadChan <- tableName:
+		default:
+			// Buffer full, skip (already pending)
 		}
-		cancel()
+	}
+}
+
+// debouncer aggregates configuration updates in a sliding 100ms quiet window
+// to prevent notification storms when batch inserts occur (e.g. provider discovery).
+func (sm *SyncManager) debouncer() {
+	var (
+		timer          *time.Timer
+		pendingPools   bool
+		pendingTenants bool
+	)
+	for {
+		select {
+		case <-sm.ctx.Done():
+			return
+		case tableName := <-sm.reloadChan:
+			if tableName == "model_pools" || tableName == "credentials" {
+				pendingPools = true
+			} else if tableName == "tenants" {
+				pendingTenants = true
+			}
+			if timer != nil {
+				timer.Stop()
+			}
+			timer = time.NewTimer(100 * time.Millisecond)
+		case <-func() <-chan time.Time {
+			if timer == nil {
+				return nil
+			}
+			return timer.C
+		}():
+			timer = nil
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if pendingPools {
+				if err := sm.reloadPools(ctx); err != nil {
+					sm.logger.Error("failed to reload pools", zap.Error(err))
+				}
+				pendingPools = false
+			}
+			if pendingTenants {
+				if err := sm.loadTenants(ctx); err != nil {
+					sm.logger.Error("failed to reload tenants", zap.Error(err))
+				}
+				pendingTenants = false
+			}
+			cancel()
+		}
 	}
 }
 

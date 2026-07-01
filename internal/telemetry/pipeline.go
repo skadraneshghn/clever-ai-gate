@@ -6,6 +6,8 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -338,11 +340,24 @@ func (p *Pipeline) flush(batch []*LogEntry) {
 
 		// Calculate deterministic embedding and persist vector log
 		embedding := database.GenerateEmbedding(entry.Prompt)
+
+		// Convert []float32 to vector format for postgres pgvector (e.g. "[0.12,0.34,...]")
+		var sb strings.Builder
+		sb.WriteString("[")
+		for i, val := range embedding {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString(strconv.FormatFloat(float64(val), 'f', -1, 32))
+		}
+		sb.WriteString("]")
+		vectorStr := sb.String()
+
 		_, err = tx.Exec(ctx, `
 			INSERT INTO request_vector_logs (log_id, prompt_text, response_text, prompt_embedding)
 			VALUES ($1, $2, $3, $4)
 			ON CONFLICT (log_id) DO NOTHING
-		`, logID, entry.Prompt, entry.Response, embedding)
+		`, logID, entry.Prompt, entry.Response, vectorStr)
 		if err != nil {
 			p.logger.Error("failed to insert vector log", zap.Error(err))
 		}

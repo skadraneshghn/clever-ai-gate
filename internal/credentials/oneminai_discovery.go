@@ -42,7 +42,22 @@ func DiscoverAndRegisterOneMinAIModels(ctx context.Context, db *pgxpool.Pool, va
 		return 0, nil, fmt.Errorf("vault encryption failed: %w", err)
 	}
 
-	manifest := OneMinAIManifest()
+	// 2.5 Find which pools already have this apiKey bound to avoid duplicates.
+	alreadyBound := make(map[int]bool)
+	rows, err := db.Query(ctx, `SELECT pool_id, encrypted_key FROM credentials WHERE provider = $1`, "1minai")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var poolID int
+			var encKey string
+			if err := rows.Scan(&poolID, &encKey); err == nil {
+				decrypted, decErr := vault.Decrypt(encKey)
+				if decErr == nil && decrypted == apiKey {
+					alreadyBound[poolID] = true
+				}
+			}
+		}
+	}
 
 	// 3. Open a transaction to atomically write all pools and credentials
 	tx, err := db.Begin(ctx)
@@ -52,6 +67,8 @@ func DiscoverAndRegisterOneMinAIModels(ctx context.Context, db *pgxpool.Pool, va
 	defer tx.Rollback(ctx) //nolint:errcheck — intentional deferred cleanup
 
 	var discoveredModels []string
+
+	manifest := OneMinAIManifest()
 
 	for _, entry := range manifest {
 		// Each manifest entry is registered under two pool patterns:
@@ -97,15 +114,17 @@ func DiscoverAndRegisterOneMinAIModels(ctx context.Context, db *pgxpool.Pool, va
 				return 0, nil, fmt.Errorf("failed to upsert model pool for %s: %w", modelPattern, err)
 			}
 
-			// 6. Bind the 1min.ai credential to this pool (idempotent via ON CONFLICT)
-			_, err = tx.Exec(ctx,
-				`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
-				 VALUES ($1, '1minai', $2, $3, $4, true)
-				 ON CONFLICT DO NOTHING`,
-				poolID, encryptedKey, OneMinAIBaseURL, weight,
-			)
-			if err != nil {
-				return 0, nil, fmt.Errorf("failed to bind credential for pool %s: %w", modelPattern, err)
+			// 6. Bind the 1min.ai credential to this pool (idempotent)
+			if !alreadyBound[poolID] {
+				_, err = tx.Exec(ctx,
+					`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
+					 VALUES ($1, '1minai', $2, $3, $4, true)`,
+					poolID, encryptedKey, OneMinAIBaseURL, weight,
+				)
+				if err != nil {
+					return 0, nil, fmt.Errorf("failed to bind credential for pool %s: %w", modelPattern, err)
+				}
+				alreadyBound[poolID] = true
 			}
 
 			discoveredModels = append(discoveredModels, modelPattern)

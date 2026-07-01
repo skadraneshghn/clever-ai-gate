@@ -107,6 +107,10 @@ func translateOneMinAICode(entry credentials.OneMinAIModelEntry, body []byte) ([
 func translateOneMinAIImage(entry credentials.OneMinAIModelEntry, body []byte) ([]byte, string, error) {
 	prompt, _ := jsonparser.GetString(body, "prompt")
 	if prompt == "" {
+		// Fallback: extract prompt from messages (in case of chat completions request)
+		prompt = buildPromptFromMessages(body)
+	}
+	if prompt == "" {
 		return nil, "", fmt.Errorf("missing 'prompt' field in image generation request")
 	}
 
@@ -169,6 +173,10 @@ func openAISizeToAspectRatio(size string) string {
 // Uses "text" field name (not "prompt") per the 1min.ai TTS API spec.
 func translateOneMinAITTS(entry credentials.OneMinAIModelEntry, body []byte) ([]byte, string, error) {
 	input, _ := jsonparser.GetString(body, "input")
+	if input == "" {
+		// Fallback: extract input from messages (in case of chat completions request)
+		input = buildPromptFromMessages(body)
+	}
 	if input == "" {
 		return nil, "", fmt.Errorf("missing 'input' field in TTS request")
 	}
@@ -294,6 +302,10 @@ func translateOneMinAIVideo(entry credentials.OneMinAIModelEntry, body []byte) (
 	if prompt == "" {
 		// Fall back to "input" field for compatibility
 		prompt, _ = jsonparser.GetString(body, "input")
+	}
+	if prompt == "" {
+		// Fallback: extract prompt from messages (in case of chat completions request)
+		prompt = buildPromptFromMessages(body)
 	}
 	if prompt == "" {
 		return nil, "", fmt.Errorf("missing 'prompt' field in video generation request")

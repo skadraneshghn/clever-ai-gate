@@ -240,7 +240,7 @@ func oneminaiPath(baseURL, requestPath, model string) string {
 	if strings.Contains(requestPath, "/chat/completions") ||
 		strings.Contains(requestPath, "/completions") {
 		if entry, ok := credentials.LookupOneMinAIModel(model); ok {
-			if entry.Modality == "code" || entry.Modality == "video" {
+			if entry.Modality != "chat" {
 				return baseURL + "/api/features"
 			}
 		}

@@ -88,6 +88,23 @@ func DiscoverAndRegisterCustomModels(ctx context.Context, db *pgxpool.Pool, vaul
 
 	var discoveredModels []string
 
+	// Find which pools already have this apiKey bound to avoid duplicates.
+	alreadyBound := make(map[int]bool)
+	rows, err := db.Query(ctx, `SELECT pool_id, encrypted_key FROM credentials WHERE provider = $1 AND base_url = $2 AND COALESCE(prefix,'') = $3`, providerLabel, baseURL, prefix)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var poolID int
+			var encKey string
+			if err := rows.Scan(&poolID, &encKey); err == nil {
+				decrypted, decErr := vault.Decrypt(encKey)
+				if decErr == nil && decrypted == apiKey {
+					alreadyBound[poolID] = true
+				}
+			}
+		}
+	}
+
 	// 2. Open a transaction to safely register all models
 	tx, err := db.Begin(ctx)
 	if err != nil {
@@ -147,15 +164,16 @@ func DiscoverAndRegisterCustomModels(ctx context.Context, db *pgxpool.Pool, vaul
 			}
 
 			// Bind the credential to the pool.
-			// ON CONFLICT prevents duplicates if the same key is submitted twice.
-			_, err = tx.Exec(ctx,
-				`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy, prefix)
-				 VALUES ($1, $2, $3, $4, $5, true, $6)
-				 ON CONFLICT DO NOTHING`,
-				poolID, providerLabel, encryptedKey, baseURL, weight, prefix,
-			)
-			if err != nil {
-				return 0, nil, fmt.Errorf("failed to bind credential to pool %s: %w", modelPattern, err)
+			if !alreadyBound[poolID] {
+				_, err = tx.Exec(ctx,
+					`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy, prefix)
+					 VALUES ($1, $2, $3, $4, $5, true, $6)`,
+					poolID, providerLabel, encryptedKey, baseURL, weight, prefix,
+				)
+				if err != nil {
+					return 0, nil, fmt.Errorf("failed to bind credential to pool %s: %w", modelPattern, err)
+				}
+				alreadyBound[poolID] = true
 			}
 
 			discoveredModels = append(discoveredModels, modelPattern)
