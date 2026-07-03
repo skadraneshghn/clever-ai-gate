@@ -79,51 +79,41 @@ func DiscoverAndRegisterPuterModels(ctx context.Context, db *pgxpool.Pool, vault
 			continue
 		}
 
-		// Register two patterns:
-		// 1. Prefixed: e.g. "puter/gpt-4o-mini"
-		// 2. Clean: e.g. "gpt-4o-mini"
-		fullSlug := "puter/" + m.ID
-		cleanSlug := m.ID
+		// Register only the prefixed pattern: e.g. "puter/gpt-4o-mini"
+		modelPattern := "puter/" + m.ID
 
-		patterns := []string{fullSlug}
-		if cleanSlug != fullSlug {
-			patterns = append(patterns, cleanSlug)
+		caps := ClassifyModel(modelPattern)
+		capsJSON, err := json.Marshal(caps.ToMap())
+		if err != nil {
+			capsJSON = []byte("{}")
 		}
 
-		for _, modelPattern := range patterns {
-			caps := ClassifyModel(modelPattern)
-			capsJSON, err := json.Marshal(caps.ToMap())
-			if err != nil {
-				capsJSON = []byte("{}")
-			}
-
-			var poolID int
-			err = tx.QueryRow(ctx,
-				`INSERT INTO model_pools (model_pattern, strategy, capabilities)
-				 VALUES ($1, 'round-robin', $2)
-				 ON CONFLICT (model_pattern) DO UPDATE
-				 SET capabilities = EXCLUDED.capabilities
-				 RETURNING id`,
-				modelPattern, capsJSON,
-			).Scan(&poolID)
-			if err != nil {
-				return 0, nil, fmt.Errorf("failed to upsert model pool for %s: %w", modelPattern, err)
-			}
-
-			if !alreadyBound[poolID] {
-				_, err = tx.Exec(ctx,
-					`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
-					 VALUES ($1, 'puter', $2, $3, $4, true)`,
-					poolID, encryptedKey, PuterBaseURL, weight,
-				)
-				if err != nil {
-					return 0, nil, fmt.Errorf("failed to bind credential for pool %s: %w", modelPattern, err)
-				}
-				alreadyBound[poolID] = true
-			}
-
-			discoveredModels = append(discoveredModels, modelPattern)
+		var poolID int
+		err = tx.QueryRow(ctx,
+			`INSERT INTO model_pools (model_pattern, strategy, capabilities)
+			 VALUES ($1, 'round-robin', $2)
+			 ON CONFLICT (model_pattern) DO UPDATE
+			 SET capabilities = EXCLUDED.capabilities
+			 RETURNING id`,
+			modelPattern, capsJSON,
+		).Scan(&poolID)
+		if err != nil {
+			return 0, nil, fmt.Errorf("failed to upsert model pool for %s: %w", modelPattern, err)
 		}
+
+		if !alreadyBound[poolID] {
+			_, err = tx.Exec(ctx,
+				`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
+				 VALUES ($1, 'puter', $2, $3, $4, true)`,
+				poolID, encryptedKey, PuterBaseURL, weight,
+			)
+			if err != nil {
+				return 0, nil, fmt.Errorf("failed to bind credential for pool %s: %w", modelPattern, err)
+			}
+			alreadyBound[poolID] = true
+		}
+
+		discoveredModels = append(discoveredModels, modelPattern)
 	}
 
 	if _, err = tx.Exec(ctx, "NOTIFY config_change, 'model_pools:reload'"); err != nil {
