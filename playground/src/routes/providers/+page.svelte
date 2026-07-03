@@ -145,6 +145,8 @@
       endpoint = '/api/v1/admin/providers/1minai';
     } else if (autoDiscoverForm.provider === 'cloudflare') {
       endpoint = '/api/v1/admin/providers/cloudflare';
+    } else if (autoDiscoverForm.provider === 'sarvam') {
+      endpoint = '/api/v1/admin/providers/sarvam';
     } else {
       endpoint = '/api/v1/admin/providers/custom';
     }
@@ -179,6 +181,7 @@
           ? (autoDiscoverForm.label || 'Custom')
           : autoDiscoverForm.provider === '1minai' ? '1min.ai'
           : autoDiscoverForm.provider === 'cloudflare' ? 'Cloudflare Workers AI'
+          : autoDiscoverForm.provider === 'sarvam' ? 'Sarvam AI'
           : autoDiscoverForm.provider.toUpperCase();
         appState.addToast('success', `Successfully synchronized ${data.models_count || 0} ${displayName} models`);
         showAddProviderModal = false;
@@ -313,6 +316,7 @@
       case 'openrouter': return 'badge-openrouter';
       case '1minai': return 'badge-1minai';
       case 'cloudflare': return 'badge-cloudflare';
+      case 'sarvam': return 'badge-sarvam';
       case 'custom': return 'badge-custom';
       default: return 'badge-default';
     }
@@ -542,6 +546,7 @@
         <option value="openrouter">OpenRouter</option>
         <option value="1minai">1min.ai</option>
         <option value="cloudflare">Cloudflare Workers AI</option>
+        <option value="sarvam">Sarvam AI</option>
         <option value="google">Google</option>
         <option value="custom">Custom</option>
       </Input>
@@ -567,6 +572,8 @@
           autoDiscoverForm.base_url = 'https://api.1min.ai';
         } else if (autoDiscoverForm.provider === 'cloudflare') {
           autoDiscoverForm.base_url = '';
+        } else if (autoDiscoverForm.provider === 'sarvam') {
+          autoDiscoverForm.base_url = 'https://api.sarvam.ai';
         } else {
           autoDiscoverForm.base_url = '';
         }
@@ -580,6 +587,7 @@
         <option value="ollama">Ollama Cloud</option>
         <option value="1minai">1min.ai (Multi-Modal)</option>
         <option value="cloudflare">Cloudflare Workers AI</option>
+        <option value="sarvam">Sarvam AI</option>
         <option value="custom">OpenAI-Compatible (Custom)</option>
       </Input>
 
@@ -598,6 +606,12 @@
       {#if autoDiscoverForm.provider === 'cloudflare'}
         <div class="rounded-lg border border-orange-500/20 bg-orange-500/5 px-4 py-3 text-xs text-orange-400 leading-relaxed">
           ☁️ <strong>Cloudflare Workers AI</strong> requires your <strong>Account ID</strong> and an <strong>API Token</strong> with Workers AI permissions. All available models (Text, Image, Audio, Embeddings) are discovered automatically. Find your Account ID and create an API token at <a href="https://dash.cloudflare.com" target="_blank" rel="noopener noreferrer" class="underline">dash.cloudflare.com</a>.
+        </div>
+      {/if}
+
+      {#if autoDiscoverForm.provider === 'sarvam'}
+        <div class="rounded-lg border border-purple-500/20 bg-purple-500/5 px-4 py-3 text-xs text-purple-400 leading-relaxed">
+          🇮🇳 <strong>Sarvam AI</strong> is a premium AI provider in India. It offers a static set of chat models (<code>sarvam-30b</code>, <code>sarvam-105b</code>) and supports reasoning. Discovery is instant and uses a hardcoded manifest. Get your API subscription key at <a href="https://dashboard.sarvam.ai" target="_blank" rel="noopener noreferrer" class="underline">dashboard.sarvam.ai</a>.
         </div>
       {/if}
 
@@ -628,12 +642,13 @@
             autoDiscoverForm.provider === 'ollama' ? 'Ollama Cloud API key...' :
             autoDiscoverForm.provider === 'openrouter' ? 'sk-or-v1-...' :
             autoDiscoverForm.provider === '1minai' ? '1min.ai API key...' :
+            autoDiscoverForm.provider === 'sarvam' ? 'Sarvam API key (api-subscription-key)...' :
             'Bearer API key...'
           } 
           bind:value={autoDiscoverForm.api_key} 
         />
         
-        {#if autoDiscoverForm.provider !== 'openrouter' && autoDiscoverForm.provider !== '1minai'}
+        {#if autoDiscoverForm.provider !== 'openrouter' && autoDiscoverForm.provider !== '1minai' && autoDiscoverForm.provider !== 'sarvam'}
           <Input type="text" label="Base URL" placeholder={autoDiscoverForm.provider === 'custom' ? 'https://api.together.xyz/v1' : ''} bind:value={autoDiscoverForm.base_url} />
         {/if}
       {/if}
@@ -677,6 +692,7 @@
       <option value="openrouter">OpenRouter</option>
       <option value="1minai">1min.ai</option>
       <option value="cloudflare">Cloudflare Workers AI</option>
+      <option value="sarvam">Sarvam AI</option>
       <option value="google">Google</option>
       <option value="custom">Custom</option>
     </Input>
@@ -796,5 +812,12 @@
     background: rgba(249, 115, 22, 0.12);
     color: #fb923c;
     border: 1px solid rgba(249, 115, 22, 0.25);
+  }
+
+  /* Sarvam AI brand badge — purple/violet tone */
+  :global(.badge-sarvam) {
+    background: rgba(167, 139, 250, 0.12);
+    color: #a78bfa;
+    border: 1px solid rgba(167, 139, 250, 0.25);
   }
 </style>

@@ -513,7 +513,7 @@
           {#each poolDetails.credentials as cred}
             <Card variant="filled" padding="sm" class="member-card relative hover:border-[#f97316] transition-all">
               <div class="flex items-center justify-between gap-4 mb-2">
-                <span class="provider-badge text-xs font-bold py-1 px-2.5 rounded-lg {cred.provider === 'openai' ? 'badge-openai' : cred.provider === 'nvidia' ? 'badge-nvidia' : 'badge-default'}">
+                <span class="provider-badge text-xs font-bold py-1 px-2.5 rounded-lg badge-{cred.provider}">
                   {cred.provider}
                 </span>
                 
@@ -690,7 +690,7 @@
                     {log.tenant_name || log.tenant_id || 'System'}
                   </td>
                   <td>
-                    <span class="provider-badge text-[10px] font-bold py-1 px-2 rounded-lg {log.provider === 'openai' ? 'badge-openai' : log.provider === 'nvidia' ? 'badge-nvidia' : 'badge-default'}">
+                    <span class="provider-badge text-[10px] font-bold py-1 px-2 rounded-lg badge-{log.provider}">
                       {log.provider}
                     </span>
                   </td>

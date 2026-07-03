@@ -69,6 +69,9 @@ func NewRewriter() *Rewriter {
 	// Cloudflare Workers AI: OpenAI-compatible completions + universal run endpoint
 	r.pathTransformers["cloudflare"] = cloudflarePath
 
+	// Sarvam AI: natively OpenAI-compatible (POST /v1/chat/completions, SSE streaming)
+	r.pathTransformers["sarvam"] = passthroughPath
+
 	return r
 }
 
@@ -138,6 +141,13 @@ func (r *Rewriter) RewriteHeaders(req *http.Request, provider, apiKey string, so
 	case "1minai":
 		// 1min.ai uses a custom API-KEY header (not Bearer)
 		req.Header.Set("API-KEY", apiKey)
+
+	case "sarvam":
+		// Sarvam prefers the api-subscription-key header but also accepts
+		// Authorization: Bearer on all endpoints. Send both for bulletproof
+		// auth regardless of backend routing changes at Sarvam.
+		req.Header.Set("api-subscription-key", apiKey)
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	default:
 		// OpenAI and OpenAI-compatible providers
@@ -223,11 +233,11 @@ func coherePath(baseURL, requestPath, _ string) string {
 
 // oneminaiPath transforms OpenAI-compatible paths to 1min.ai's Feature API format.
 //
-//   /v1/chat/completions  → /api/chat-with-ai  (chat models)
-//                        → /api/features       (code & video models)
-//   /v1/images/generations → /api/features      (image models)
-//   /v1/audio/speech       → /api/features      (TTS models)
-//   /v1/audio/transcriptions → /api/features    (STT models)
+//	/v1/chat/completions  → /api/chat-with-ai  (chat models)
+//	                     → /api/features       (code & video models)
+//	/v1/images/generations → /api/features      (image models)
+//	/v1/audio/speech       → /api/features      (TTS models)
+//	/v1/audio/transcriptions → /api/features    (STT models)
 //
 // The modality is determined by looking up the model in the 1min.ai manifest.
 // Code and video models are routed to /api/features even when the incoming
@@ -257,9 +267,9 @@ func oneminaiPath(baseURL, requestPath, model string) string {
 // ollamaPath routes requests to the correct Ollama endpoint based on the
 // base URL. Ollama Cloud (https://ollama.com) exposes a native REST API:
 //
-//   /v1/chat/completions  → /api/chat
-//   /v1/completions       → /api/generate
-//   /v1/embeddings        → /api/embeddings
+//	/v1/chat/completions  → /api/chat
+//	/v1/completions       → /api/generate
+//	/v1/embeddings        → /api/embeddings
 //
 // Local Ollama instances (http://localhost:11434 or custom self-hosted) expose
 // an OpenAI-compatible API at /v1/*, so we fall through to passthroughPath.
@@ -290,13 +300,13 @@ func ollamaPath(baseURL, requestPath, _ string) string {
 //
 // Two downstream paths exist:
 //
-//   Text completions (/v1/chat/completions, /v1/completions):
-//     → https://api.cloudflare.com/client/v4/accounts/{accountID}/ai/v1/chat/completions
-//     (Cloudflare's native OpenAI-compatible endpoint, supports streaming SSE)
+//	Text completions (/v1/chat/completions, /v1/completions):
+//	  → https://api.cloudflare.com/client/v4/accounts/{accountID}/ai/v1/chat/completions
+//	  (Cloudflare's native OpenAI-compatible endpoint, supports streaming SSE)
 //
-//   All other paths (/v1/embeddings, /v1/images/generations, /v1/audio/*):
-//     → https://api.cloudflare.com/client/v4/accounts/{accountID}/ai/run/{model}
-//     (Cloudflare's universal inference endpoint)
+//	All other paths (/v1/embeddings, /v1/images/generations, /v1/audio/*):
+//	  → https://api.cloudflare.com/client/v4/accounts/{accountID}/ai/run/{model}
+//	  (Cloudflare's universal inference endpoint)
 func cloudflarePath(baseURL, requestPath, model string) string {
 	// Parse the account ID from the stored base_url convention.
 	accountID := strings.TrimPrefix(baseURL, "cloudflare:")

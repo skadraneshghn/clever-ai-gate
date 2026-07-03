@@ -7,8 +7,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
-	swaggerFiles "github.com/swaggo/files"
-	ginSwagger "github.com/swaggo/gin-swagger"
 	"github.com/skadraneshghn/clever-ai-gate/api/admin"
 	"github.com/skadraneshghn/clever-ai-gate/internal/cache"
 	"github.com/skadraneshghn/clever-ai-gate/internal/config"
@@ -19,6 +17,8 @@ import (
 	"github.com/skadraneshghn/clever-ai-gate/internal/proxy"
 	"github.com/skadraneshghn/clever-ai-gate/internal/redisclient"
 	"github.com/skadraneshghn/clever-ai-gate/internal/telemetry"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
 	"go.uber.org/zap"
 )
 
@@ -214,6 +214,7 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		adminGroup.POST("/providers/openrouter", credHandler.RegisterOpenRouterProvider)
 		adminGroup.POST("/providers/1minai", credHandler.RegisterOneMinAIProvider)
 		adminGroup.POST("/providers/cloudflare", credHandler.RegisterCloudflareProvider)
+		adminGroup.POST("/providers/sarvam", credHandler.RegisterSarvamProvider)
 		// Re-run discovery for ALL existing provider keys → provisions clean alias pools
 		adminGroup.POST("/providers/refresh", credHandler.RefreshAllProviders)
 

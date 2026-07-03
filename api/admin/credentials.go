@@ -579,6 +579,62 @@ func (h *CredentialHandler) RegisterCloudflareProvider(c *gin.Context) {
 	})
 }
 
+// RegisterSarvamProvider auto-discovers all Sarvam AI chat models available under
+// an API subscription key, creates model pools for each, and binds the credential
+// to all of them in one transaction.
+//
+// Sarvam AI is natively OpenAI-compatible (POST /v1/chat/completions, SSE
+// streaming, reasoning_content) but does not expose a /v1/models endpoint — the
+// chat model enum is fixed (sarvam-30b, sarvam-105b), so discovery uses a static
+// manifest. Adding the provider requires only the API key; the base URL is
+// hardcoded to https://api.sarvam.ai.
+//
+// @Summary      Auto-discover Sarvam AI Models
+// @Description  Submits a Sarvam AI key, validates it, and registers all OpenAI-compatible chat models automatically
+// @Tags         Credentials
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        body  body      dto.DiscoverSarvamRequest  true  "Sarvam AI provider details (api_key required)"
+// @Success      200   {object}  dto.DiscoverProviderResponse
+// @Failure      400   {object}  dto.ErrorResponse
+// @Failure      500   {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/providers/sarvam [post]
+func (h *CredentialHandler) RegisterSarvamProvider(c *gin.Context) {
+	var req dto.DiscoverSarvamRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
+		return
+	}
+
+	if req.APIKey == "" {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "api_key is required for Sarvam AI auto-discovery"})
+		return
+	}
+
+	if req.Weight <= 0 {
+		req.Weight = 1
+	}
+
+	count, models, err := credentials.DiscoverAndRegisterSarvamModels(
+		c.Request.Context(),
+		h.db,
+		h.vault,
+		req.APIKey,
+		req.Weight,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Sarvam AI auto-discovery failed", Details: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.DiscoverProviderResponse{
+		Message:       fmt.Sprintf("Successfully synchronized %d Sarvam AI models", count),
+		ModelsCount:   count,
+		DiscoveredIDs: models,
+	})
+}
+
 // RefreshAllProviders re-runs auto-discovery for every distinct provider key
 // already registered in the database. This is the "sync all" action: it reads
 // every unique (provider, encrypted_key, base_url, prefix) combination from the
@@ -591,6 +647,8 @@ func (h *CredentialHandler) RegisterCloudflareProvider(c *gin.Context) {
 //   - ollama    → DiscoverAndRegisterOllamaModels
 //   - openrouter → DiscoverAndRegisterOpenRouterModels
 //   - 1minai    → DiscoverAndRegisterOneMinAIModels
+//   - cloudflare → DiscoverAndRegisterCloudflareModels
+//   - sarvam    → DiscoverAndRegisterSarvamModels
 //   - all others → DiscoverAndRegisterCustomModels (any OpenAI-compatible)
 //
 // Results are aggregated across all provider accounts and returned as a single
@@ -700,6 +758,10 @@ func (h *CredentialHandler) RefreshAllProviders(c *gin.Context) {
 			count, discovered, discErr = credentials.DiscoverAndRegisterCloudflareModels(
 				ctx, h.db, h.vault, accountID, apiKey, weight)
 
+		case "sarvam":
+			count, discovered, discErr = credentials.DiscoverAndRegisterSarvamModels(
+				ctx, h.db, h.vault, apiKey, weight)
+
 		default:
 			// Any OpenAI-compatible provider (openai, anthropic, deepseek, custom, …)
 			count, discovered, discErr = credentials.DiscoverAndRegisterCustomModels(
@@ -758,4 +820,3 @@ func (h *CredentialHandler) BulkDelete(c *gin.Context) {
 
 	c.JSON(http.StatusOK, dto.SuccessResponse{Message: fmt.Sprintf("%d credentials deleted successfully", len(req.IDs))})
 }
-

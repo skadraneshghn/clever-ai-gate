@@ -64,15 +64,15 @@ func NewHandler(client *http.Client, cacheStore *cache.Store, logger *zap.Logger
 	return h
 }
 
-
 // proxyContext carries extracted fields through the hot-path without allocations.
 type proxyContext struct {
 	model        string
 	isStream     bool
-	isNvidia     bool   // True when model uses nvidia/ prefix — triggers reasoning injection
-	isOneMinAI   bool   // True when model uses 1min/ prefix — triggers body/response translation
-	isCloudflare bool   // True when model uses cloudflare/ prefix — triggers prefix stripping
-	body          []byte
+	isNvidia     bool // True when model uses nvidia/ prefix — triggers reasoning injection
+	isOneMinAI   bool // True when model uses 1min/ prefix — triggers body/response translation
+	isCloudflare bool // True when model uses cloudflare/ prefix — triggers prefix stripping
+	isSarvam     bool // True when model uses sarvam/ prefix — triggers prefix stripping
+	body         []byte
 	credential   *credentials.AcquireResult
 	pool         *credentials.BalancedChannelPool
 	tenantID     string
@@ -222,6 +222,19 @@ func (h *Handler) Handle(c *gin.Context) {
 		)
 	}
 
+	// --- Sarvam AI Prefix Detection ---
+	// Models prefixed with "sarvam/" are routed to Sarvam AI. The prefix is
+	// stripped from the JSON body before forwarding so the upstream Sarvam API
+	// receives the clean model name (e.g. "sarvam-105b"). Sarvam is natively
+	// OpenAI-compatible, so no body/response translation or transmuxer is needed.
+	isSarvam := false
+	if strings.HasPrefix(model, "sarvam/") {
+		isSarvam = true
+		h.logger.Debug("sarvam ai model detected",
+			zap.String("model", model),
+		)
+	}
+
 	// --- Access log: first thing we know enough to emit a useful Info entry ---
 	// This fires for EVERY request and is the primary tool for diagnosing
 	// Kilo Code instability: you can see exactly what model/tenant/path was
@@ -238,6 +251,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		zap.Bool("is_ollama", strings.HasPrefix(model, "ollama/")),
 		zap.Bool("is_1minai", isOneMinAI),
 		zap.Bool("is_cloudflare", isCloudflare),
+		zap.Bool("is_sarvam", isSarvam),
 		zap.Int("body_bytes", len(body)),
 		zap.String("client_ip", c.ClientIP()),
 	)
@@ -310,6 +324,23 @@ func (h *Handler) Handle(c *gin.Context) {
 		body = bytes.Replace(body, oldToken, newToken, 1)
 	}
 
+	// --- Sarvam AI Payload Sanitization ---
+	// For Sarvam-prefixed models the "sarvam/" routing prefix must be stripped
+	// from the JSON "model" field so the upstream Sarvam API receives the clean
+	// model name (e.g. "sarvam-105b"). Uses the same single-pass O(n) byte-level
+	// replacement as nvidia/ollama/cloudflare.
+	//
+	// Note: stripping of OpenAI-only request fields that Sarvam's strict schema
+	// rejects (stream_options, logprobs, …) is performed in forwardRequest,
+	// gated on cred.Provider == "sarvam", so it covers BOTH the prefixed and
+	// the clean-alias routing forms.
+	if isSarvam {
+		upstreamModel := strings.TrimPrefix(model, "sarvam/")
+		oldToken := []byte(`"` + model + `"`)
+		newToken := []byte(`"` + upstreamModel + `"`)
+		body = bytes.Replace(body, oldToken, newToken, 1)
+	}
+
 	// Step 5-8: Attempt with automatic failover
 	// Note: The FULL body (not scanSlice) is forwarded to the upstream provider.
 	// Only the metadata extraction was bounded — the binary payload is piped as-is.
@@ -319,6 +350,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		isNvidia:     isNvidia,
 		isOneMinAI:   isOneMinAI,
 		isCloudflare: isCloudflare,
+		isSarvam:     isSarvam,
 		body:         body,
 		pool:         pool,
 	}
@@ -348,7 +380,6 @@ type attemptRecord struct {
 	statusCode int
 	credID     int
 }
-
 
 // executeWithRetry attempts the proxy request, cycling through ALL credentials
 // in the pool before giving up.
@@ -683,6 +714,39 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		contentTypeOverride = ctOverride
 	}
 
+	// --- Cloudflare Workers AI Request Body Translation ---
+	// Cloudflare's /ai/run/{model} text-to-image endpoint rejects unknown
+	// OpenAI fields (model, n, size, response_format) with an "Invalid input"
+	// (code 8002) error. We translate image-generation requests down to the
+	// bare {"prompt":"..."} body Cloudflare expects. Chat completions are
+	// served via Cloudflare's OpenAI-compatible /ai/v1 endpoint and pass
+	// through unchanged.
+	if cred.Provider == "cloudflare" && isCloudflareImageRequest(c.Request.URL.Path) {
+		translated, ctOverride, trErr := translateCloudflareImageRequest(bodyBytes)
+		if trErr != nil {
+			h.logger.Error("cloudflare request translation failed",
+				zap.String("model", pctx.model),
+				zap.Error(trErr),
+			)
+			return http.StatusInternalServerError, upstreamURL, nil, trErr
+		}
+		bodyBytes = translated
+		contentTypeOverride = ctOverride
+	}
+
+	// --- Sarvam AI Request Sanitization ---
+	// Sarvam's chat-completions schema is a strict subset of OpenAI's. Unknown
+	// top-level fields (stream_options, logprobs, service_tier, …) are rejected
+	// with HTTP 422, which the gateway would otherwise mis-attribute to a broken
+	// key (20–30 min cooldown per credential). Strip them here so any
+	// OpenAI-compatible frontend works with Sarvam unchanged. This runs for BOTH
+	// routing forms (prefixed "sarvam/…" and clean alias) since it is gated on
+	// the resolved credential's provider, not the model prefix. The common
+	// clean-request path is allocation-free (fast presence probe).
+	if cred.Provider == "sarvam" {
+		bodyBytes = sanitizeSarvamRequest(bodyBytes)
+	}
+
 	upstreamURL = h.rewriter.RewriteURL(cred.Provider, cred.BaseURL, c.Request.URL.Path, modelName)
 
 	// --- 1min.ai Streaming ---
@@ -753,7 +817,7 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
 		c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
 		responseText, completionTokens := h.stream.ProxyStream(c, resp, cred.Provider)
-		
+
 		// Pack completion tokens and responseText into a temporary json to pass back to the retry worker
 		type streamResult struct {
 			Text   string `json:"text"`
@@ -840,6 +904,55 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		}
 		// Translation failed — write original body as fallback
 		h.logger.Warn("1min.ai response translation failed, passing through original",
+			zap.String("model", pctx.model),
+			zap.Error(trErr),
+		)
+		for key, vals := range resp.Header {
+			for _, val := range vals {
+				c.Writer.Header().Add(key, val)
+			}
+		}
+		c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+		c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+		c.Writer.WriteHeader(resp.StatusCode)
+		c.Writer.Write(respBody) //nolint:errcheck
+		return resp.StatusCode, upstreamURL, respBody, nil
+	}
+
+	// --- Cloudflare Workers AI Image Response Translation ---
+	// Cloudflare's /ai/run text-to-image endpoint returns a {success,result}
+	// envelope whose result.image holds a base64-encoded image. We translate
+	// it to the OpenAI images/generations shape so OpenAI-compatible clients
+	// (and this gateway's own chat app) can consume it directly. Chat
+	// completions use the OpenAI-compatible /ai/v1 endpoint and pass through.
+	if cred.Provider == "cloudflare" && isCloudflareImageRequest(c.Request.URL.Path) {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return http.StatusInternalServerError, upstreamURL, nil, readErr
+		}
+
+		// Cloudflare returns HTTP 200 with success=false for some validation
+		// failures (e.g. invalid input). Route those through the retry loop so
+		// the credential is penalised and a clear error reaches the client.
+		if success, err := jsonparser.GetBoolean(respBody, "success"); err == nil && !success {
+			h.logger.Warn("cloudflare returned internal failure (HTTP 200, success=false)",
+				zap.String("model", pctx.model),
+				zap.ByteString("response", respBody),
+			)
+			return http.StatusBadGateway, upstreamURL, respBody, nil
+		}
+
+		translated, contentType, trErr := translateCloudflareImageResponse(respBody)
+		if trErr == nil && translated != nil {
+			c.Writer.Header().Set("Content-Type", contentType)
+			c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+			c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+			c.Writer.WriteHeader(resp.StatusCode)
+			c.Writer.Write(translated) //nolint:errcheck
+			return resp.StatusCode, upstreamURL, translated, nil
+		}
+		// Translation failed — write original body as fallback
+		h.logger.Warn("cloudflare response translation failed, passing through original",
 			zap.String("model", pctx.model),
 			zap.Error(trErr),
 		)
@@ -1032,6 +1145,21 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 		}
 	}
 
+	// Handle Sarvam AI slash-separated model names (e.g. "sarvam/sarvam-105b")
+	if strings.HasPrefix(model, "sarvam/") {
+		slashParts := strings.Split(model, "/")
+		for i := len(slashParts) - 1; i >= 1; i-- {
+			prefix := strings.Join(slashParts[:i], "/")
+			if val, found := h.cache.Get(cache.PoolKey(prefix)); found {
+				return val, true
+			}
+		}
+		// Also try just the provider namespace key "sarvam"
+		if val, found := h.cache.Get(cache.PoolKey("sarvam")); found {
+			return val, true
+		}
+	}
+
 	// Try progressively shorter dash-separated prefixes
 	parts := strings.Split(model, "-")
 	for i := len(parts) - 1; i >= 1; i-- {
@@ -1052,8 +1180,6 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 	return nil, false
 }
 
-
-
 // isCredentialAuthError returns true for status codes that indicate the
 // specific API key is rejected by the provider, or the model is not accessible
 // on this account's plan. All of these warrant an immediate key rotation with
@@ -1067,7 +1193,7 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 //   - 422 Unprocessable Entity: key accepted but provider rejects this request shape
 func isCredentialAuthError(status int) bool {
 	switch status {
-	case http.StatusBadRequest,         // 400
+	case http.StatusBadRequest, // 400
 		http.StatusUnauthorized,        // 401
 		http.StatusPaymentRequired,     // 402
 		http.StatusForbidden,           // 403
@@ -1162,7 +1288,6 @@ func (h *Handler) ListModels(c *gin.Context) {
 		Data:   data,
 	})
 }
-
 
 // --- NVIDIA Reasoning Parameter Injection ---
 

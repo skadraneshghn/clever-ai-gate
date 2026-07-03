@@ -75,8 +75,16 @@ type DiscoverCloudflareRequest struct {
 	Weight    int    `json:"weight,omitempty" example:"1"`
 }
 
+// DiscoverSarvamRequest is the request body for POST /api/v1/admin/providers/sarvam.
+// Sarvam AI only needs an API subscription key — the base URL is hardcoded to
+// https://api.sarvam.ai. A dedicated minimal DTO keeps the "add provider" modal
+// contract to just the API key (plus an optional weight).
+type DiscoverSarvamRequest struct {
+	APIKey string `json:"api_key" binding:"required" example:"sk_..."`
+	Weight int    `json:"weight,omitempty" example:"1"`
+}
+
 // BulkDeleteRequest represents a request containing multiple IDs to be deleted.
 type BulkDeleteRequest struct {
 	IDs []int `json:"ids" binding:"required,min=1" example:"[1,2,3]"`
 }
-
