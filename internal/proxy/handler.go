@@ -72,6 +72,7 @@ type proxyContext struct {
 	isOneMinAI   bool // True when model uses 1min/ prefix — triggers body/response translation
 	isCloudflare bool // True when model uses cloudflare/ prefix — triggers prefix stripping
 	isSarvam     bool // True when model uses sarvam/ prefix — triggers prefix stripping
+	isPuter      bool // True when model uses puter/ prefix — triggers prefix stripping
 	body         []byte
 	credential   *credentials.AcquireResult
 	pool         *credentials.BalancedChannelPool
@@ -235,6 +236,15 @@ func (h *Handler) Handle(c *gin.Context) {
 		)
 	}
 
+	// --- Puter Prefix Detection ---
+	isPuter := false
+	if strings.HasPrefix(model, "puter/") {
+		isPuter = true
+		h.logger.Debug("puter model detected",
+			zap.String("model", model),
+		)
+	}
+
 	// --- Access log: first thing we know enough to emit a useful Info entry ---
 	// This fires for EVERY request and is the primary tool for diagnosing
 	// Kilo Code instability: you can see exactly what model/tenant/path was
@@ -252,6 +262,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		zap.Bool("is_1minai", isOneMinAI),
 		zap.Bool("is_cloudflare", isCloudflare),
 		zap.Bool("is_sarvam", isSarvam),
+		zap.Bool("is_puter", isPuter),
 		zap.Int("body_bytes", len(body)),
 		zap.String("client_ip", c.ClientIP()),
 	)
@@ -341,6 +352,14 @@ func (h *Handler) Handle(c *gin.Context) {
 		body = bytes.Replace(body, oldToken, newToken, 1)
 	}
 
+	// --- Puter Payload Sanitization ---
+	if isPuter {
+		upstreamModel := strings.TrimPrefix(model, "puter/")
+		oldToken := []byte(`"` + model + `"`)
+		newToken := []byte(`"` + upstreamModel + `"`)
+		body = bytes.Replace(body, oldToken, newToken, 1)
+	}
+
 	// Step 5-8: Attempt with automatic failover
 	// Note: The FULL body (not scanSlice) is forwarded to the upstream provider.
 	// Only the metadata extraction was bounded — the binary payload is piped as-is.
@@ -351,6 +370,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		isOneMinAI:   isOneMinAI,
 		isCloudflare: isCloudflare,
 		isSarvam:     isSarvam,
+		isPuter:      isPuter,
 		body:         body,
 		pool:         pool,
 	}

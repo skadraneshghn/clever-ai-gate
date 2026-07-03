@@ -72,6 +72,9 @@ func NewRewriter() *Rewriter {
 	// Sarvam AI: natively OpenAI-compatible (POST /v1/chat/completions, SSE streaming)
 	r.pathTransformers["sarvam"] = passthroughPath
 
+	// Puter.com: natively OpenAI-compatible
+	r.pathTransformers["puter"] = passthroughPath
+
 	return r
 }
 
@@ -147,6 +150,9 @@ func (r *Rewriter) RewriteHeaders(req *http.Request, provider, apiKey string, so
 		// Authorization: Bearer on all endpoints. Send both for bulletproof
 		// auth regardless of backend routing changes at Sarvam.
 		req.Header.Set("api-subscription-key", apiKey)
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	case "puter":
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	default:

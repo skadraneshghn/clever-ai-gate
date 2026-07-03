@@ -635,6 +635,57 @@ func (h *CredentialHandler) RegisterSarvamProvider(c *gin.Context) {
 	})
 }
 
+// RegisterPuterProvider auto-discovers all Puter.com AI models available under
+// an API token, creates model pools for each, and binds the credential
+// to all of them in one transaction.
+//
+// @Summary      Auto-discover Puter.com Models
+// @Description  Submits a Puter token, fetches the model details, and registers all models automatically
+// @Tags         Credentials
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        body  body      dto.DiscoverPuterRequest  true  "Puter provider details (api_key required)"
+// @Success      200   {object}  dto.DiscoverProviderResponse
+// @Failure      400   {object}  dto.ErrorResponse
+// @Failure      500   {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/providers/puter [post]
+func (h *CredentialHandler) RegisterPuterProvider(c *gin.Context) {
+	var req dto.DiscoverPuterRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
+		return
+	}
+
+	if req.APIKey == "" {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "api_key is required for Puter.com auto-discovery"})
+		return
+	}
+
+	if req.Weight <= 0 {
+		req.Weight = 1
+	}
+
+	count, models, err := credentials.DiscoverAndRegisterPuterModels(
+		c.Request.Context(),
+		h.db,
+		h.vault,
+		req.APIKey,
+		req.Weight,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Puter.com auto-discovery failed", Details: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.DiscoverProviderResponse{
+		Message:       fmt.Sprintf("Successfully synchronized %d Puter.com models", count),
+		ModelsCount:   count,
+		DiscoveredIDs: models,
+	})
+}
+
+
 // RefreshAllProviders re-runs auto-discovery for every distinct provider key
 // already registered in the database. This is the "sync all" action: it reads
 // every unique (provider, encrypted_key, base_url, prefix) combination from the
@@ -649,6 +700,7 @@ func (h *CredentialHandler) RegisterSarvamProvider(c *gin.Context) {
 //   - 1minai    → DiscoverAndRegisterOneMinAIModels
 //   - cloudflare → DiscoverAndRegisterCloudflareModels
 //   - sarvam    → DiscoverAndRegisterSarvamModels
+//   - puter     → DiscoverAndRegisterPuterModels
 //   - all others → DiscoverAndRegisterCustomModels (any OpenAI-compatible)
 //
 // Results are aggregated across all provider accounts and returned as a single
@@ -760,6 +812,10 @@ func (h *CredentialHandler) RefreshAllProviders(c *gin.Context) {
 
 		case "sarvam":
 			count, discovered, discErr = credentials.DiscoverAndRegisterSarvamModels(
+				ctx, h.db, h.vault, apiKey, weight)
+
+		case "puter":
+			count, discovered, discErr = credentials.DiscoverAndRegisterPuterModels(
 				ctx, h.db, h.vault, apiKey, weight)
 
 		default:
