@@ -417,6 +417,7 @@ type attemptRecord struct {
 //   - 5xx / transport-mapped (502/504) / non-standard codes: moderate cooldown, rotate.
 //   - When all exhausted: canonical OpenAI error envelope is returned to client.
 func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestStart time.Time, maxAttempts int) {
+	requestID, _ := c.Get("request_id")
 	var lastErrBody []byte
 	var lastStatus int
 	var lastProvider string
@@ -494,6 +495,15 @@ retryLoop:
 		triedIndices[result.Index] = true
 		triedCount++
 		pctx.credential = result
+
+		h.logger.Info("attempting request with credential",
+			zap.String("request_id", fmt.Sprintf("%v", requestID)),
+			zap.String("model", pctx.model),
+			zap.String("provider", result.Credential.Provider),
+			zap.Int("credential_id", result.Credential.ID),
+			zap.Int("attempt", triedCount),
+			zap.Int("max_attempts", maxAttempts),
+		)
 
 		statusCode, upstreamURL, errBody, err := h.forwardRequest(c, pctx)
 
@@ -609,8 +619,6 @@ retryLoop:
 
 		isSingleKey := pctx.pool.TotalCount == 1
 
-		requestID, _ := c.Get("request_id")
-
 		// Check if it's a Puter-specific quota error disguised as 400
 		isPuterQuota400 := false
 		if result.Credential.Provider == "puter" && recStatus == http.StatusBadRequest && len(errBody) > 0 {
@@ -689,9 +697,15 @@ retryLoop:
 	}
 
 	// Try model fallback before failing
-	if triedCount >= maxAttempts && strings.HasPrefix(pctx.model, "puter/") && pctx.model != "puter/gpt-4o-mini" {
+	if triedCount >= maxAttempts && strings.HasPrefix(pctx.model, "puter/") {
 		originalModel := pctx.model
 		cheaperModel := "puter/gpt-4o-mini"
+		isLastResort := false
+
+		if originalModel == "puter/gpt-4o-mini" {
+			cheaperModel = "cloudflare/@cf/meta/llama-3.2-3b-instruct"
+			isLastResort = true
+		}
 
 		// Look up the fallback pool
 		poolVal, found := h.cache.Get(cache.PoolKey(cheaperModel))
@@ -704,13 +718,23 @@ retryLoop:
 
 			// Replace in JSON body
 			oldUpstreamModel := strings.TrimPrefix(originalModel, "puter/")
-			newUpstreamModel := strings.TrimPrefix(cheaperModel, "puter/")
+			newUpstreamModel := cheaperModel
+			if isLastResort {
+				newUpstreamModel = strings.TrimPrefix(cheaperModel, "cloudflare/")
+			} else {
+				newUpstreamModel = strings.TrimPrefix(cheaperModel, "puter/")
+			}
 			oldToken := []byte(`"` + oldUpstreamModel + `"`)
 			newToken := []byte(`"` + newUpstreamModel + `"`)
 			pctx.body = bytes.Replace(pctx.body, oldToken, newToken, 1)
 
 			pctx.model = cheaperModel
 			pctx.pool = fallbackPool
+
+			if isLastResort {
+				pctx.isPuter = false
+				pctx.isCloudflare = true
+			}
 
 			// Reset retry counters to try all fallback credentials
 			triedCount = 0
@@ -725,7 +749,7 @@ retryLoop:
 			maxSpins = maxAttempts*3 + 1
 			spins = 0
 
-			h.logger.Warn("all credentials exhausted for puter model; falling back to cheaper model",
+			h.logger.Warn("all credentials exhausted for model; falling back to cheaper model",
 				zap.String("original_model", originalModel),
 				zap.String("fallback_model", cheaperModel),
 			)
