@@ -611,12 +611,23 @@ retryLoop:
 
 		requestID, _ := c.Get("request_id")
 
-		if isCredentialAuthError(recStatus) {
-			// 400/401/402/403/404/422: this key cannot serve this model.
-			// Long cooldown + immediately rotate to the next available key.
+		// Check if it's a Puter-specific quota error disguised as 400
+		isPuterQuota400 := false
+		if result.Credential.Provider == "puter" && recStatus == http.StatusBadRequest && len(errBody) > 0 {
+			bodyStr := string(errBody)
+			if strings.Contains(bodyStr, "usage-limited-chat") || 
+				strings.Contains(bodyStr, "insufficient_funds") || 
+				strings.Contains(bodyStr, "error_400_from_delegate") ||
+				strings.Contains(bodyStr, "Permission denied") {
+				isPuterQuota400 = true
+			}
+		}
+
+		if isCredentialAuthError(recStatus) || isPuterQuota400 {
+			// Quota/auth error: rotate to the next key.
 			result.FromPool.PenalizeToken(result.Index, cooldownDuration)
 			h.broadcaster.PublishPenalize(result.FromPool.ModelPattern, result.Credential.ID, result.Index, time.Now().Add(cooldownDuration))
-			h.logger.Warn("credential rejected by upstream — rotating to next key",
+			h.logger.Warn("credential rejected by upstream (or puter quota limit) — rotating to next key",
 				zap.String("request_id", fmt.Sprintf("%v", requestID)),
 				zap.String("model", pctx.model),
 				zap.String("provider", result.Credential.Provider),
@@ -627,6 +638,17 @@ retryLoop:
 				zap.Duration("cooldown", cooldownDuration),
 			)
 			continue // immediately rotate
+		}
+
+		// Fast Fail for 400 Bad Request Payload Issues (not a Puter quota error)
+		if recStatus == http.StatusBadRequest {
+			h.logger.Error("client payload schema error encountered — aborting rotation to protect pool keys",
+				zap.String("model", pctx.model),
+				zap.String("provider", result.Credential.Provider),
+				zap.Int("status", recStatus),
+				zap.ByteString("error_body", errBody),
+			)
+			break retryLoop
 		}
 
 		if recStatus == http.StatusTooManyRequests && isSingleKey {
@@ -851,6 +873,10 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	// clean-request path is allocation-free (fast presence probe).
 	if cred.Provider == "sarvam" {
 		bodyBytes = sanitizeSarvamRequest(bodyBytes)
+	}
+
+	if cred.Provider == "puter" {
+		bodyBytes = sanitizePuterRequest(bodyBytes)
 	}
 
 	upstreamURL = h.rewriter.RewriteURL(cred.Provider, cred.BaseURL, c.Request.URL.Path, modelName)
@@ -1322,8 +1348,7 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 //   - 422 Unprocessable Entity: key accepted but provider rejects this request shape
 func isCredentialAuthError(status int) bool {
 	switch status {
-	case http.StatusBadRequest, // 400
-		http.StatusUnauthorized,        // 401
+	case http.StatusUnauthorized,        // 401
 		http.StatusPaymentRequired,     // 402
 		http.StatusForbidden,           // 403
 		http.StatusNotFound,            // 404
@@ -1338,8 +1363,7 @@ func isCredentialAuthError(status int) bool {
 // non-standard codes from load balancers and custom proxies (444, 520, 524, 599…).
 func cooldownForStatus(status int) time.Duration {
 	switch {
-	case status == http.StatusBadRequest ||
-		status == http.StatusUnauthorized ||
+	case status == http.StatusUnauthorized ||
 		status == http.StatusPaymentRequired ||
 		status == http.StatusForbidden ||
 		status == http.StatusNotFound ||
