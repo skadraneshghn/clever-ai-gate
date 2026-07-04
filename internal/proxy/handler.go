@@ -494,6 +494,7 @@ retryLoop:
 
 		// ── True 2xx success: forwardRequest already wrote to c.Writer ────────
 		if err == nil && statusCode >= 200 && statusCode < 300 {
+			atomic.StoreUint32(&result.Credential.ConsecutiveFailures, 0)
 			pctx.pool.ResetCooldown(result.Index)
 			h.logger.Info("proxy request completed",
 				zap.String("model", pctx.model),
@@ -567,7 +568,28 @@ retryLoop:
 		lastErrBody = errBody
 		lastStatus = recStatus
 		lastProvider = result.Credential.Provider
+
+		// Increment consecutive failures atomically
+		failures := atomic.AddUint32(&result.Credential.ConsecutiveFailures, 1)
+
 		cooldownDuration := cooldownForStatus(recStatus)
+		if result.Credential.Provider == "puter" {
+			// Puter.com free keys frequently hit transient 402/403 rate and quota limits.
+			// We use a short 15-second cooldown to rotate keys rapidly and prevent long-term lockouts of healthy keys.
+			// If a key fails consecutively 3 times, we apply a 24-hour cooldown as it is likely truly exhausted.
+			if recStatus == http.StatusPaymentRequired || recStatus == http.StatusForbidden || recStatus == http.StatusTooManyRequests {
+				if failures >= 3 {
+					cooldownDuration = 24 * time.Hour
+					h.logger.Error("puter credential marked as exhausted after 3 consecutive failures",
+						zap.Int("credential_id", result.Credential.ID),
+						zap.Int("status", recStatus),
+					)
+				} else {
+					cooldownDuration = 15 * time.Second
+				}
+			}
+		}
+
 		isSingleKey := pctx.pool.TotalCount == 1
 
 		requestID, _ := c.Get("request_id")
@@ -625,6 +647,53 @@ retryLoop:
 			zap.Duration("elapsed", time.Since(requestStart)),
 			zap.NamedError("transport_err", err),
 		)
+	}
+
+	// Try model fallback before failing
+	if triedCount >= maxAttempts && strings.HasPrefix(pctx.model, "puter/") && pctx.model != "puter/gpt-4o-mini" {
+		originalModel := pctx.model
+		cheaperModel := "puter/gpt-4o-mini"
+
+		// Look up the fallback pool
+		poolVal, found := h.cache.Get(cache.PoolKey(cheaperModel))
+		if !found {
+			poolVal, found = h.findPoolByPrefix(cheaperModel)
+		}
+
+		if found {
+			fallbackPool := poolVal.(*credentials.BalancedChannelPool)
+
+			// Replace in JSON body
+			oldUpstreamModel := strings.TrimPrefix(originalModel, "puter/")
+			newUpstreamModel := strings.TrimPrefix(cheaperModel, "puter/")
+			oldToken := []byte(`"` + oldUpstreamModel + `"`)
+			newToken := []byte(`"` + newUpstreamModel + `"`)
+			pctx.body = bytes.Replace(pctx.body, oldToken, newToken, 1)
+
+			pctx.model = cheaperModel
+			pctx.pool = fallbackPool
+
+			// Reset retry counters to try all fallback credentials
+			triedCount = 0
+			triedIndices = make(map[int]bool)
+			maxAttempts = int(fallbackPool.TotalCount)
+			if maxAttempts < 1 {
+				maxAttempts = 1
+			}
+			if maxAttempts > 20 {
+				maxAttempts = 20
+			}
+			maxSpins = maxAttempts*3 + 1
+			spins = 0
+
+			h.logger.Warn("all credentials exhausted for puter model; falling back to cheaper model",
+				zap.String("original_model", originalModel),
+				zap.String("fallback_model", cheaperModel),
+			)
+
+			// Restart retry loop
+			goto retryLoop
+		}
 	}
 
 	// ── All credentials exhausted ─────────────────────────────────────────────
@@ -1176,6 +1245,21 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 		}
 		// Also try just the provider namespace key "sarvam"
 		if val, found := h.cache.Get(cache.PoolKey("sarvam")); found {
+			return val, true
+		}
+	}
+
+	// Handle Puter slash-separated model names (e.g. "puter/gpt-4o-mini")
+	if strings.HasPrefix(model, "puter/") {
+		slashParts := strings.Split(model, "/")
+		for i := len(slashParts) - 1; i >= 1; i-- {
+			prefix := strings.Join(slashParts[:i], "/")
+			if val, found := h.cache.Get(cache.PoolKey(prefix)); found {
+				return val, true
+			}
+		}
+		// Also try just the provider namespace key "puter"
+		if val, found := h.cache.Get(cache.PoolKey("puter")); found {
 			return val, true
 		}
 	}

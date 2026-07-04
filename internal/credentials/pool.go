@@ -8,13 +8,14 @@ import (
 // RuntimeCredential represents a single upstream provider API key with
 // its connection details and lock-free health state.
 type RuntimeCredential struct {
-	ID            int
-	Provider      string // "openai", "anthropic", "gemini", "deepseek"
-	APIKey        string // Decrypted API key (in-memory only)
-	BaseURL       string // Provider base URL
-	Weight        int    // Distribution weight
-	CooldownUntil int64  // Unix nanosecond; managed via atomic ops
-	Prefix        string // Optional routing prefix to strip before forwarding
+	ID                  int
+	Provider            string // "openai", "anthropic", "gemini", "deepseek"
+	APIKey              string // Decrypted API key (in-memory only)
+	BaseURL             string // Provider base URL
+	Weight              int    // Distribution weight
+	CooldownUntil       int64  // Unix nanosecond; managed via atomic ops
+	Prefix              string // Optional routing prefix to strip before forwarding
+	ConsecutiveFailures uint32 // Atomic counter for sequential request errors
 }
 
 // IsAvailable checks if this credential is past its cooldown period.
