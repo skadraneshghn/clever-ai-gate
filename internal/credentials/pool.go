@@ -89,9 +89,10 @@ func (p *BalancedChannelPool) AcquireActiveToken() *AcquireResult {
 	now := time.Now().UnixNano()
 	limit := p.TotalCount
 
+	baseIdx := atomic.AddUint64(&p.Cursor, 1)
+
 	for i := uint64(0); i < limit; i++ {
-		// Lock-free index progression
-		idx := atomic.AddUint64(&p.Cursor, 1) % limit
+		idx := (baseIdx + i) % limit
 		cand := p.Credentials[idx]
 
 		// Atomic cooldown check — no mutex, no read lock

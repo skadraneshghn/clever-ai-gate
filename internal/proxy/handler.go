@@ -352,6 +352,11 @@ func (h *Handler) Handle(c *gin.Context) {
 		body = bytes.Replace(body, oldToken, newToken, 1)
 	}
 
+	// --- Puter Proactive Completion Optimization ---
+	if isPuter {
+		body, model = h.OptimizePayloadForKiloCode(body, model)
+	}
+
 	// --- Puter Payload Sanitization ---
 	if isPuter {
 		upstreamModel := strings.TrimPrefix(model, "puter/")
@@ -574,10 +579,22 @@ retryLoop:
 
 		cooldownDuration := cooldownForStatus(recStatus)
 		if result.Credential.Provider == "puter" {
-			// Puter.com free keys frequently hit transient 402/403 rate and quota limits.
-			// We use a short 15-second cooldown to rotate keys rapidly and prevent long-term lockouts of healthy keys.
-			// If a key fails consecutively 3 times, we apply a 24-hour cooldown as it is likely truly exhausted.
-			if recStatus == http.StatusPaymentRequired || recStatus == http.StatusForbidden || recStatus == http.StatusTooManyRequests {
+			// Check if this is a rate limit, quota exhaust, or Puter's custom Bad Request quota signal
+			isQuotaError := recStatus == http.StatusPaymentRequired || 
+				recStatus == http.StatusForbidden || 
+				recStatus == http.StatusTooManyRequests
+
+			if recStatus == http.StatusBadRequest && len(errBody) > 0 {
+				bodyStr := string(errBody)
+				if strings.Contains(bodyStr, "usage-limited-chat") || 
+					strings.Contains(bodyStr, "insufficient_funds") || 
+					strings.Contains(bodyStr, "error_400_from_delegate") ||
+					strings.Contains(bodyStr, "Permission denied") {
+					isQuotaError = true
+				}
+			}
+
+			if isQuotaError {
 				if failures >= 3 {
 					cooldownDuration = 24 * time.Hour
 					h.logger.Error("puter credential marked as exhausted after 3 consecutive failures",
@@ -855,6 +872,14 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	}
 
 	h.rewriter.RewriteHeaders(upstreamReq, cred.Provider, cred.APIKey, c.Request.Header)
+
+	// --- Puter Edge Firewall De-fingerprinting ---
+	if cred.Provider == "puter" {
+		randomIP := generateRandomIP()
+		upstreamReq.Header.Set("X-Forwarded-For", randomIP)
+		upstreamReq.Header.Set("X-Real-IP", randomIP)
+		upstreamReq.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	}
 
 	// Override Content-Type for 1min.ai (e.g., multipart STT → JSON)
 	if contentTypeOverride != "" {
@@ -1664,4 +1689,29 @@ func isPrintable(s string) bool {
 		}
 	}
 	return true
+}
+
+// OptimizePayloadForKiloCode mutates the request model for small completion tasks to save credits.
+func (h *Handler) OptimizePayloadForKiloCode(bodyBytes []byte, model string) ([]byte, string) {
+	maxTokens, err := jsonparser.GetInt(bodyBytes, "max_tokens")
+	if err == nil && maxTokens > 0 && maxTokens <= 64 {
+		// Inline completion detected! Downgrade to cheap puter/gpt-4o-mini model
+		if model != "puter/gpt-4o-mini" && strings.HasPrefix(model, "puter/") {
+			oldToken := []byte(`"` + model + `"`)
+			newToken := []byte(`"puter/gpt-4o-mini"`)
+			bodyBytes = bytes.Replace(bodyBytes, oldToken, newToken, 1)
+			return bodyBytes, "puter/gpt-4o-mini"
+		}
+	}
+	return bodyBytes, model
+}
+
+// generateRandomIP produces a random public IPv4 address string to de-fingerprint outbound edge calls.
+func generateRandomIP() string {
+	return fmt.Sprintf("%d.%d.%d.%d",
+		rand.Intn(223-1)+1, // Avoid 0.x and multicast/reserved range
+		rand.Intn(256),
+		rand.Intn(256),
+		rand.Intn(256),
+	)
 }
