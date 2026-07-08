@@ -29,16 +29,75 @@ func NewPoolHandler(db *pgxpool.Pool, vault *credentials.Vault) *PoolHandler {
 }
 
 // List returns all model routing pools.
+//
+// When the `limit` query parameter is supplied the endpoint responds with a
+// paginated envelope ({data, total, limit, offset}) supporting server-side
+// pagination, filtering (`search`) and virtualized rendering.
+// When `limit` is omitted the endpoint preserves the legacy behaviour of
+// returning the full flat array of pools (backward compatibility).
+//
 // @Summary      List model pools
-// @Description  Returns all model routing pools with credential counts
+// @Description  Returns all model routing pools with credential counts. Supports optional pagination via limit/offset and filtering via search.
 // @Tags         Pools
 // @Produce      json
 // @Security     BearerAuth
+// @Param        limit   query  int     false  "Page size (enables paginated envelope when present)"  example(100)
+// @Param        offset  query  int     false  "Page offset"                                        example(0)
+// @Param        search  query  string  false  "Case-insensitive search across model_pattern/strategy"  example(gpt-4o)
 // @Success      200  {array}   dto.PoolResponse
 // @Failure      500  {object}  dto.ErrorResponse
 // @Router       /api/v1/admin/pools [get]
 func (h *PoolHandler) List(c *gin.Context) {
-	pools, err := database.ListModelPools(c.Request.Context(), h.db)
+	limitStr := c.Query("limit")
+
+	// Legacy path: no pagination requested -> return the full flat list.
+	if limitStr == "" {
+		pools, err := database.ListModelPools(c.Request.Context(), h.db)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to list pools", Details: err.Error()})
+			return
+		}
+
+		resp := make([]dto.PoolResponse, len(pools))
+		for i, p := range pools {
+			// Get credential count
+			creds, _ := database.ListCredentialsByPool(c.Request.Context(), h.db, p.ID)
+
+			// Decode capabilities JSONB into map
+			var caps map[string]bool
+			if len(p.Capabilities) > 0 {
+				_ = json.Unmarshal(p.Capabilities, &caps)
+			}
+
+			resp[i] = dto.PoolResponse{
+				ID:              p.ID,
+				ModelPattern:    p.ModelPattern,
+				Strategy:        p.Strategy,
+				FallbackPoolID:  p.FallbackPoolID,
+				Capabilities:    caps,
+				CredentialCount: len(creds),
+				CreatedAt:       p.CreatedAt,
+			}
+		}
+
+		c.JSON(http.StatusOK, resp)
+		return
+	}
+
+	// Paginated path.
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		limit = 100
+	}
+	offset := 0
+	if offStr := c.Query("offset"); offStr != "" {
+		if v, err := strconv.Atoi(offStr); err == nil && v >= 0 {
+			offset = v
+		}
+	}
+	search := c.Query("search")
+
+	pools, total, err := database.ListModelPoolsPaginated(c.Request.Context(), h.db, limit, offset, search)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to list pools", Details: err.Error()})
 		return
@@ -46,9 +105,6 @@ func (h *PoolHandler) List(c *gin.Context) {
 
 	resp := make([]dto.PoolResponse, len(pools))
 	for i, p := range pools {
-		// Get credential count
-		creds, _ := database.ListCredentialsByPool(c.Request.Context(), h.db, p.ID)
-
 		// Decode capabilities JSONB into map
 		var caps map[string]bool
 		if len(p.Capabilities) > 0 {
@@ -61,12 +117,17 @@ func (h *PoolHandler) List(c *gin.Context) {
 			Strategy:        p.Strategy,
 			FallbackPoolID:  p.FallbackPoolID,
 			Capabilities:    caps,
-			CredentialCount: len(creds),
+			CredentialCount: p.CredentialCount,
 			CreatedAt:       p.CreatedAt,
 		}
 	}
 
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusOK, dto.PaginatedPoolsResponse{
+		Data:   resp,
+		Total:  total,
+		Limit:  limit,
+		Offset: offset,
+	})
 }
 
 // Get returns a single pool with all its credentials.

@@ -26,8 +26,44 @@
 
   // ─── Local State ──────────────────────────────────────────────────────────
   let pools = $state([]);
+  let totalCount = $state(0);
   let loading = $state(false);
   let error = $state('');
+
+  // Pagination / lazy-loading
+  const PAGE_SIZE = 100;
+  let currentPage = $state(0);
+  let hasMore = $state(false);
+  let loadingMore = $state(false);
+
+  // Filtering
+  let searchQuery = $state('');
+  let searchTimer = null;
+
+  // Virtualization
+  const ROW_HEIGHT = 45;
+  const OVERSCAN = 8;
+  let scrollTop = $state(0);
+  let viewportHeight = $state(0);
+  let vscrollEl;
+
+  let visibleRange = $derived.by(() => {
+    const loaded = pools.length;
+    if (loaded === 0 || viewportHeight === 0) {
+      return { start: 0, end: 0, padTop: 0, padBottom: 0 };
+    }
+    const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
+    const visibleCount = Math.ceil(viewportHeight / ROW_HEIGHT) + OVERSCAN * 2;
+    const end = Math.min(loaded, start + visibleCount);
+    return {
+      start,
+      end,
+      padTop: start * ROW_HEIGHT,
+      padBottom: (loaded - end) * ROW_HEIGHT
+    };
+  });
+
+  let visibleItems = $derived(pools.slice(visibleRange.start, visibleRange.end));
 
   // Details View state
   let selectedPool = $state(null);
@@ -69,9 +105,15 @@
   // Auto-fetch when adminKey changes
   $effect(() => {
     if (appState.adminKey.trim() && !selectedPool) {
-      loadPools();
+      reloadPools();
     }
   });
+
+  // Debounced search/filter → reload first page
+  function onSearchInput() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => reloadPools(), 300);
+  }
 
   // ─── API Helper Headers ───────────────────────────────────────────────────
   function adminHeaders() {
@@ -81,24 +123,74 @@
     };
   }
 
-  async function loadPools() {
+  async function loadPoolsPage(page) {
+    try {
+      const params = new URLSearchParams();
+      params.append('limit', String(PAGE_SIZE));
+      params.append('offset', String(page * PAGE_SIZE));
+      if (searchQuery.trim()) params.append('search', searchQuery.trim());
+
+      const res = await fetch(`/api/v1/admin/pools?${params.toString()}`, { headers: adminHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        const rows = data.data ?? data;
+        return { rows, total: data.total ?? rows.length };
+      }
+      const err = await res.json();
+      return { error: err.error || `Error ${res.status}` };
+    } catch (e) {
+      return { error: `Network error: ${e.message}` };
+    }
+  }
+
+  async function reloadPools() {
     loading = true;
     error = '';
+    currentPage = 0;
     appState.apiLoading = true;
     try {
-      const res = await fetch('/api/v1/admin/pools', { headers: adminHeaders() });
-      if (res.ok) {
-        pools = await res.json();
-        selectedPoolIds = selectedPoolIds.filter(id => pools.some(p => p.id === id));
+      const result = await loadPoolsPage(0);
+      if (result.error) {
+        error = result.error;
       } else {
-        const err = await res.json();
-        error = err.error || `Error ${res.status}`;
+        pools = result.rows;
+        totalCount = result.total;
+        hasMore = result.rows.length < result.total;
+        selectedPoolIds = selectedPoolIds.filter(id => pools.some(p => p.id === id));
+        if (vscrollEl) vscrollEl.scrollTop = 0;
       }
-    } catch (e) {
-      error = `Network error: ${e.message}`;
     } finally {
       loading = false;
       appState.apiLoading = false;
+    }
+  }
+
+  async function loadMore() {
+    if (loadingMore || !hasMore) return;
+    loadingMore = true;
+    appState.apiLoading = true;
+    const nextPage = currentPage + 1;
+    try {
+      const result = await loadPoolsPage(nextPage);
+      if (result.error) {
+        appState.addToast('error', result.error);
+      } else {
+        pools = [...pools, ...result.rows];
+        currentPage = nextPage;
+        hasMore = pools.length < result.total;
+      }
+    } finally {
+      loadingMore = false;
+      appState.apiLoading = false;
+    }
+  }
+
+  function onVScroll(e) {
+    scrollTop = e.target.scrollTop;
+    // Trigger lazy load when near the bottom of the loaded list
+    const remaining = pools.length * ROW_HEIGHT - (scrollTop + viewportHeight);
+    if (hasMore && !loadingMore && remaining < ROW_HEIGHT * 10) {
+      loadMore();
     }
   }
 
@@ -260,7 +352,7 @@
       if (res.status === 201 || res.ok) {
         appState.addToast('success', 'Model pool created successfully');
         showAddModal = false;
-        loadPools();
+        reloadPools();
       } else {
         const err = await res.json();
         appState.addToast('error', err.details || err.error || 'Failed to create pool');
@@ -310,7 +402,7 @@
           selectedPool.strategy = editForm.strategy;
           selectedPool.fallback_pool_id = payload.fallback_pool_id;
         }
-        loadPools();
+        reloadPools();
       } else {
         const err = await res.json();
         appState.addToast('error', err.details || err.error || 'Failed to update pool');
@@ -344,7 +436,7 @@
           selectedPool = null;
         }
         deleteTargetId = null;
-        loadPools();
+        reloadPools();
       } else {
         const err = await res.json();
         appState.addToast('error', err.details || err.error || 'Failed to delete pool');
@@ -380,7 +472,7 @@
           selectedPool = null;
         }
         selectedPoolIds = [];
-        loadPools();
+        reloadPools();
       } else {
         const err = await res.json();
         appState.addToast('error', err.details || err.error || 'Failed to delete pools');
@@ -397,12 +489,12 @@
     const key = appState.adminKey.trim();
     if (!key) return;
     localStorage.setItem('cag_admin_key', key);
-    loadPools();
+    reloadPools();
   }
 
   onMount(() => {
     if (appState.adminKey.trim() && !selectedPool) {
-      loadPools();
+      reloadPools();
     }
   });
 </script>
@@ -410,7 +502,7 @@
 <header class="header flex items-center justify-between px-6 py-4 border-b shrink-0">
   <div class="flex items-center gap-3">
     {#if selectedPool}
-      <Button variant="ghost" size="sm" onclick={() => { selectedPool = null; loadPools(); }} title="Back to pools list">
+      <Button variant="ghost" size="sm" onclick={() => { selectedPool = null; reloadPools(); }} title="Back to pools list">
         <ArrowLeft size={16} />
       </Button>
       <Cpu size={20} class="text-[#f97316]" />
@@ -419,7 +511,7 @@
       <Cpu size={20} class="text-[#f97316]" />
       <span class="font-bold text-base">Model Routing Pools</span>
       {#if appState.adminKey.trim()}
-        <span class="text-xs font-bold text-secondary bg-gray-500/10 border border-gray-500/20 px-2.5 py-0.5 rounded-full uppercase">{pools.length} pools</span>
+        <span class="text-xs font-bold text-secondary bg-gray-500/10 border border-gray-500/20 px-2.5 py-0.5 rounded-full uppercase">{totalCount} pools</span>
       {/if}
     {/if}
   </div>
@@ -437,11 +529,11 @@
             Delete Selected ({selectedPoolIds.length})
           </Button>
         {/if}
-        <Button variant="secondary" size="sm" onclick={() => { loadPools(); appState.addToast('info', 'Refreshing capabilities...'); }} title="Re-classify all model capabilities">
+        <Button variant="secondary" size="sm" onclick={() => { reloadPools(); appState.addToast('info', 'Refreshing capabilities...'); }} title="Re-classify all model capabilities">
           <Sparkles size={14} />
           Refresh Capabilities
         </Button>
-        <Button variant="secondary" size="sm" onclick={() => { loadPools(); appState.addToast('info', 'Refreshing pools list...'); }}>
+        <Button variant="secondary" size="sm" onclick={() => { reloadPools(); appState.addToast('info', 'Refreshing pools list...'); }}>
           <RefreshCw size={14} />
           Refresh
         </Button>
@@ -785,21 +877,41 @@
     </Card>
   </div>
 {:else}
-  <!-- Pools data grid -->
-  <div class="providers-grid-wrap flex-grow overflow-auto p-6">
+  <!-- Pools data grid (virtualized + lazy-loaded) -->
+  <div class="providers-grid-wrap flex flex-col flex-grow overflow-hidden">
+    <!-- Filter / search toolbar -->
+    <div class="flex items-center gap-3 px-6 py-3 border-b shrink-0">
+      <div class="relative flex-grow max-w-sm">
+        <Search size={15} class="absolute left-3 top-1/2 -translate-y-1/2 text-secondary opacity-50" />
+        <input
+          type="text"
+          class="w-full pl-9 pr-3 py-1.5 text-sm rounded-lg bg-[var(--input-bg)] border border-[var(--border-color)] focus:border-[#f97316] focus:outline-none"
+          placeholder="Search model pattern, strategy..."
+          bind:value={searchQuery}
+          oninput={onSearchInput}
+        />
+      </div>
+      <span class="text-xs text-secondary ml-auto">
+        {#if totalCount > 0}
+          Showing {pools.length} of {totalCount}
+          {#if loadingMore}<span class="opacity-60"> · loading more…</span>{/if}
+        {/if}
+      </span>
+    </div>
+
     {#if loading}
-      <div class="providers-loading flex flex-col items-center justify-center h-64">
+      <div class="providers-loading flex flex-col items-center justify-center flex-grow">
         <div class="animate-spin text-[#f97316] text-xl">⟳</div>
         <p class="text-sm mt-2 text-secondary">Loading routing pools...</p>
       </div>
     {:else if error}
-      <div class="providers-loading flex flex-col items-center justify-center h-64">
+      <div class="providers-loading flex flex-col items-center justify-center flex-grow">
         <AlertTriangle size={40} class="text-red-500 mb-2" />
         <p class="text-red-500 text-sm font-semibold">{error}</p>
-        <Button variant="primary" class="mt-4" onclick={loadPools}>Retry</Button>
+        <Button variant="primary" class="mt-4" onclick={reloadPools}>Retry</Button>
       </div>
     {:else if pools.length === 0}
-      <div class="providers-loading flex flex-col items-center justify-center h-64">
+      <div class="providers-loading flex flex-col items-center justify-center flex-grow">
         <Cpu size={48} class="opacity-20 mb-4" />
         <p class="opacity-50 text-sm text-secondary">No model pools registered yet.</p>
         <Button variant="primary" class="mt-4" onclick={openAddModal}>
@@ -807,83 +919,98 @@
         </Button>
       </div>
     {:else}
-      <div class="providers-table-container">
-        <table class="providers-table">
-          <thead>
-            <tr>
-              <th style="width: 40px; text-align: center;">
-                <input
-                  type="checkbox"
-                  class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
-                  checked={selectedPoolIds.length === pools.length && pools.length > 0}
-                  onchange={(e) => {
-                    if (e.target.checked) {
-                      selectedPoolIds = pools.map(p => p.id);
-                    } else {
-                      selectedPoolIds = [];
-                    }
-                  }}
-                />
-              </th>
-              <th style="font-size: 11px;">ID</th>
-              <th style="font-size: 11px;">Model Pattern</th>
-              <th style="font-size: 11px;">Capabilities</th>
-              <th style="font-size: 11px;">Strategy</th>
-              <th style="font-size: 11px;">Fallback Pool ID</th>
-              <th style="font-size: 11px; text-align: center;">Credentials</th>
-              <th style="font-size: 11px; text-align: center;">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each pools as pool (pool.id)}
-              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-              <!-- svelte-ignore a11y_click_events_have_key_events -->
-              <tr class="provider-row cursor-pointer" onclick={() => openPoolDetails(pool)}>
-                <td style="text-align: center; width: 40px;" onclick={(e) => e.stopPropagation()}>
-                  <input
-                    type="checkbox"
-                    class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
-                    value={pool.id}
-                    bind:group={selectedPoolIds}
-                    onclick={(e) => e.stopPropagation()}
-                  />
-                </td>
-                <td class="font-mono text-xs opacity-60">#{pool.id}</td>
-                <td class="font-bold text-sm text-[#f97316]">{pool.model_pattern}</td>
-                <td>
-                  <div class="flex flex-wrap gap-1">
-                    {#each capabilityKeys(pool.capabilities) as key}
-                      {@const badge = CAPABILITY_BADGES[key]}
-                      <span style="display:inline-block; padding:2px 7px; border-radius:5px; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; color:{badge.color}; background:{badge.bg}; border:1px solid {badge.border};">
-                        {badge.label}
-                      </span>
-                    {/each}
-                    {#if capabilityKeys(pool.capabilities).length === 0}
-                      <span class="text-xs opacity-30">—</span>
-                    {/if}
+      <!-- Virtualized table -->
+      <div class="pools-table-container flex flex-col flex-grow overflow-hidden">
+        <!-- Fixed header -->
+        <div class="pools-table-header">
+          <div class="pools-table-row pools-table-headrow">
+            <div style="width: 40px; text-align: center;">
+              <input
+                type="checkbox"
+                class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
+                checked={selectedPoolIds.length === pools.length && pools.length > 0}
+                onchange={(e) => {
+                  if (e.target.checked) {
+                    selectedPoolIds = pools.map(p => p.id);
+                  } else {
+                    selectedPoolIds = [];
+                  }
+                }}
+              />
+            </div>
+            <div style="font-size: 11px;">ID</div>
+            <div style="font-size: 11px;">Model Pattern</div>
+            <div style="font-size: 11px;">Capabilities</div>
+            <div style="font-size: 11px;">Strategy</div>
+            <div style="font-size: 11px;">Fallback Pool ID</div>
+            <div style="font-size: 11px; text-align: center;">Credentials</div>
+            <div style="font-size: 11px; text-align: center;">Actions</div>
+          </div>
+        </div>
+        <!-- Virtualized scroll body -->
+        <div
+          class="pools-table-body"
+          bind:this={vscrollEl}
+          bind:clientHeight={viewportHeight}
+          onscroll={onVScroll}
+        >
+          <div style="height: {pools.length * ROW_HEIGHT}px; position: relative;">
+            <div style="position: absolute; top: {visibleRange.padTop}px; left: 0; right: 0;">
+              {#each visibleItems as pool (pool.id)}
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div class="pools-table-row pool-row cursor-pointer" style="height: {ROW_HEIGHT}px;" onclick={() => openPoolDetails(pool)}>
+                  <div style="text-align: center; width: 40px;" onclick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
+                      value={pool.id}
+                      bind:group={selectedPoolIds}
+                      onclick={(e) => e.stopPropagation()}
+                    />
                   </div>
-                </td>
-                <td>
-                  <span class="provider-badge {pool.strategy === 'round-robin' ? 'badge-openai' : 'badge-anthropic'}">
-                    {pool.strategy}
-                  </span>
-                </td>
-                <td class="font-mono text-sm">{pool.fallback_pool_id !== null && pool.fallback_pool_id !== undefined ? `#${pool.fallback_pool_id}` : '—'}</td>
-                <td class="font-mono text-sm text-center">{pool.credential_count || 0} keys</td>
-                <td>
-                  <div class="flex items-center justify-center gap-1">
-                    <Button variant="ghost" size="sm" onclick={(e) => openEditModal(pool, e)} title="Edit pool">
-                      <Pencil size={15} />
-                    </Button>
-                    <Button variant="ghost" size="sm" onclick={(e) => confirmDelete(pool.id, e)} title="Delete pool">
-                      <Trash2 size={15} class="text-red-500" />
-                    </Button>
+                  <div class="font-mono text-xs opacity-60">#{pool.id}</div>
+                  <div class="font-bold text-sm text-[#f97316]">{pool.model_pattern}</div>
+                  <div>
+                    <div class="flex gap-1 overflow-hidden">
+                      {#each capabilityKeys(pool.capabilities) as key}
+                        {@const badge = CAPABILITY_BADGES[key]}
+                        <span style="display:inline-block; padding:2px 7px; border-radius:5px; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; color:{badge.color}; background:{badge.bg}; border:1px solid {badge.border};">
+                          {badge.label}
+                        </span>
+                      {/each}
+                      {#if capabilityKeys(pool.capabilities).length === 0}
+                        <span class="text-xs opacity-30">—</span>
+                      {/if}
+                    </div>
                   </div>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+                  <div>
+                    <span class="provider-badge {pool.strategy === 'round-robin' ? 'badge-openai' : 'badge-anthropic'}">
+                      {pool.strategy}
+                    </span>
+                  </div>
+                  <div class="font-mono text-sm">{pool.fallback_pool_id !== null && pool.fallback_pool_id !== undefined ? `#${pool.fallback_pool_id}` : '—'}</div>
+                  <div class="font-mono text-sm text-center">{pool.credential_count || 0} keys</div>
+                  <div onclick={(e) => e.stopPropagation()}>
+                    <div class="flex items-center justify-center gap-1">
+                      <Button variant="ghost" size="sm" onclick={(e) => openEditModal(pool, e)} title="Edit pool">
+                        <Pencil size={15} />
+                      </Button>
+                      <Button variant="ghost" size="sm" onclick={(e) => confirmDelete(pool.id, e)} title="Delete pool">
+                        <Trash2 size={15} class="text-red-500" />
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+          {#if loadingMore}
+            <div class="flex items-center justify-center py-3 text-secondary text-sm">
+              <span class="animate-spin mr-2">⟳</span> Loading more...
+            </div>
+          {/if}
+        </div>
       </div>
     {/if}
   </div>
@@ -1055,5 +1182,51 @@
     max-height: 520px;
     overflow-y: auto;
     border: 1px solid var(--border-color);
+  }
+
+  /* ─── Virtualized table ─── */
+  .pools-table-header {
+    flex-shrink: 0;
+    overflow-x: auto;
+    background-color: var(--card-bg);
+    border-bottom: 2px solid var(--border-color);
+  }
+  .pools-table-body {
+    flex-grow: 1;
+    overflow-y: auto;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .pools-table-row {
+    display: grid;
+    grid-template-columns: 40px 70px 1fr 1.6fr 130px 120px 90px 110px;
+    align-items: center;
+    min-width: 900px;
+  }
+  .pools-table-headrow {
+    padding: 0;
+  }
+  .pools-table-headrow > div {
+    padding: 12px 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 700;
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+  .pools-table-row.pool-row {
+    border-bottom: 1px solid var(--border-color);
+    transition: background-color 0.15s;
+    background-color: var(--card-bg);
+  }
+  .pools-table-row.pool-row:hover {
+    background-color: var(--item-hover);
+  }
+  .pools-table-row.pool-row > div {
+    padding: 12px 16px;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

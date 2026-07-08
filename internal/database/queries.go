@@ -136,6 +136,71 @@ func ListModelPools(ctx context.Context, pool *pgxpool.Pool) ([]*ModelPoolRow, e
 	return pools, nil
 }
 
+// ModelPoolRowWithCount extends ModelPoolRow with the number of credentials
+// attached to the pool, used by the paginated admin pools list.
+type ModelPoolRowWithCount struct {
+	ModelPoolRow
+	CredentialCount int
+}
+
+// ListModelPoolsPaginated returns a single page of model routing pools
+// (ordered by model_pattern) together with each pool's credential count and
+// the total number of rows matching the search filter (ignoring limit/offset).
+// This powers the paginated / virtualized admin pools list.
+//
+//   - limit  <= 0 defaults to 100
+//   - offset < 0 is treated as 0
+//   - search (non-empty after trim) performs a case-insensitive ILIKE match
+//     across model_pattern and strategy
+//
+// The total count is obtained via COUNT(*) OVER() so it is fetched in the same
+// query round-trip, and the per-pool credential count is computed with a
+// LEFT JOIN + COUNT to avoid an N+1 query.
+func ListModelPoolsPaginated(ctx context.Context, pool *pgxpool.Pool, limit, offset int, search string) ([]*ModelPoolRowWithCount, int, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	var searchVal *string
+	if s := strings.TrimSpace(search); s != "" {
+		v := "%" + s + "%"
+		searchVal = &v
+	}
+
+	rows, err := pool.Query(ctx, `
+		SELECT mp.id, mp.model_pattern, mp.strategy, mp.fallback_pool_id, mp.capabilities, mp.created_at::text,
+		       COUNT(c.id) AS credential_count,
+		       COUNT(*) OVER() AS total_count
+		FROM model_pools mp
+		LEFT JOIN credentials c ON c.pool_id = mp.id
+		WHERE ($1::text IS NULL
+		       OR mp.model_pattern ILIKE $1
+		       OR mp.strategy ILIKE $1)
+		GROUP BY mp.id, mp.model_pattern, mp.strategy, mp.fallback_pool_id, mp.capabilities, mp.created_at
+		ORDER BY mp.model_pattern
+		LIMIT $2 OFFSET $3
+	`, searchVal, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to list pools (paginated): %w", err)
+	}
+	defer rows.Close()
+
+	var pools []*ModelPoolRowWithCount
+	total := 0
+	for rows.Next() {
+		p := &ModelPoolRowWithCount{}
+		if err := rows.Scan(&p.ID, &p.ModelPattern, &p.Strategy, &p.FallbackPoolID, &p.Capabilities, &p.CreatedAt, &p.CredentialCount, &total); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan pool: %w", err)
+		}
+		pools = append(pools, p)
+	}
+	// total stays 0 when there are no rows, which is the correct count.
+	return pools, total, nil
+}
+
 // GetModelPool returns a single model pool by ID.
 func GetModelPool(ctx context.Context, dbPool *pgxpool.Pool, id int) (*ModelPoolRow, error) {
 	row := dbPool.QueryRow(ctx, `
