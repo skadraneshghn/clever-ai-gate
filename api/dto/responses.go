@@ -71,6 +71,16 @@ type MetricsResponse struct {
 	QueueDepth     int     `json:"telemetry_queue_depth" example:"150"`
 }
 
+// PaginatedCredentialsResponse wraps a page of credentials together with the
+// total matching count, enabling cursor-free pagination and virtualized
+// rendering on the admin dashboard.
+type PaginatedCredentialsResponse struct {
+	Data   []CredentialResponse `json:"data"`
+	Total  int                  `json:"total" example:"1234"`
+	Limit  int                  `json:"limit" example:"100"`
+	Offset int                  `json:"offset" example:"0"`
+}
+
 // MaskAPIKey returns a masked version of an API key showing only prefix and last 4 chars.
 func MaskAPIKey(key string) string {
 	if len(key) <= 8 {

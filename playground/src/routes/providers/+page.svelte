@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { KeyRound, RefreshCw, Plus, Shield, AlertTriangle, Server, Pencil, Trash2, X } from '@lucide/svelte';
+  import { KeyRound, RefreshCw, Plus, Shield, AlertTriangle, Server, Pencil, Trash2, X, Search } from '@lucide/svelte';
   import { appState } from '$lib/state.svelte.js';
   import Button from '$lib/components/Button.svelte';
   import Input from '$lib/components/Input.svelte';
@@ -9,9 +9,46 @@
 
   // ─── Local State ──────────────────────────────────────────────────────────
   let providerCredentials = $state([]);
+  let totalCount = $state(0);
   let providerPools = $state([]);
   let providerLoading = $state(false);
+  let loadingMore = $state(false);
   let providerError = $state('');
+
+  // Pagination / lazy-loading
+  const PAGE_SIZE = 100;
+  let currentPage = $state(0);
+  let hasMore = $state(false);
+
+  // Filtering
+  let searchQuery = $state('');
+  let providerFilter = $state('');
+  let searchTimer = null;
+
+  // Virtualization
+  const ROW_HEIGHT = 45;
+  const OVERSCAN = 8;
+  let scrollTop = $state(0);
+  let viewportHeight = $state(0);
+  let vscrollEl;
+
+  let visibleRange = $derived.by(() => {
+    const loaded = providerCredentials.length;
+    if (loaded === 0 || viewportHeight === 0) {
+      return { start: 0, end: 0, padTop: 0, padBottom: 0 };
+    }
+    const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
+    const visibleCount = Math.ceil(viewportHeight / ROW_HEIGHT) + OVERSCAN * 2;
+    const end = Math.min(loaded, start + visibleCount);
+    return {
+      start,
+      end,
+      padTop: start * ROW_HEIGHT,
+      padBottom: (loaded - end) * ROW_HEIGHT
+    };
+  });
+
+  let visibleItems = $derived(providerCredentials.slice(visibleRange.start, visibleRange.end));
 
   // Add/Edit modals
   let showAddProviderModal = $state(false);
@@ -44,10 +81,16 @@
   // ─── Load state on adminKey change ─────────────────────────────────────────
   $effect(() => {
     if (appState.adminKey.trim()) {
-      loadCredentials();
+      reloadCredentials();
       loadPools();
     }
   });
+
+  // Debounced search/filter → reload first page
+  function onSearchInput() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => reloadCredentials(), 300);
+  }
 
   // ─── API Helper Headers ───────────────────────────────────────────────────
   function adminHeaders() {
@@ -57,24 +100,75 @@
     };
   }
 
-  async function loadCredentials() {
+  async function loadCredentialsPage(page) {
+    try {
+      const params = new URLSearchParams();
+      params.append('limit', String(PAGE_SIZE));
+      params.append('offset', String(page * PAGE_SIZE));
+      if (searchQuery.trim()) params.append('search', searchQuery.trim());
+      if (providerFilter) params.append('provider', providerFilter);
+
+      const res = await fetch(`/api/v1/admin/credentials?${params.toString()}`, { headers: adminHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        const rows = data.data ?? data;
+        return { rows, total: data.total ?? rows.length };
+      }
+      const err = await res.json();
+      return { error: err.error || `Error ${res.status}` };
+    } catch (e) {
+      return { error: `Network error: ${e.message}` };
+    }
+  }
+
+  async function reloadCredentials() {
     providerLoading = true;
     providerError = '';
+    currentPage = 0;
     appState.apiLoading = true;
     try {
-      const res = await fetch('/api/v1/admin/credentials', { headers: adminHeaders() });
-      if (res.ok) {
-        providerCredentials = await res.json();
-        selectedIds = selectedIds.filter(id => providerCredentials.some(c => c.id === id));
+      const result = await loadCredentialsPage(0);
+      if (result.error) {
+        providerError = result.error;
       } else {
-        const err = await res.json();
-        providerError = err.error || `Error ${res.status}`;
+        providerCredentials = result.rows;
+        totalCount = result.total;
+        hasMore = result.rows.length < result.total;
+        selectedIds = selectedIds.filter(id => providerCredentials.some(c => c.id === id));
+        if (vscrollEl) vscrollEl.scrollTop = 0;
       }
-    } catch (e) {
-      providerError = `Network error: ${e.message}`;
     } finally {
       providerLoading = false;
       appState.apiLoading = false;
+    }
+  }
+
+  async function loadMore() {
+    if (loadingMore || !hasMore) return;
+    loadingMore = true;
+    appState.apiLoading = true;
+    const nextPage = currentPage + 1;
+    try {
+      const result = await loadCredentialsPage(nextPage);
+      if (result.error) {
+        appState.addToast('error', result.error);
+      } else {
+        providerCredentials = [...providerCredentials, ...result.rows];
+        currentPage = nextPage;
+        hasMore = providerCredentials.length < result.total;
+      }
+    } finally {
+      loadingMore = false;
+      appState.apiLoading = false;
+    }
+  }
+
+  function onVScroll(e) {
+    scrollTop = e.target.scrollTop;
+    // Trigger lazy load when near the bottom of the loaded list
+    const remaining = providerCredentials.length * ROW_HEIGHT - (scrollTop + viewportHeight);
+    if (hasMore && !loadingMore && remaining < ROW_HEIGHT * 10) {
+      loadMore();
     }
   }
 
@@ -118,7 +212,7 @@
       if (res.ok || res.status === 201) {
         appState.addToast('success', 'Credential created successfully');
         showAddProviderModal = false;
-        loadCredentials();
+        reloadCredentials();
       } else {
         const err = await res.json();
         appState.addToast('error', err.details || err.error || 'Failed to create credential');
@@ -188,7 +282,7 @@
           : autoDiscoverForm.provider.toUpperCase();
         appState.addToast('success', `Successfully synchronized ${data.models_count || 0} ${displayName} models`);
         showAddProviderModal = false;
-        loadCredentials();
+        reloadCredentials();
         if (appState.apiKey) appState.loadModels();
       } else {
         const err = await res.json();
@@ -232,7 +326,7 @@
       if (res.ok) {
         appState.addToast('success', 'Credential updated successfully');
         showEditModal = false;
-        loadCredentials();
+        reloadCredentials();
       } else {
         const err = await res.json();
         appState.addToast('error', err.details || err.error || 'Failed to update credential');
@@ -262,7 +356,7 @@
         appState.addToast('success', 'Credential deleted successfully');
         showDeleteConfirm = false;
         deleteTargetId = null;
-        loadCredentials();
+        reloadCredentials();
       } else {
         const err = await res.json();
         appState.addToast('error', err.details || err.error || 'Failed to delete credential');
@@ -295,7 +389,7 @@
         appState.addToast('success', `${selectedIds.length} credentials deleted successfully`);
         showBulkDeleteConfirm = false;
         selectedIds = [];
-        loadCredentials();
+        reloadCredentials();
         loadPools();
         if (appState.apiKey) appState.loadModels();
       } else {
@@ -330,7 +424,7 @@
     const key = appState.adminKey.trim();
     if (!key) return;
     localStorage.setItem('cag_admin_key', key);
-    loadCredentials();
+    reloadCredentials();
     loadPools();
   }
 
@@ -345,7 +439,7 @@
       if (res.ok) {
         const data = await res.json();
         appState.addToast('success', data.message || `Re-synced ${data.models_count ?? 0} model pools`);
-        await loadCredentials();
+        await reloadCredentials();
         if (appState.apiKey) appState.loadModels();
       } else {
         const err = await res.json();
@@ -361,7 +455,7 @@
 
   onMount(() => {
     if (appState.adminKey.trim()) {
-      loadCredentials();
+      reloadCredentials();
       loadPools();
     }
   });
@@ -372,7 +466,7 @@
     <KeyRound size={20} class="text-[#f97316]" />
     <span class="font-bold text-base">Provider Credentials</span>
     {#if appState.adminKey.trim()}
-      <span class="text-xs font-bold text-secondary bg-gray-500/10 border border-gray-500/20 px-2.5 py-0.5 rounded-full uppercase">{providerCredentials.length} registered</span>
+      <span class="text-xs font-bold text-secondary bg-gray-500/10 border border-gray-500/20 px-2.5 py-0.5 rounded-full uppercase">{totalCount} registered</span>
     {/if}
   </div>
   
@@ -422,21 +516,58 @@
     </Card>
   </div>
 {:else}
-  <!-- Providers data grid -->
-  <div class="providers-grid-wrap flex-grow overflow-auto p-6">
+  <!-- Providers data grid (virtualized + lazy-loaded) -->
+  <div class="providers-grid-wrap flex flex-col flex-grow overflow-hidden">
+    <!-- Filter / search toolbar -->
+    <div class="flex items-center gap-3 px-6 py-3 border-b shrink-0">
+      <div class="relative flex-grow max-w-sm">
+        <Search size={15} class="absolute left-3 top-1/2 -translate-y-1/2 text-secondary opacity-50" />
+        <input
+          type="text"
+          class="w-full pl-9 pr-3 py-1.5 text-sm rounded-lg bg-[var(--input-bg)] border border-[var(--border-color)] focus:border-[#f97316] focus:outline-none"
+          placeholder="Search provider, URL, model..."
+          bind:value={searchQuery}
+          oninput={onSearchInput}
+        />
+      </div>
+      <select
+        class="text-sm rounded-lg bg-[var(--input-bg)] border border-[var(--border-color)] focus:border-[#f97316] focus:outline-none px-3 py-1.5 cursor-pointer"
+        bind:value={providerFilter}
+        onchange={onSearchInput}
+      >
+        <option value="">All providers</option>
+        <option value="openai">OpenAI</option>
+        <option value="anthropic">Anthropic</option>
+        <option value="nvidia">NVIDIA</option>
+        <option value="ollama">Ollama</option>
+        <option value="openrouter">OpenRouter</option>
+        <option value="1minai">1min.ai</option>
+        <option value="cloudflare">Cloudflare</option>
+        <option value="sarvam">Sarvam</option>
+        <option value="puter">Puter</option>
+        <option value="custom">Custom</option>
+      </select>
+      <span class="text-xs text-secondary ml-auto">
+        {#if totalCount > 0}
+          Showing {providerCredentials.length} of {totalCount}
+          {#if loadingMore}<span class="opacity-60"> · loading more…</span>{/if}
+        {/if}
+      </span>
+    </div>
+
     {#if providerLoading}
-      <div class="providers-loading flex flex-col items-center justify-center h-64">
+      <div class="providers-loading flex flex-col items-center justify-center flex-grow">
         <div class="animate-spin text-[#f97316] text-xl">⟳</div>
         <p class="text-sm mt-2 text-secondary">Loading credentials...</p>
       </div>
     {:else if providerError}
-      <div class="providers-loading flex flex-col items-center justify-center h-64">
+      <div class="providers-loading flex flex-col items-center justify-center flex-grow">
         <AlertTriangle size={40} class="text-red-500 mb-2" />
         <p class="text-red-500 text-sm font-semibold">{providerError}</p>
-        <Button variant="primary" class="mt-4" onclick={loadCredentials}>Retry</Button>
+        <Button variant="primary" class="mt-4" onclick={reloadCredentials}>Retry</Button>
       </div>
     {:else if providerCredentials.length === 0}
-      <div class="providers-loading flex flex-col items-center justify-center h-64">
+      <div class="providers-loading flex flex-col items-center justify-center flex-grow">
         <Server size={48} class="opacity-20 mb-4" />
         <p class="opacity-50 text-sm text-secondary">No credentials registered yet.</p>
         <Button variant="primary" class="mt-4" onclick={openAddProviderModal}>
@@ -444,70 +575,85 @@
         </Button>
       </div>
     {:else}
-      <div class="providers-table-container">
-        <table class="providers-table">
-          <thead>
-            <tr>
-              <th style="width: 40px; text-align: center;">
-                <input
-                  type="checkbox"
-                  class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
-                  checked={selectedIds.length === providerCredentials.length && providerCredentials.length > 0}
-                  onchange={(e) => {
-                    if (e.target.checked) {
-                      selectedIds = providerCredentials.map(c => c.id);
-                    } else {
-                      selectedIds = [];
-                    }
-                  }}
-                />
-              </th>
-              <th style="font-size: 11px;">ID</th>
-              <th style="font-size: 11px;">Provider</th>
-              <th style="font-size: 11px;">Model Pattern</th>
-              <th style="font-size: 11px;">Base URL</th>
-              <th style="font-size: 11px; text-align: center;">Weight</th>
-              <th style="font-size: 11px; text-align: center;">Health</th>
-              <th style="font-size: 11px;">Key</th>
-              <th style="font-size: 11px; text-align: center;">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each providerCredentials as cred (cred.id)}
-              <tr class="provider-row">
-                <td style="text-align: center; width: 40px;">
-                  <input
-                    type="checkbox"
-                    class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
-                    value={cred.id}
-                    bind:group={selectedIds}
-                  />
-                </td>
-                <td class="font-mono text-xs opacity-60">#{cred.id}</td>
-                <td>
-                  <span class="provider-badge {providerBadgeClass(cred.provider)}">{cred.provider}</span>
-                </td>
-                <td class="font-mono text-sm">{cred.model_pattern || '—'}</td>
-                <td class="text-sm truncate" style="max-width: 250px;" title={cred.base_url}>{cred.base_url}</td>
-                <td class="text-center font-mono text-sm">{cred.weight}</td>
-                <td class="text-center">
-                  <span class="health-dot {cred.is_healthy ? 'healthy' : 'unhealthy'}" title={cred.is_healthy ? 'Healthy' : (cred.last_error || 'Unhealthy')}></span>
-                </td>
-                <td class="font-mono text-xs opacity-50">{cred.key_mask}</td>
-                <td>
-                  <div class="flex items-center justify-center gap-1">
-                    <Button variant="ghost" size="sm" onclick={() => openEditModal(cred)} title="Edit credential">
-                      <Pencil size={15} />
-                    </Button>
-                    <Button variant="ghost" size="sm" onclick={() => confirmDelete(cred.id)} title="Delete credential">
-                      <Trash2 size={15} class="text-red-500" />
-                    </Button>
+      <!-- Virtualized table -->
+      <div class="providers-table-container flex flex-col flex-grow overflow-hidden">
+        <!-- Fixed header -->
+        <div class="providers-table-header">
+          <div class="providers-table-row providers-table-headrow">
+            <div style="width: 40px; text-align: center;">
+              <input
+                type="checkbox"
+                class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
+                checked={selectedIds.length === providerCredentials.length && providerCredentials.length > 0}
+                onchange={(e) => {
+                  if (e.target.checked) {
+                    selectedIds = providerCredentials.map(c => c.id);
+                  } else {
+                    selectedIds = [];
+                  }
+                }}
+              />
+            </div>
+            <div style="font-size: 11px;">ID</div>
+            <div style="font-size: 11px;">Provider</div>
+            <div style="font-size: 11px;">Model Pattern</div>
+            <div style="font-size: 11px;">Base URL</div>
+            <div style="font-size: 11px; text-align: center;">Weight</div>
+            <div style="font-size: 11px; text-align: center;">Health</div>
+            <div style="font-size: 11px;">Key</div>
+            <div style="font-size: 11px; text-align: center;">Actions</div>
+          </div>
+        </div>
+        <!-- Virtualized scroll body -->
+        <div
+          class="providers-table-body"
+          bind:this={vscrollEl}
+          bind:clientHeight={viewportHeight}
+          onscroll={onVScroll}
+        >
+          <div style="height: {providerCredentials.length * ROW_HEIGHT}px; position: relative;">
+            <div style="position: absolute; top: {visibleRange.padTop}px; left: 0; right: 0;">
+              {#each visibleItems as cred, i (cred.id)}
+                <div class="providers-table-row provider-row" style="height: {ROW_HEIGHT}px;">
+                  <div style="text-align: center; width: 40px;">
+                    <input
+                      type="checkbox"
+                      class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
+                      value={cred.id}
+                      bind:group={selectedIds}
+                    />
                   </div>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+                  <div class="font-mono text-xs opacity-60">#{cred.id}</div>
+                  <div>
+                    <span class="provider-badge {providerBadgeClass(cred.provider)}">{cred.provider}</span>
+                  </div>
+                  <div class="font-mono text-sm">{cred.model_pattern || '—'}</div>
+                  <div class="text-sm truncate" style="max-width: 250px;" title={cred.base_url}>{cred.base_url}</div>
+                  <div class="text-center font-mono text-sm">{cred.weight}</div>
+                  <div class="text-center">
+                    <span class="health-dot {cred.is_healthy ? 'healthy' : 'unhealthy'}" title={cred.is_healthy ? 'Healthy' : (cred.last_error || 'Unhealthy')}></span>
+                  </div>
+                  <div class="font-mono text-xs opacity-50">{cred.key_mask}</div>
+                  <div>
+                    <div class="flex items-center justify-center gap-1">
+                      <Button variant="ghost" size="sm" onclick={() => openEditModal(cred)} title="Edit credential">
+                        <Pencil size={15} />
+                      </Button>
+                      <Button variant="ghost" size="sm" onclick={() => confirmDelete(cred.id)} title="Delete credential">
+                        <Trash2 size={15} class="text-red-500" />
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+          {#if loadingMore}
+            <div class="flex items-center justify-center py-3 text-secondary text-sm">
+              <span class="animate-spin mr-2">⟳</span> Loading more...
+            </div>
+          {/if}
+        </div>
       </div>
     {/if}
   </div>
@@ -630,7 +776,10 @@
       {/if}
 
       {#if autoDiscoverForm.provider === 'custom'}
-        <Input type="text" label="Label (optional)" placeholder="e.g. Together AI, DeepInfra" bind:value={autoDiscoverForm.label} />
+        <Input type="text" label="Label (namespace prefix)" placeholder="e.g. huggingface, together, deepinfra" bind:value={autoDiscoverForm.label} />
+        <div class="rounded-lg border border-[#f97316]/20 bg-[#f97316]/5 px-4 py-3 text-xs text-[#fb923c] leading-relaxed">
+          🏷️ The label namespaces every discovered model as <code>&lt;label&gt;/&lt;model&gt;</code> (e.g. <code>huggingface/meta-llama/Llama-3</code>). This keeps models from different providers in separate pools. The clean name (without the prefix) is also registered so strict clients still work. Requests to <code>&lt;label&gt;/...</code> automatically strip the prefix before hitting the upstream API.
+        </div>
       {/if}
 
       {#if autoDiscoverForm.provider === 'cloudflare'}
@@ -806,6 +955,52 @@
   .tab-btn.active {
     color: #f97316;
     border-bottom: 2px solid #f97316;
+  }
+
+  /* ─── Virtualized table ─── */
+  .providers-table-header {
+    flex-shrink: 0;
+    overflow-x: auto;
+    background-color: var(--card-bg);
+    border-bottom: 2px solid var(--border-color);
+  }
+  .providers-table-body {
+    flex-grow: 1;
+    overflow-y: auto;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .providers-table-row {
+    display: grid;
+    grid-template-columns: 40px 70px 130px 1fr 1.4fr 70px 70px 130px 110px;
+    align-items: center;
+    min-width: 900px;
+  }
+  .providers-table-headrow {
+    padding: 0;
+  }
+  .providers-table-headrow > div {
+    padding: 12px 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 700;
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+  .providers-table-row.provider-row {
+    border-bottom: 1px solid var(--border-color);
+    transition: background-color 0.15s;
+    background-color: var(--card-bg);
+  }
+  .providers-table-row.provider-row:hover {
+    background-color: var(--item-hover);
+  }
+  .providers-table-row.provider-row > div {
+    padding: 12px 16px;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* OpenRouter brand badge — indigo tone matching openrouter.ai visual identity */

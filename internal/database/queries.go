@@ -277,6 +277,72 @@ func ListAllCredentials(ctx context.Context, pool *pgxpool.Pool) ([]*CredentialW
 	return creds, nil
 }
 
+// ListCredentialsPaginated returns a single page of credentials joined with
+// their pool model pattern, plus the total number of rows matching the same
+// filters (ignoring limit/offset). This powers the paginated / virtualized
+// admin credentials list.
+//
+//   - limit  <= 0 defaults to 100
+//   - search (non-empty after trim) performs a case-insensitive ILIKE match
+//     across provider, base_url and model_pattern
+//   - provider (non-empty after trim) performs an exact provider filter
+//
+// The total count is obtained via a COUNT(*) OVER() window function so it is
+// fetched in the same query round-trip.
+func ListCredentialsPaginated(ctx context.Context, pool *pgxpool.Pool, limit, offset int, search, provider string) ([]*CredentialWithPool, int, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	var searchVal, providerVal *string
+	if s := strings.TrimSpace(search); s != "" {
+		v := "%" + s + "%"
+		searchVal = &v
+	}
+	if p := strings.TrimSpace(provider); p != "" {
+		providerVal = &p
+	}
+
+	rows, err := pool.Query(ctx, `
+		SELECT c.id, c.pool_id, c.provider, c.encrypted_key, c.base_url, c.weight,
+		       c.is_healthy, c.last_error, c.created_at::text,
+		       COALESCE(mp.model_pattern, '') AS model_pattern, c.prefix,
+		       COUNT(*) OVER() AS total_count
+		FROM credentials c
+		LEFT JOIN model_pools mp ON c.pool_id = mp.id
+		WHERE ($1::text IS NULL OR c.provider = $1)
+		  AND ($2::text IS NULL
+		       OR c.provider ILIKE $2
+		       OR c.base_url ILIKE $2
+		       OR COALESCE(mp.model_pattern, '') ILIKE $2)
+		ORDER BY c.id
+		LIMIT $3 OFFSET $4
+	`, providerVal, searchVal, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to list credentials (paginated): %w", err)
+	}
+	defer rows.Close()
+
+	var creds []*CredentialWithPool
+	total := 0
+	for rows.Next() {
+		c := &CredentialWithPool{}
+		if err := rows.Scan(
+			&c.ID, &c.PoolID, &c.Provider, &c.EncryptedKey, &c.BaseURL, &c.Weight,
+			&c.IsHealthy, &c.LastError, &c.CreatedAt, &c.ModelPattern, &c.Prefix,
+			&total,
+		); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan credential: %w", err)
+		}
+		creds = append(creds, c)
+	}
+	// total stays 0 when there are no rows, which is the correct count.
+	return creds, total, nil
+}
+
 // GetCredential returns a single credential by ID.
 func GetCredential(ctx context.Context, pool *pgxpool.Pool, id int) (*CredentialRow, error) {
 	row := pool.QueryRow(ctx, `
