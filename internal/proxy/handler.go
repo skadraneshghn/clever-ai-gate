@@ -301,25 +301,19 @@ func (h *Handler) Handle(c *gin.Context) {
 			)
 		}
 
-		// Fix 1: Strip the routing prefix from the raw JSON bytes.
-		// bytes.Replace is a single-pass O(n) scan — no alloc overhead from
-		// json.Unmarshal/Marshal and no risk of key reordering.
-		// We replace the full quoted token to avoid partial matches.
-		oldToken := []byte(`"` + model + `"`)
-		newToken := []byte(`"` + upstreamModel + `"`)
-		body = bytes.Replace(body, oldToken, newToken, 1)
+		// Strip the routing prefix from the raw JSON bytes in-place.
+		// stripModelPrefixInPlace modifies the buffer directly, avoiding the
+		// full-body heap copy that bytes.Replace would allocate.
+		body = stripModelPrefixInPlace(body, model, "nvidia/")
 	}
 
 	// --- Ollama Payload Sanitization ---
 	// For Ollama-prefixed models the routing prefix must be stripped from the
 	// JSON "model" field so the upstream Ollama server receives the clean model
 	// name it expects (e.g., "llama3:8b" instead of "ollama/llama3:8b").
-	// Uses the same byte-level replacement as NVIDIA — single-pass O(n) scan.
+	// Uses the same in-place byte-level stripping as NVIDIA — zero heap allocation.
 	if isOllama {
-		upstreamModel := strings.TrimPrefix(model, "ollama/")
-		oldToken := []byte(`"` + model + `"`)
-		newToken := []byte(`"` + upstreamModel + `"`)
-		body = bytes.Replace(body, oldToken, newToken, 1)
+		body = stripModelPrefixInPlace(body, model, "ollama/")
 	}
 
 	// --- Cloudflare Payload Sanitization ---
@@ -327,12 +321,9 @@ func (h *Handler) Handle(c *gin.Context) {
 	// stripped from the JSON "model" field so Cloudflare receives the clean
 	// model ID (e.g. "@cf/meta/llama-3.1-8b-instruct" instead of
 	// "cloudflare/@cf/meta/llama-3.1-8b-instruct").
-	// Uses the same single-pass O(n) byte-level replacement.
+	// Uses the same in-place byte-level stripping.
 	if isCloudflare {
-		upstreamModel := strings.TrimPrefix(model, "cloudflare/")
-		oldToken := []byte(`"` + model + `"`)
-		newToken := []byte(`"` + upstreamModel + `"`)
-		body = bytes.Replace(body, oldToken, newToken, 1)
+		body = stripModelPrefixInPlace(body, model, "cloudflare/")
 	}
 
 	// --- Sarvam AI Payload Sanitization ---
@@ -346,10 +337,7 @@ func (h *Handler) Handle(c *gin.Context) {
 	// gated on cred.Provider == "sarvam", so it covers BOTH the prefixed and
 	// the clean-alias routing forms.
 	if isSarvam {
-		upstreamModel := strings.TrimPrefix(model, "sarvam/")
-		oldToken := []byte(`"` + model + `"`)
-		newToken := []byte(`"` + upstreamModel + `"`)
-		body = bytes.Replace(body, oldToken, newToken, 1)
+		body = stripModelPrefixInPlace(body, model, "sarvam/")
 	}
 
 	// --- Puter Proactive Completion Optimization ---
@@ -359,10 +347,7 @@ func (h *Handler) Handle(c *gin.Context) {
 
 	// --- Puter Payload Sanitization ---
 	if isPuter {
-		upstreamModel := strings.TrimPrefix(model, "puter/")
-		oldToken := []byte(`"` + model + `"`)
-		newToken := []byte(`"` + upstreamModel + `"`)
-		body = bytes.Replace(body, oldToken, newToken, 1)
+		body = stripModelPrefixInPlace(body, model, "puter/")
 	}
 
 	// Step 5-8: Attempt with automatic failover
@@ -530,14 +515,12 @@ retryLoop:
 				var promptTokens int
 
 				if pctx.isStream && statusCode == http.StatusOK {
-					type streamResult struct {
-						Text   string `json:"text"`
-						Tokens int    `json:"tokens"`
-					}
-					var sResult streamResult
-					if err := json.Unmarshal(errBody, &sResult); err == nil {
-						responseText = sResult.Text
-						completionTokens = sResult.Tokens
+					// Use jsonparser (reflection-free, zero-alloc) instead of
+					// json.Unmarshal which uses reflect and creates heap-escaped
+					// type descriptors on every streaming request.
+					responseText, _ = jsonparser.GetString(errBody, "text")
+					if tok, err := jsonparser.GetInt(errBody, "tokens"); err == nil {
+						completionTokens = int(tok)
 					}
 				} else {
 					responseText = extractResponseText(errBody)
@@ -1464,6 +1447,40 @@ func (h *Handler) ListModels(c *gin.Context) {
 		Object: "list",
 		Data:   data,
 	})
+}
+
+// --- In-Place Model Prefix Stripping ---
+
+// stripModelPrefixInPlace removes a routing prefix from the JSON "model" field
+// value directly within the existing byte slice, avoiding the full-body copy
+// that bytes.Replace would allocate.
+//
+// For example, given body containing `"model":"nvidia/glm-5.1"` and
+// prefixToStrip="nvidia/", the result is `"model":"glm-5.1"` with the tail
+// of the body shifted backward to close the gap.
+//
+// The caller must ensure that:
+//   - body has enough capacity (always true when shrinking)
+//   - the model string (fullModel) is an independent copy, NOT an unsafe
+//     view into body — the in-place modification would corrupt such a view.
+func stripModelPrefixInPlace(body []byte, fullModel, prefixToStrip string) []byte {
+	oldToken := []byte(`"` + fullModel + `"`)
+	upstreamModel := fullModel[len(prefixToStrip):]
+	newToken := []byte(`"` + upstreamModel + `"`)
+
+	idx := bytes.Index(body, oldToken)
+	if idx == -1 {
+		return body
+	}
+
+	diff := len(oldToken) - len(newToken)
+
+	// Shift the tail backward to close the gap left by the shorter replacement.
+	// Go's copy() handles overlapping dst/src correctly when dst < src.
+	copy(body[idx+len(newToken):], body[idx+len(oldToken):])
+	copy(body[idx:], newToken)
+
+	return body[:len(body)-diff]
 }
 
 // --- NVIDIA Reasoning Parameter Injection ---

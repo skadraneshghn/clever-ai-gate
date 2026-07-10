@@ -64,10 +64,14 @@ func (rl *RateLimiter) Middleware() gin.HandlerFunc {
 		// Check if window has expired
 		windowStart := atomic.LoadInt64(&limiter.windowStart)
 		if now-windowStart > windowDuration {
-			// Reset window — race condition here is acceptable (slight over-count)
-			atomic.StoreInt64(&limiter.windowStart, now)
-			atomic.StoreInt64(&limiter.count, 0)
-			atomic.StoreInt64(&limiter.limit, int64(rpmLimit))
+			// Elect a single goroutine to perform window rotation via CAS.
+			// Without CAS, multiple goroutines crossing the boundary simultaneously
+			// would each reset the counter — wiping out counts recorded by others
+			// and allowing tenants to exceed their hard quota limits.
+			if atomic.CompareAndSwapInt64(&limiter.windowStart, windowStart, now) {
+				atomic.StoreInt64(&limiter.count, 0)
+				atomic.StoreInt64(&limiter.limit, int64(rpmLimit))
+			}
 		}
 
 		// Increment counter

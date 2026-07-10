@@ -28,7 +28,7 @@ func BuildOptimizedTransport(cfg *config.Config) *http.Transport {
 					// Disable Nagle's algorithm — flush every SSE token chunk immediately.
 					// Without this, small writes (individual tokens ~20-50 bytes) get buffered
 					// for up to 200ms before being sent, destroying perceived streaming speed.
-					_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
+					_ = setTCPNoDelay(fd)
 				})
 			},
 		}).DialContext,
