@@ -166,9 +166,13 @@ func main() {
 	defer telemetryPipeline.Stop()
 
 	// --- Step 8: Build HTTP transport and proxy handler ---
-	transport := proxy.BuildOptimizedTransport(cfg)
+	transport, edgeProber := proxy.BuildOptimizedTransport(cfg, logger)
 	httpClient := proxy.BuildHTTPClient(transport)
 	proxyHandler := proxy.NewHandler(httpClient, cacheStore, logger, telemetryPipeline, broadcaster)
+
+	// Start edge IP probing and connection pre-warming
+	edgeProber.Start()
+	edgeProber.StartPreWarming(httpClient)
 
 	// --- Step 9: Initialize health handler ---
 	healthHandler := health.New(dbPool)
@@ -225,6 +229,9 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("server forced to shutdown", zap.Error(err))
 	}
+
+	// Stop edge probing and connection pre-warming
+	edgeProber.Stop()
 
 	logger.Info("server stopped gracefully")
 }

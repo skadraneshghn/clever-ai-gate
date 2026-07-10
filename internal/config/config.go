@@ -55,6 +55,10 @@ type Config struct {
 	DialTimeout         time.Duration
 	KeepAlive           time.Duration
 
+	// Edge Probing — comma-separated list of upstream hosts to probe for
+	// fastest Anycast CDN edge IP (e.g. "api.cloudflare.com,api-inference.huggingface.co")
+	EdgeProbeHosts string
+
 	// Rate Limiting
 	DefaultRateLimitRPM int
 
@@ -105,6 +109,9 @@ func Load() *Config {
 		IdleConnTimeout:     envDuration("IDLE_CONN_TIMEOUT", 120*time.Second),
 		DialTimeout:         envDuration("DIAL_TIMEOUT", 2*time.Second),
 		KeepAlive:           envDuration("KEEP_ALIVE", 90*time.Second),
+
+		// Edge probing — resolves Anycast IPs and selects the fastest edge node
+		EdgeProbeHosts: envStr("EDGE_PROBE_HOSTS", "api.cloudflare.com,api-inference.huggingface.co"),
 
 		// Rate limiting defaults
 		DefaultRateLimitRPM: envInt("DEFAULT_RATE_LIMIT_RPM", 60),

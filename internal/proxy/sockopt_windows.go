@@ -15,3 +15,15 @@ const (
 func setTCPNoDelay(fd uintptr) error {
 	return syscall.SetsockoptInt(syscall.Handle(fd), ipprotoTCP, tcpNoDelay, 1)
 }
+
+// setTCPQuickAck is a Linux-only optimization. On Windows, the TCP stack
+// does not support TCP_QUICKACK, so this is a no-op.
+func setTCPQuickAck(fd uintptr) error {
+	return nil
+}
+
+// setTCPFastOpenConnect is a Linux-only optimization (Linux 4.11+).
+// On Windows, TCP Fast Open is managed differently and this is a no-op.
+func setTCPFastOpenConnect(fd uintptr) error {
+	return nil
+}

@@ -10,21 +10,26 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// RateLimiter implements per-tenant rate limiting using atomic counters
-// with a sliding window approach.
+// RateLimiter implements per-tenant rate limiting using a bit-packed atomic
+// state variable for lock-free, zero-contention synchronization on the hot-path.
 //
-// Design: Each tenant gets an entry with an atomic request counter and
-// a window start timestamp. When the window expires, the counter resets.
-// This avoids mutexes on the hot-path.
+// Design: Each tenant gets an entry with a single uint64 state that packs the
+// minute epoch (high 32 bits) and the request counter (low 32 bits). Window
+// rotation and counter increment execute as a single atomic CAS transaction,
+// eliminating the micro-gap race between separate atomic stores.
 type RateLimiter struct {
-	limiters sync.Map // map[string]*tenantLimiter
+	limiters   sync.Map // map[string]*tenantLimiter
 	defaultRPM int
 }
 
+// tenantLimiter packs the minute epoch and request counter into a single
+// uint64 so that window rotation and counter increment can be performed
+// atomically via a single CompareAndSwapUint64.
+//
+//   High 32 bits: Minute epoch (unix seconds / 60)
+//   Low 32 bits:  Request counter for the current minute
 type tenantLimiter struct {
-	count       int64
-	windowStart int64 // Unix nanosecond
-	limit       int64
+	state uint64
 }
 
 // NewRateLimiter creates a new rate limiter with the given default RPM.
@@ -34,7 +39,8 @@ func NewRateLimiter(defaultRPM int) *RateLimiter {
 	}
 }
 
-// Middleware returns a Gin middleware that enforces rate limits.
+// Middleware returns a Gin middleware that enforces rate limits with
+// zero-gap coordination via a bit-packed atomic CAS loop.
 func (rl *RateLimiter) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tenantID, exists := c.Get("tenant_id")
@@ -49,57 +55,70 @@ func (rl *RateLimiter) Middleware() gin.HandlerFunc {
 			rpmLimit = limit.(int)
 		}
 
-		key := tenantID.(string)
-		now := time.Now().UnixNano()
-		windowDuration := int64(time.Minute)
-
-		// Get or create limiter for this tenant
-		limiterVal, _ := rl.limiters.LoadOrStore(key, &tenantLimiter{
-			count:       0,
-			windowStart: now,
-			limit:       int64(rpmLimit),
-		})
-		limiter := limiterVal.(*tenantLimiter)
-
-		// Check if window has expired
-		windowStart := atomic.LoadInt64(&limiter.windowStart)
-		if now-windowStart > windowDuration {
-			// Elect a single goroutine to perform window rotation via CAS.
-			// Without CAS, multiple goroutines crossing the boundary simultaneously
-			// would each reset the counter — wiping out counts recorded by others
-			// and allowing tenants to exceed their hard quota limits.
-			if atomic.CompareAndSwapInt64(&limiter.windowStart, windowStart, now) {
-				atomic.StoreInt64(&limiter.count, 0)
-				atomic.StoreInt64(&limiter.limit, int64(rpmLimit))
-			}
-		}
-
-		// Increment counter
-		count := atomic.AddInt64(&limiter.count, 1)
-		limit := atomic.LoadInt64(&limiter.limit)
-
-		if count > limit {
-			// Calculate retry-after
-			elapsed := time.Duration(now - atomic.LoadInt64(&limiter.windowStart))
-			retryAfter := time.Minute - elapsed
-			if retryAfter < 0 {
-				retryAfter = time.Second
-			}
-
-			c.Header("Retry-After", fmt.Sprintf("%d", int(retryAfter.Seconds())))
-			c.Header("X-RateLimit-Limit", fmt.Sprintf("%d", limit))
-			c.Header("X-RateLimit-Remaining", "0")
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-				"error":       "rate limit exceeded",
-				"limit":       limit,
-				"retry_after": int(retryAfter.Seconds()),
-			})
+		// No rate limit configured — allow all requests
+		if rpmLimit <= 0 {
+			c.Next()
 			return
 		}
 
+		key := tenantID.(string)
+		currentMinute := uint64(time.Now().Unix() / 60)
+		limit := uint64(rpmLimit)
+
+		// Get or create limiter for this tenant
+		limiterVal, _ := rl.limiters.LoadOrStore(key, &tenantLimiter{})
+		limiter := limiterVal.(*tenantLimiter)
+
+		var count uint64
+
+		// Lock-free atomic state transition loop.
+		// The CAS loop guarantees that window rotation and counter increment
+		// happen as a single atomic operation — no concurrent goroutine can
+		// observe a stale high count from the previous window.
+		for {
+			oldState := atomic.LoadUint64(&limiter.state)
+			oldMinute := oldState >> 32
+			oldCount := oldState & 0xFFFFFFFF
+
+			var newState uint64
+			if oldMinute == currentMinute {
+				// Same window — increment counter
+				count = oldCount + 1
+				if count > limit {
+					// Hard quota exceeded — reject without mutating state
+					now := time.Now()
+					retryAfter := 60 - int(now.Unix()%60)
+					if retryAfter <= 0 {
+						retryAfter = 1
+					}
+					c.Header("Retry-After", fmt.Sprintf("%d", retryAfter))
+					c.Header("X-RateLimit-Limit", fmt.Sprintf("%d", limit))
+					c.Header("X-RateLimit-Remaining", "0")
+					c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+						"error":       "rate limit exceeded",
+						"limit":       limit,
+						"retry_after": retryAfter,
+					})
+					return
+				}
+				newState = (currentMinute << 32) | count
+			} else {
+				// Window boundary crossed — reset counter to 1
+				count = 1
+				newState = (currentMinute << 32) | count
+			}
+
+			// Attempt to commit the state transition. If another goroutine
+			// modified state in the meantime, CAS fails and we retry.
+			if atomic.CompareAndSwapUint64(&limiter.state, oldState, newState) {
+				break
+			}
+		}
+
 		// Set rate limit headers
+		remaining := limit - count
 		c.Header("X-RateLimit-Limit", fmt.Sprintf("%d", limit))
-		c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", limit-count))
+		c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
 
 		c.Next()
 	}
@@ -108,12 +127,15 @@ func (rl *RateLimiter) Middleware() gin.HandlerFunc {
 // Cleanup removes expired limiters to prevent memory leaks.
 // Should be called periodically (e.g., every 5 minutes).
 func (rl *RateLimiter) Cleanup() {
-	now := time.Now().UnixNano()
-	windowDuration := int64(5 * time.Minute) // Keep limiters for 5 minutes
+	currentMinute := uint64(time.Now().Unix() / 60)
 
 	rl.limiters.Range(func(key, value interface{}) bool {
 		limiter := value.(*tenantLimiter)
-		if now-atomic.LoadInt64(&limiter.windowStart) > windowDuration {
+		oldState := atomic.LoadUint64(&limiter.state)
+		oldMinute := oldState >> 32
+
+		// Delete limiters that haven't been used in the last 5 minutes
+		if currentMinute-oldMinute > 5 {
 			rl.limiters.Delete(key)
 		}
 		return true
