@@ -2,7 +2,8 @@
   import { onMount } from 'svelte';
   import { 
     Cpu, Plus, RefreshCw, Shield, AlertTriangle, Trash2, Pencil, X, Sparkles,
-    ArrowLeft, Search, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Heart
+    ArrowLeft, Search, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Heart,
+    SlidersHorizontal, ArrowUpDown
   } from '@lucide/svelte';
   import { appState } from '$lib/state.svelte.js';
   import Button from '$lib/components/Button.svelte';
@@ -36,9 +37,38 @@
   let hasMore = $state(false);
   let loadingMore = $state(false);
 
-  // Filtering
+  // Filtering & Sorting
   let searchQuery = $state('');
+  let filterStrategy = $state('');
+  let filterCapabilities = $state([]);
+  let filterFallback = $state('');
+  let filterCredentials = $state('');
+  let filterHealth = $state('');
+  let sortBy = $state('model_pattern');
+  let sortOrder = $state('asc');
+  let showAdvancedFilters = $state(false);
   let searchTimer = null;
+
+  function toggleCapabilityFilter(capKey) {
+    if (filterCapabilities.includes(capKey)) {
+      filterCapabilities = filterCapabilities.filter(k => k !== capKey);
+    } else {
+      filterCapabilities = [...filterCapabilities, capKey];
+    }
+    reloadPools();
+  }
+
+  function clearFilters() {
+    searchQuery = '';
+    filterStrategy = '';
+    filterCapabilities = [];
+    filterFallback = '';
+    filterCredentials = '';
+    filterHealth = '';
+    sortBy = 'model_pattern';
+    sortOrder = 'asc';
+    reloadPools();
+  }
 
   // Virtualization
   const ROW_HEIGHT = 45;
@@ -128,7 +158,32 @@
       const params = new URLSearchParams();
       params.append('limit', String(PAGE_SIZE));
       params.append('offset', String(page * PAGE_SIZE));
+      
       if (searchQuery.trim()) params.append('search', searchQuery.trim());
+      if (filterStrategy) params.append('strategy', filterStrategy);
+      
+      if (filterFallback === 'has_fallback') {
+        params.append('has_fallback', 'true');
+      } else if (filterFallback === 'no_fallback') {
+        params.append('has_fallback', 'false');
+      }
+
+      if (filterCredentials === 'has_keys') {
+        params.append('has_credentials', 'true');
+      } else if (filterCredentials === 'no_keys') {
+        params.append('has_credentials', 'false');
+      }
+
+      if (filterHealth && filterHealth !== 'all') {
+        params.append('health_status', filterHealth);
+      }
+
+      if (filterCapabilities.length > 0) {
+        params.append('capabilities', filterCapabilities.join(','));
+      }
+
+      if (sortBy) params.append('sort_by', sortBy);
+      if (sortOrder) params.append('sort_order', sortOrder);
 
       const res = await fetch(`/api/v1/admin/pools?${params.toString()}`, { headers: adminHeaders() });
       if (res.ok) {
@@ -880,23 +935,172 @@
   <!-- Pools data grid (virtualized + lazy-loaded) -->
   <div class="providers-grid-wrap flex flex-col flex-grow overflow-hidden">
     <!-- Filter / search toolbar -->
-    <div class="flex items-center gap-3 px-6 py-3 border-b shrink-0">
-      <div class="relative flex-grow max-w-sm">
-        <Search size={15} class="absolute left-3 top-1/2 -translate-y-1/2 text-secondary opacity-50" />
-        <input
-          type="text"
-          class="w-full pl-9 pr-3 py-1.5 text-sm rounded-lg bg-[var(--input-bg)] border border-[var(--border-color)] focus:border-[#f97316] focus:outline-none"
-          placeholder="Search model pattern, strategy..."
-          bind:value={searchQuery}
-          oninput={onSearchInput}
-        />
-      </div>
-      <span class="text-xs text-secondary ml-auto">
-        {#if totalCount > 0}
-          Showing {pools.length} of {totalCount}
-          {#if loadingMore}<span class="opacity-60"> · loading more…</span>{/if}
+    <div class="flex flex-col border-b shrink-0 bg-[var(--card-bg)] shadow-sm">
+      <!-- Main Row: Search & Action Buttons -->
+      <div class="flex items-center gap-3 px-6 py-3 flex-wrap">
+        <div class="relative flex-grow max-w-md">
+          <Search size={15} class="absolute left-3 top-1/2 -translate-y-1/2 text-secondary opacity-50" />
+          <input
+            type="text"
+            class="w-full pl-9 pr-3 py-1.5 text-sm rounded-lg bg-[var(--input-bg)] border border-[var(--border-color)] focus:border-[#f97316] focus:outline-none placeholder-gray-400 dark:placeholder-gray-500 transition-colors"
+            placeholder="Search model pattern, strategy..."
+            bind:value={searchQuery}
+            oninput={onSearchInput}
+          />
+        </div>
+        
+        <Button 
+          variant="outline" 
+          size="sm" 
+          onclick={() => showAdvancedFilters = !showAdvancedFilters}
+          class="flex items-center gap-2 border-[var(--border-color)] hover:border-[#f97316]"
+        >
+          <SlidersHorizontal size={14} class={showAdvancedFilters ? 'text-[#f97316]' : ''} />
+          <span>Advanced Filters</span>
+          {#if showAdvancedFilters}
+            <ChevronUp size={14} />
+          {:else}
+            <ChevronDown size={14} />
+          {/if}
+        </Button>
+
+        {#if searchQuery || filterStrategy || filterFallback || filterCredentials || filterHealth || filterCapabilities.length > 0}
+          <Button 
+            variant="ghost" 
+            size="sm" 
+            onclick={clearFilters}
+            class="text-xs text-secondary hover:text-red-500 flex items-center gap-1"
+          >
+            <X size={13} />
+            Reset Filters
+          </Button>
         {/if}
-      </span>
+
+        <span class="text-xs text-secondary ml-auto font-medium">
+          {#if totalCount > 0}
+            Showing {pools.length} of {totalCount}
+            {#if loadingMore}<span class="opacity-60"> · loading more…</span>{/if}
+          {:else if searchQuery || filterStrategy || filterFallback || filterCredentials || filterHealth || filterCapabilities.length > 0}
+            No matches found
+          {/if}
+        </span>
+      </div>
+
+      <!-- Expandable Advanced Filters Panel -->
+      {#if showAdvancedFilters}
+        <div 
+          class="px-6 pb-4 pt-2 border-t border-[var(--border-color)] bg-[var(--sidebar-bg)]/40 flex flex-col gap-4 animate-fade-in text-primary"
+        >
+          <!-- Grid for dropdown selectors -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+            <!-- Strategy Filter -->
+            <div class="flex flex-col gap-1.5">
+              <label class="text-[10px] font-bold uppercase tracking-wider text-secondary">Strategy</label>
+              <select 
+                class="input-field select-field py-2 px-3 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--frame-bg)] text-primary focus:border-[#f97316] focus:outline-none"
+                bind:value={filterStrategy}
+                onchange={reloadPools}
+              >
+                <option value="">All Strategies</option>
+                <option value="round-robin">round-robin</option>
+                <option value="weighted-round-robin">weighted-round-robin</option>
+                <option value="random">random</option>
+              </select>
+            </div>
+
+            <!-- Fallback Filter -->
+            <div class="flex flex-col gap-1.5">
+              <label class="text-[10px] font-bold uppercase tracking-wider text-secondary">Fallback Status</label>
+              <select 
+                class="input-field select-field py-2 px-3 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--frame-bg)] text-primary focus:border-[#f97316] focus:outline-none"
+                bind:value={filterFallback}
+                onchange={reloadPools}
+              >
+                <option value="">All Pools</option>
+                <option value="has_fallback">Has Fallback Pool</option>
+                <option value="no_fallback">No Fallback Pool</option>
+              </select>
+            </div>
+
+            <!-- Credentials Count Filter -->
+            <div class="flex flex-col gap-1.5">
+              <label class="text-[10px] font-bold uppercase tracking-wider text-secondary">API Keys Count</label>
+              <select 
+                class="input-field select-field py-2 px-3 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--frame-bg)] text-primary focus:border-[#f97316] focus:outline-none"
+                bind:value={filterCredentials}
+                onchange={reloadPools}
+              >
+                <option value="">All Pools</option>
+                <option value="has_keys">Active (Has Keys)</option>
+                <option value="no_keys">Empty (No Keys)</option>
+              </select>
+            </div>
+
+            <!-- Health Status Filter -->
+            <div class="flex flex-col gap-1.5">
+              <label class="text-[10px] font-bold uppercase tracking-wider text-secondary">Key Health Status</label>
+              <select 
+                class="input-field select-field py-2 px-3 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--frame-bg)] text-primary focus:border-[#f97316] focus:outline-none"
+                bind:value={filterHealth}
+                onchange={reloadPools}
+              >
+                <option value="">All Health</option>
+                <option value="healthy">All Keys Healthy</option>
+                <option value="unhealthy">Has Unhealthy Key(s)</option>
+                <option value="empty">No Keys</option>
+              </select>
+            </div>
+
+            <!-- Sort By -->
+            <div class="flex flex-col gap-1.5">
+              <label class="text-[10px] font-bold uppercase tracking-wider text-secondary">Sort By</label>
+              <select 
+                class="input-field select-field py-2 px-3 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--frame-bg)] text-primary focus:border-[#f97316] focus:outline-none"
+                bind:value={sortBy}
+                onchange={reloadPools}
+              >
+                <option value="model_pattern">Model Pattern</option>
+                <option value="id">Pool ID</option>
+                <option value="created_at">Date Created</option>
+                <option value="credential_count">Keys Count</option>
+              </select>
+            </div>
+
+            <!-- Sort Order -->
+            <div class="flex flex-col gap-1.5">
+              <label class="text-[10px] font-bold uppercase tracking-wider text-secondary">Sort Direction</label>
+              <Button 
+                variant="outline" 
+                size="sm" 
+                class="flex items-center justify-center gap-2 border-[var(--border-color)] hover:border-[#f97316] h-[34px] text-xs font-semibold text-primary bg-[var(--frame-bg)] w-full"
+                onclick={() => { sortOrder = sortOrder === 'asc' ? 'desc' : 'asc'; reloadPools(); }}
+              >
+                <ArrowUpDown size={14} class="text-[#f97316]" />
+                <span>{sortOrder === 'asc' ? 'Ascending' : 'Descending'}</span>
+              </Button>
+            </div>
+          </div>
+
+          <!-- Capability Badges Selection -->
+          <div class="flex flex-col gap-2 border-t border-[var(--border-color)]/60 pt-3 text-primary">
+            <span class="text-[10px] font-bold uppercase tracking-wider text-secondary">Filter by Model Capabilities</span>
+            <div class="flex flex-wrap gap-2">
+              {#each Object.entries(CAPABILITY_BADGES) as [key, badge]}
+                {@const isSelected = filterCapabilities.includes(key)}
+                <button
+                  type="button"
+                  onclick={() => toggleCapabilityFilter(key)}
+                  style="display:flex; align-items:center; gap:6px; padding:6px 12px; border-radius:8px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; cursor:pointer; transition:all 0.2s ease; border: 1px solid {isSelected ? badge.border : 'var(--border-color)'}; color: {isSelected ? badge.color : 'var(--text-secondary)'}; background: {isSelected ? badge.bg : 'var(--frame-bg)'};"
+                  class="hover:-translate-y-0.5 hover:shadow-sm"
+                >
+                  <span class="w-1.5 h-1.5 rounded-full" style="background: {isSelected ? badge.color : 'var(--text-secondary)'}; opacity: {isSelected ? 1 : 0.4};"></span>
+                  {badge.label}
+                </button>
+              {/each}
+            </div>
+          </div>
+        </div>
+      {/if}
     </div>
 
     {#if loading}

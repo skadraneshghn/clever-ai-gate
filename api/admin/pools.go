@@ -95,9 +95,32 @@ func (h *PoolHandler) List(c *gin.Context) {
 			offset = v
 		}
 	}
-	search := c.Query("search")
 
-	pools, total, err := database.ListModelPoolsPaginated(c.Request.Context(), h.db, limit, offset, search)
+	filter := database.PoolFilter{
+		Search:       c.Query("search"),
+		Strategy:     c.Query("strategy"),
+		HealthStatus: c.Query("health_status"),
+		SortBy:       c.Query("sort_by"),
+		SortOrder:    c.Query("sort_order"),
+	}
+
+	if caps := c.Query("capabilities"); caps != "" {
+		filter.Capabilities = strings.Split(caps, ",")
+	}
+
+	if hf := c.Query("has_fallback"); hf != "" {
+		if val, err := strconv.ParseBool(hf); err == nil {
+			filter.HasFallback = &val
+		}
+	}
+
+	if hc := c.Query("has_credentials"); hc != "" {
+		if val, err := strconv.ParseBool(hc); err == nil {
+			filter.HasCredentials = &val
+		}
+	}
+
+	pools, total, err := database.ListModelPoolsPaginated(c.Request.Context(), h.db, limit, offset, filter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to list pools", Details: err.Error()})
 		return

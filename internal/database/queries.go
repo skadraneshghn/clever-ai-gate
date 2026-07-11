@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -143,20 +144,23 @@ type ModelPoolRowWithCount struct {
 	CredentialCount int
 }
 
+// PoolFilter holds the filtering and sorting parameters for paginated model pools.
+type PoolFilter struct {
+	Search         string
+	Strategy       string
+	Capabilities   []string
+	HasFallback    *bool
+	HasCredentials *bool
+	HealthStatus   string
+	SortBy         string
+	SortOrder      string
+}
+
 // ListModelPoolsPaginated returns a single page of model routing pools
-// (ordered by model_pattern) together with each pool's credential count and
-// the total number of rows matching the search filter (ignoring limit/offset).
+// together with each pool's credential count and the total number of rows
+// matching the filters (ignoring limit/offset).
 // This powers the paginated / virtualized admin pools list.
-//
-//   - limit  <= 0 defaults to 100
-//   - offset < 0 is treated as 0
-//   - search (non-empty after trim) performs a case-insensitive ILIKE match
-//     across model_pattern and strategy
-//
-// The total count is obtained via COUNT(*) OVER() so it is fetched in the same
-// query round-trip, and the per-pool credential count is computed with a
-// LEFT JOIN + COUNT to avoid an N+1 query.
-func ListModelPoolsPaginated(ctx context.Context, pool *pgxpool.Pool, limit, offset int, search string) ([]*ModelPoolRowWithCount, int, error) {
+func ListModelPoolsPaginated(ctx context.Context, pool *pgxpool.Pool, limit, offset int, filter PoolFilter) ([]*ModelPoolRowWithCount, int, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -164,25 +168,106 @@ func ListModelPoolsPaginated(ctx context.Context, pool *pgxpool.Pool, limit, off
 		offset = 0
 	}
 
-	var searchVal *string
-	if s := strings.TrimSpace(search); s != "" {
-		v := "%" + s + "%"
-		searchVal = &v
+	var conditions []string
+	var havingConditions []string
+	var args []interface{}
+	argCount := 1
+
+	if s := strings.TrimSpace(filter.Search); s != "" {
+		conditions = append(conditions, fmt.Sprintf("(mp.model_pattern ILIKE $%d OR mp.strategy ILIKE $%d)", argCount, argCount))
+		args = append(args, "%"+s+"%")
+		argCount++
 	}
 
-	rows, err := pool.Query(ctx, `
+	if filter.Strategy != "" {
+		conditions = append(conditions, fmt.Sprintf("mp.strategy = $%d", argCount))
+		args = append(args, filter.Strategy)
+		argCount++
+	}
+
+	if filter.HasFallback != nil {
+		if *filter.HasFallback {
+			conditions = append(conditions, "mp.fallback_pool_id IS NOT NULL")
+		} else {
+			conditions = append(conditions, "mp.fallback_pool_id IS NULL")
+		}
+	}
+
+	if len(filter.Capabilities) > 0 {
+		capsMap := make(map[string]bool)
+		for _, capVal := range filter.Capabilities {
+			if capVal != "" {
+				capsMap[capVal] = true
+			}
+		}
+		if len(capsMap) > 0 {
+			capsBytes, _ := json.Marshal(capsMap)
+			conditions = append(conditions, fmt.Sprintf("mp.capabilities @> $%d::jsonb", argCount))
+			args = append(args, capsBytes)
+			argCount++
+		}
+	}
+
+	if filter.HasCredentials != nil {
+		if *filter.HasCredentials {
+			havingConditions = append(havingConditions, "COUNT(c.id) > 0")
+		} else {
+			havingConditions = append(havingConditions, "COUNT(c.id) = 0")
+		}
+	}
+
+	if filter.HealthStatus != "" {
+		switch filter.HealthStatus {
+		case "healthy":
+			havingConditions = append(havingConditions, "COUNT(c.id) > 0 AND SUM(CASE WHEN NOT c.is_healthy THEN 1 ELSE 0 END) = 0")
+		case "unhealthy":
+			havingConditions = append(havingConditions, "SUM(CASE WHEN NOT c.is_healthy THEN 1 ELSE 0 END) > 0")
+		case "empty":
+			havingConditions = append(havingConditions, "COUNT(c.id) = 0")
+		}
+	}
+
+	sortBy := "mp.model_pattern"
+	if filter.SortBy != "" {
+		switch filter.SortBy {
+		case "id":
+			sortBy = "mp.id"
+		case "created_at":
+			sortBy = "mp.created_at"
+		case "credential_count":
+			sortBy = "credential_count"
+		case "strategy":
+			sortBy = "mp.strategy"
+		}
+	}
+
+	sortOrder := "ASC"
+	if strings.ToLower(filter.SortOrder) == "desc" {
+		sortOrder = "DESC"
+	}
+
+	query := `
 		SELECT mp.id, mp.model_pattern, mp.strategy, mp.fallback_pool_id, mp.capabilities, mp.created_at::text,
 		       COUNT(c.id) AS credential_count,
 		       COUNT(*) OVER() AS total_count
 		FROM model_pools mp
 		LEFT JOIN credentials c ON c.pool_id = mp.id
-		WHERE ($1::text IS NULL
-		       OR mp.model_pattern ILIKE $1
-		       OR mp.strategy ILIKE $1)
-		GROUP BY mp.id, mp.model_pattern, mp.strategy, mp.fallback_pool_id, mp.capabilities, mp.created_at
-		ORDER BY mp.model_pattern
-		LIMIT $2 OFFSET $3
-	`, searchVal, limit, offset)
+	`
+
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	query += " GROUP BY mp.id, mp.model_pattern, mp.strategy, mp.fallback_pool_id, mp.capabilities, mp.created_at"
+
+	if len(havingConditions) > 0 {
+		query += " HAVING " + strings.Join(havingConditions, " AND ")
+	}
+
+	query += fmt.Sprintf(" ORDER BY %s %s LIMIT $%d OFFSET $%d", sortBy, sortOrder, argCount, argCount+1)
+	args = append(args, limit, offset)
+
+	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to list pools (paginated): %w", err)
 	}
