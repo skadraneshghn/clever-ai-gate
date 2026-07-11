@@ -988,6 +988,7 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		}
 		if translated, ok := translateOllamaResponse(respBody); ok {
 			respBody = translated
+			respBody = h.normalizeNonStreamingReasoning(respBody)
 			for key, vals := range resp.Header {
 				for _, val := range vals {
 					c.Writer.Header().Add(key, val)
@@ -1042,6 +1043,7 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 
 		translated, contentType, trErr := translateOneMinAIResponse(pctx.model, respBody)
 		if trErr == nil && translated != nil {
+			translated = h.normalizeNonStreamingReasoning(translated)
 			c.Writer.Header().Set("Content-Type", contentType)
 			c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
 			c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
@@ -1123,6 +1125,9 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	var respBody []byte
 	if isJSON {
 		respBody, _ = io.ReadAll(resp.Body)
+		// Normalize inline <think> tags into structured reasoning_content so
+		// front-ends render a thinking panel instead of raw reasoning text.
+		respBody = h.normalizeNonStreamingReasoning(respBody)
 	}
 
 	for key, vals := range resp.Header {
@@ -1141,6 +1146,88 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		io.Copy(c.Writer, resp.Body) //nolint:errcheck
 		return resp.StatusCode, upstreamURL, nil, nil
 	}
+}
+
+// normalizeNonStreamingReasoning extracts inline <think>…</think> blocks from a
+// non-streaming chat completion's message content and surfaces them as a
+// structured "reasoning_content" field. This lets OpenAI-compatible front-ends
+// (OpenWebUI, LibreChat, Cline, …) render a dedicated thinking panel instead of
+// dumping the raw reasoning as chat text.
+//
+// The function is a fast no-op when:
+//   - the body is not a chat-completion shape (no choices[0].message.content)
+//   - a structured reasoning_content field is already present (e.g. DeepSeek)
+//   - no <think> tag is present in the content
+//
+// Only the "content" and "reasoning_content" keys are patched via jsonparser.Set,
+// preserving every other field on the message object (tool_calls, name, refusal,
+// annotations, …) without a full unmarshal/marshal round-trip.
+func (h *Handler) normalizeNonStreamingReasoning(body []byte) []byte {
+	// GetString (not Get) returns a properly unescaped Go string so json.Marshal
+	// re-encodes it correctly — avoiding the double-escaping (\n → \\n) that raw
+	// jsonparser.Get bytes would cause. Same caveat documented in ollama.go.
+	content, err := jsonparser.GetString(body, "choices", "[0]", "message", "content")
+	if err != nil || len(content) == 0 {
+		return body
+	}
+
+	// Skip if structured reasoning_content is already present — the upstream
+	// already separates thinking for us.
+	if reasoning, rErr := jsonparser.GetString(body, "choices", "[0]", "message", "reasoning_content"); rErr == nil && reasoning != "" {
+		return body
+	}
+
+	// Extract every <think>…</think> block, accumulating reasoning text and the
+	// remaining clean content. Handles multiple blocks and an unclosed trailing
+	// <think> gracefully.
+	var reasoningParts []string
+	var cleanBuilder strings.Builder
+	remaining := content
+	for {
+		startIdx := strings.Index(remaining, "<think>")
+		if startIdx == -1 {
+			cleanBuilder.WriteString(remaining)
+			break
+		}
+		cleanBuilder.WriteString(remaining[:startIdx])
+		afterTag := remaining[startIdx+len("<think>"):]
+		endIdx := strings.Index(afterTag, "</think>")
+		if endIdx == -1 {
+			if trimmed := strings.TrimSpace(afterTag); trimmed != "" {
+				reasoningParts = append(reasoningParts, trimmed)
+			}
+			break
+		}
+		if trimmed := strings.TrimSpace(afterTag[:endIdx]); trimmed != "" {
+			reasoningParts = append(reasoningParts, trimmed)
+		}
+		remaining = afterTag[endIdx+len("</think>"):]
+	}
+
+	if len(reasoningParts) == 0 {
+		return body
+	}
+
+	cleanContent := strings.TrimSpace(cleanBuilder.String())
+	reasoningBlock := strings.Join(reasoningParts, "\n")
+
+	cleanJSON, err := json.Marshal(cleanContent)
+	if err != nil {
+		return body
+	}
+	updated, err := jsonparser.Set(body, cleanJSON, "choices", "[0]", "message", "content")
+	if err != nil {
+		return body
+	}
+	reasoningJSON, err := json.Marshal(reasoningBlock)
+	if err != nil {
+		return body
+	}
+	updated, err = jsonparser.Set(updated, reasoningJSON, "choices", "[0]", "message", "reasoning_content")
+	if err != nil {
+		return body
+	}
+	return updated
 }
 
 // translateOllamaResponse converts a native Ollama non-streaming response body
@@ -1621,8 +1708,18 @@ func extractResponseText(body []byte) string {
 	if len(body) == 0 {
 		return ""
 	}
-	if content, err := jsonparser.GetString(body, "choices", "[0]", "message", "content"); err == nil {
-		return content
+	var sb strings.Builder
+	if content, err := jsonparser.GetString(body, "choices", "[0]", "message", "content"); err == nil && content != "" {
+		sb.WriteString(content)
+	}
+	if reasoning, err := jsonparser.GetString(body, "choices", "[0]", "message", "reasoning_content"); err == nil && reasoning != "" {
+		if sb.Len() > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(reasoning)
+	}
+	if sb.Len() > 0 {
+		return sb.String()
 	}
 	if content, err := jsonparser.GetString(body, "choices", "[0]", "text"); err == nil {
 		return content

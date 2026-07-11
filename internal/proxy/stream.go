@@ -123,8 +123,15 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 			}
 
 			if len(translated) > 0 {
+				// Capture both content and reasoning_content deltas so the
+				// accumulated response text and token estimate include the
+				// model's thinking process, not just the final answer. A
+				// single OpenAI delta carries one or the other, never both.
 				if content, err := jsonparser.GetString(translated, "choices", "[0]", "delta", "content"); err == nil {
 					responseBuilder.WriteString(content)
+					tokenEstimate++
+				} else if reasoning, err := jsonparser.GetString(translated, "choices", "[0]", "delta", "reasoning_content"); err == nil {
+					responseBuilder.WriteString(reasoning)
 					tokenEstimate++
 				}
 
@@ -254,6 +261,8 @@ func (sp *StreamProxy) processOllamaChunk(c *gin.Context, flusher http.Flusher, 
 
 		if content, err := jsonparser.GetString(translated, "choices", "[0]", "delta", "content"); err == nil {
 			return content
+		} else if reasoning, err := jsonparser.GetString(translated, "choices", "[0]", "delta", "reasoning_content"); err == nil {
+			return reasoning
 		}
 	}
 	return ""
@@ -282,6 +291,8 @@ func (sp *StreamProxy) processGeminiChunk(c *gin.Context, flusher http.Flusher, 
 
 		if content, err := jsonparser.GetString(translated, "choices", "[0]", "delta", "content"); err == nil {
 			return content
+		} else if reasoning, err := jsonparser.GetString(translated, "choices", "[0]", "delta", "reasoning_content"); err == nil {
+			return reasoning
 		}
 	}
 	return ""
