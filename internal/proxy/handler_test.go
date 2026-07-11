@@ -324,3 +324,109 @@ func TestExtractResponseText_ContentOnly(t *testing.T) {
 		t.Errorf("expected %q, got %q", "Just content", result)
 	}
 }
+
+// TestRewriteURL_CloudflareImageRunPath verifies that cloudflarePath produces
+// /ai/run/{model} (NOT /ai/run/cloudflare/{model}) for image-generation
+// requests. Cloudflare rejects the latter with error 7000 "No route for that
+// URI".
+func TestRewriteURL_CloudflareImageRunPath(t *testing.T) {
+	r := NewRewriter()
+
+	got := r.RewriteURL("cloudflare", "cloudflare:testacct", "/v1/images/generations",
+		"@cf/runwayml/stable-diffusion-v1-5-inpainting")
+	want := "https://api.cloudflare.com/client/v4/accounts/testacct/ai/run/@cf/runwayml/stable-diffusion-v1-5-inpainting"
+	if got != want {
+		t.Errorf("image URL mismatch\n got %q\nwant %q", got, want)
+	}
+	if strings.Contains(got, "/ai/run/cloudflare/") {
+		t.Errorf("upstream URL leaked routing prefix: %s", got)
+	}
+}
+
+// TestRewriteURL_CloudflareChatCompletions verifies that chat-completion
+// requests use the OpenAI-compatible /ai/v1 endpoint, not /ai/run.
+func TestRewriteURL_CloudflareChatCompletions(t *testing.T) {
+	r := NewRewriter()
+
+	got := r.RewriteURL("cloudflare", "cloudflare:testacct", "/v1/chat/completions",
+		"@cf/meta/llama-3.1-8b-instruct")
+	want := "https://api.cloudflare.com/client/v4/accounts/testacct/ai/v1/chat/completions"
+	if got != want {
+		t.Errorf("chat URL mismatch\n got %q\nwant %q", got, want)
+	}
+}
+
+// TestHandle_CloudflareImageStripsPrefixFromURL is the end-to-end regression
+// test for the bug where the "cloudflare/" routing prefix was stripped from
+// the JSON body bytes but NOT from the local model variable, causing
+// cloudflarePath to build /ai/run/cloudflare/@cf/... — which Cloudflare
+// rejects with error 7000 ("No route for that URI").
+//
+// The test exercises the full Handle() → forwardRequest flow and asserts the
+// upstream URL contains /ai/run/@cf/... with no stale prefix.
+func TestHandle_CloudflareImageStripsPrefixFromURL(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := &config.Config{
+		CacheMaxSizeMB:   10,
+		CacheNumCounters: 100,
+	}
+	cacheStore, err := cache.New(cfg, logger)
+	if err != nil {
+		t.Fatalf("failed to create cache: %v", err)
+	}
+	defer cacheStore.Close()
+
+	cred := &credentials.RuntimeCredential{
+		ID:       3357,
+		Provider: "cloudflare",
+		APIKey:   "cf-test-key",
+		BaseURL:  "cloudflare:testaccount",
+		Weight:   1,
+	}
+	modelPattern := "cloudflare/@cf/runwayml/stable-diffusion-v1-5-inpainting"
+	pool := credentials.NewBalancedPool(modelPattern, "round-robin",
+		[]*credentials.RuntimeCredential{cred}, nil)
+	cacheStore.Set(cache.PoolKey(modelPattern), pool, 1)
+	cacheStore.Wait()
+
+	var capturedURL string
+	mockClient := &http.Client{
+		Transport: &mockRoundTripper{
+			roundTripFunc: func(req *http.Request) (*http.Response, error) {
+				capturedURL = req.URL.String()
+				resp := &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"success":true,"result":{"image":"aGVsbG8="}}`)),
+				}
+				resp.Header.Set("Content-Type", "application/json")
+				return resp, nil
+			},
+		},
+	}
+
+	h := NewHandler(mockClient, cacheStore, logger, nil, nil)
+
+	requestBody := `{"model":"cloudflare/@cf/runwayml/stable-diffusion-v1-5-inpainting","prompt":"a cat"}`
+	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(requestBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	h.Handle(c)
+
+	want := "https://api.cloudflare.com/client/v4/accounts/testaccount/ai/run/@cf/runwayml/stable-diffusion-v1-5-inpainting"
+	if capturedURL != want {
+		t.Errorf("upstream URL mismatch\n got %q\nwant %q", capturedURL, want)
+	}
+	if strings.Contains(capturedURL, "/ai/run/cloudflare/") {
+		t.Errorf("stale 'cloudflare/' routing prefix leaked into upstream URL: %s", capturedURL)
+	}
+
+	// The translated OpenAI image response should reach the client.
+	b64, _ := jsonparser.GetString(w.Body.Bytes(), "data", "[0]", "b64_json")
+	if b64 != "aGVsbG8=" {
+		t.Errorf("expected b64_json 'aGVsbG8=', got %q", b64)
+	}
+}

@@ -322,8 +322,15 @@ func (h *Handler) Handle(c *gin.Context) {
 	// model ID (e.g. "@cf/meta/llama-3.1-8b-instruct" instead of
 	// "cloudflare/@cf/meta/llama-3.1-8b-instruct").
 	// Uses the same in-place byte-level stripping.
+	//
+	// Unlike nvidia/ollama/sarvam/puter (which use passthroughPath and never
+	// embed the model in the upstream URL), Cloudflare's path transformer
+	// builds /ai/run/{model}, so the local model variable MUST be synchronized
+	// here — otherwise the stale prefix leaks into the URL and Cloudflare
+	// rejects the request with error 7000 ("No route for that URI").
 	if isCloudflare {
 		body = stripModelPrefixInPlace(body, model, "cloudflare/")
+		model = strings.TrimPrefix(model, "cloudflare/")
 	}
 
 	// --- Sarvam AI Payload Sanitization ---
@@ -717,6 +724,11 @@ retryLoop:
 			if isLastResort {
 				pctx.isPuter = false
 				pctx.isCloudflare = true
+				// Mirror the prefix stripping done in Handle()'s isCloudflare
+				// block: cloudflarePath embeds the model in the /ai/run/{model}
+				// URL, so pctx.model must hold the clean ID without the
+				// "cloudflare/" routing prefix.
+				pctx.model = strings.TrimPrefix(cheaperModel, "cloudflare/")
 			}
 
 			// Reset retry counters to try all fallback credentials
