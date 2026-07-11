@@ -937,12 +937,12 @@
     <!-- Filter / search toolbar -->
     <div class="flex flex-col border-b shrink-0 bg-[var(--card-bg)] shadow-sm">
       <!-- Main Row: Search & Action Buttons -->
-      <div class="flex items-center gap-3 px-6 py-3 flex-wrap">
+      <div class="flex items-center gap-3 px-6 py-4 flex-wrap">
         <div class="relative flex-grow max-w-md">
-          <Search size={15} class="absolute left-3 top-1/2 -translate-y-1/2 text-secondary opacity-50" />
+          <Search size={16} class="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#475569] dark:text-[#94a3b8] z-10" />
           <input
             type="text"
-            class="w-full pl-9 pr-3 py-1.5 text-sm rounded-lg bg-[var(--input-bg)] border border-[var(--border-color)] focus:border-[#f97316] focus:outline-none placeholder-gray-400 dark:placeholder-gray-500 transition-colors"
+            class="filter-search-input"
             placeholder="Search model pattern, strategy..."
             bind:value={searchQuery}
             oninput={onSearchInput}
@@ -953,10 +953,10 @@
           variant="outline" 
           size="sm" 
           onclick={() => showAdvancedFilters = !showAdvancedFilters}
-          class="flex items-center gap-2 border-[var(--border-color)] hover:border-[#f97316]"
+          class="flex items-center gap-2 border-[var(--border-color)] hover:border-[#f97316] h-[46px] rounded-xl px-4"
         >
           <SlidersHorizontal size={14} class={showAdvancedFilters ? 'text-[#f97316]' : ''} />
-          <span>Advanced Filters</span>
+          <span class="text-sm font-semibold">Advanced Filters</span>
           {#if showAdvancedFilters}
             <ChevronUp size={14} />
           {:else}
@@ -969,7 +969,7 @@
             variant="ghost" 
             size="sm" 
             onclick={clearFilters}
-            class="text-xs text-secondary hover:text-red-500 flex items-center gap-1"
+            class="text-xs text-secondary hover:text-red-500 flex items-center gap-1 h-[46px] rounded-xl px-3"
           >
             <X size={13} />
             Reset Filters
@@ -989,15 +989,15 @@
       <!-- Expandable Advanced Filters Panel -->
       {#if showAdvancedFilters}
         <div 
-          class="px-6 pb-4 pt-2 border-t border-[var(--border-color)] bg-[var(--sidebar-bg)]/40 flex flex-col gap-4 animate-fade-in text-primary"
+          class="filter-panel"
         >
           <!-- Grid for dropdown selectors -->
           <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
             <!-- Strategy Filter -->
-            <div class="flex flex-col gap-1.5">
-              <label class="text-[10px] font-bold uppercase tracking-wider text-secondary">Strategy</label>
+            <div class="flex flex-col gap-1">
+              <label class="filter-label">Strategy</label>
               <select 
-                class="input-field select-field py-2 px-3 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--frame-bg)] text-primary focus:border-[#f97316] focus:outline-none"
+                class="filter-select"
                 bind:value={filterStrategy}
                 onchange={reloadPools}
               >
@@ -1009,10 +1009,10 @@
             </div>
 
             <!-- Fallback Filter -->
-            <div class="flex flex-col gap-1.5">
-              <label class="text-[10px] font-bold uppercase tracking-wider text-secondary">Fallback Status</label>
+            <div class="flex flex-col gap-1">
+              <label class="filter-label">Fallback Status</label>
               <select 
-                class="input-field select-field py-2 px-3 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--frame-bg)] text-primary focus:border-[#f97316] focus:outline-none"
+                class="filter-select"
                 bind:value={filterFallback}
                 onchange={reloadPools}
               >
@@ -1023,10 +1023,10 @@
             </div>
 
             <!-- Credentials Count Filter -->
-            <div class="flex flex-col gap-1.5">
-              <label class="text-[10px] font-bold uppercase tracking-wider text-secondary">API Keys Count</label>
+            <div class="flex flex-col gap-1">
+              <label class="filter-label">API Keys Count</label>
               <select 
-                class="input-field select-field py-2 px-3 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--frame-bg)] text-primary focus:border-[#f97316] focus:outline-none"
+                class="filter-select"
                 bind:value={filterCredentials}
                 onchange={reloadPools}
               >
@@ -1037,10 +1037,10 @@
             </div>
 
             <!-- Health Status Filter -->
-            <div class="flex flex-col gap-1.5">
-              <label class="text-[10px] font-bold uppercase tracking-wider text-secondary">Key Health Status</label>
+            <div class="flex flex-col gap-1">
+              <label class="filter-label">Key Health Status</label>
               <select 
-                class="input-field select-field py-2 px-3 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--frame-bg)] text-primary focus:border-[#f97316] focus:outline-none"
+                class="filter-select"
                 bind:value={filterHealth}
                 onchange={reloadPools}
               >
@@ -1052,10 +1052,10 @@
             </div>
 
             <!-- Sort By -->
-            <div class="flex flex-col gap-1.5">
-              <label class="text-[10px] font-bold uppercase tracking-wider text-secondary">Sort By</label>
+            <div class="flex flex-col gap-1">
+              <label class="filter-label">Sort By</label>
               <select 
-                class="input-field select-field py-2 px-3 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--frame-bg)] text-primary focus:border-[#f97316] focus:outline-none"
+                class="filter-select"
                 bind:value={sortBy}
                 onchange={reloadPools}
               >
@@ -1067,33 +1067,36 @@
             </div>
 
             <!-- Sort Order -->
-            <div class="flex flex-col gap-1.5">
-              <label class="text-[10px] font-bold uppercase tracking-wider text-secondary">Sort Direction</label>
-              <Button 
-                variant="outline" 
-                size="sm" 
-                class="flex items-center justify-center gap-2 border-[var(--border-color)] hover:border-[#f97316] h-[34px] text-xs font-semibold text-primary bg-[var(--frame-bg)] w-full"
+            <div class="flex flex-col gap-1">
+              <label class="filter-label">Sort Direction</label>
+              <button 
+                class="filter-direction-btn"
                 onclick={() => { sortOrder = sortOrder === 'asc' ? 'desc' : 'asc'; reloadPools(); }}
               >
                 <ArrowUpDown size={14} class="text-[#f97316]" />
                 <span>{sortOrder === 'asc' ? 'Ascending' : 'Descending'}</span>
-              </Button>
+              </button>
             </div>
           </div>
 
           <!-- Capability Badges Selection -->
-          <div class="flex flex-col gap-2 border-t border-[var(--border-color)]/60 pt-3 text-primary">
-            <span class="text-[10px] font-bold uppercase tracking-wider text-secondary">Filter by Model Capabilities</span>
+          <div class="flex flex-col gap-2 border-t border-[var(--border-color)] pt-3">
+            <span class="filter-label">Filter by Model Capabilities</span>
             <div class="flex flex-wrap gap-2">
               {#each Object.entries(CAPABILITY_BADGES) as [key, badge]}
                 {@const isSelected = filterCapabilities.includes(key)}
                 <button
                   type="button"
                   onclick={() => toggleCapabilityFilter(key)}
-                  style="display:flex; align-items:center; gap:6px; padding:6px 12px; border-radius:8px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; cursor:pointer; transition:all 0.2s ease; border: 1px solid {isSelected ? badge.border : 'var(--border-color)'}; color: {isSelected ? badge.color : 'var(--text-secondary)'}; background: {isSelected ? badge.bg : 'var(--frame-bg)'};"
-                  class="hover:-translate-y-0.5 hover:shadow-sm"
+                  class="filter-cap-btn"
+                  class:active={isSelected}
+                  style="
+                    --cap-color: {badge.color};
+                    --cap-bg: {badge.bg};
+                    --cap-border: {badge.border};
+                  "
                 >
-                  <span class="w-1.5 h-1.5 rounded-full" style="background: {isSelected ? badge.color : 'var(--text-secondary)'}; opacity: {isSelected ? 1 : 0.4};"></span>
+                  <span class="cap-dot"></span>
                   {badge.label}
                 </button>
               {/each}
@@ -1345,6 +1348,168 @@
 </Modal>
 
 <style>
+  /* Advanced Filters Redesign */
+  .filter-search-input {
+    width: 100%;
+    height: 46px;
+    padding: 0 16px 0 40px;
+    font-size: 14px;
+    font-weight: 500;
+    color: #0f172a; /* Force dark text for readability */
+    background-color: #ffffff !important; /* Force light background */
+    border: 2px solid #cbd5e1;
+    border-radius: 12px;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02);
+  }
+  .filter-search-input::placeholder {
+    color: #94a3b8;
+  }
+  .filter-search-input:focus {
+    border-color: #f97316;
+    background-color: #ffffff !important;
+    box-shadow: 0 0 0 4px rgba(249, 115, 22, 0.15), 0 4px 12px rgba(0, 0, 0, 0.04);
+    outline: none;
+  }
+
+  .filter-select {
+    width: 100%;
+    height: 46px;
+    padding: 0 36px 0 16px;
+    font-size: 14px;
+    font-weight: 500;
+    color: #0f172a; /* Force dark text for readability */
+    background-color: #ffffff !important; /* Force light background */
+    border: 2px solid #cbd5e1;
+    border-radius: 12px;
+    outline: none;
+    box-sizing: border-box;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02);
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%23475569' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+    background-position: right 14px center;
+    background-repeat: no-repeat;
+    background-size: 18px 18px;
+  }
+  .filter-select:focus {
+    border-color: #f97316;
+    box-shadow: 0 0 0 4px rgba(249, 115, 22, 0.15);
+  }
+  .filter-select:hover {
+    border-color: #94a3b8;
+  }
+
+  .filter-direction-btn {
+    width: 100%;
+    height: 46px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #0f172a; /* Force dark text */
+    background-color: #ffffff !important; /* Force light background */
+    border: 2px solid #cbd5e1;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02);
+  }
+  .filter-direction-btn:hover {
+    border-color: #94a3b8;
+    background-color: #f8fafc !important;
+  }
+
+  .filter-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #475569; /* Slate 600 */
+    margin-bottom: 6px;
+  }
+
+  .filter-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 20px 24px;
+    border-top: 1px solid #cbd5e1;
+    background-color: #f8fafc; /* Beautiful soft light-gray panel background */
+    animation: fadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  .filter-cap-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    height: 38px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    border: 2px solid #cbd5e1;
+    color: #475569; /* Slate 600 */
+    background-color: #ffffff !important; /* Force white background when not selected */
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+  }
+  .filter-cap-btn:hover {
+    border-color: #94a3b8;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.03);
+  }
+  .filter-cap-btn.active {
+    color: var(--cap-color) !important;
+    background-color: var(--cap-bg) !important;
+    border-color: var(--cap-color) !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  }
+  .cap-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background-color: #cbd5e1; /* default gray */
+    transition: background-color 0.2s ease;
+  }
+  .filter-cap-btn.active .cap-dot {
+    background-color: var(--cap-color);
+  }
+
+  /* Support Dark Theme adaptation */
+  :global(.dark) .filter-search-input,
+  :global(.dark) .filter-select,
+  :global(.dark) .filter-direction-btn,
+  :global(.dark) .filter-cap-btn {
+    background-color: #1e1e24 !important;
+    color: #f4f4f5 !important;
+    border-color: rgba(255, 255, 255, 0.15) !important;
+  }
+  :global(.dark) .filter-search-input::placeholder {
+    color: #71717a;
+  }
+  :global(.dark) .filter-search-input:focus,
+  :global(.dark) .filter-select:focus {
+    border-color: #f97316 !important;
+    background-color: #1e1e24 !important;
+  }
+  :global(.dark) .filter-panel {
+    background-color: #15151a !important;
+    border-color: rgba(255, 255, 255, 0.1) !important;
+  }
+  :global(.dark) .filter-label {
+    color: #a1a1aa !important;
+  }
+  :global(.dark) .filter-cap-btn:not(.active) {
+    color: #a1a1aa !important;
+  }
+
   .detail-page-container {
     min-height: 0;
   }
