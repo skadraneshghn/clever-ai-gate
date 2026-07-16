@@ -194,10 +194,10 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		poolHandler := admin.NewPoolHandler(deps.DB, deps.Vault, deps.Scheduler)
 		adminGroup.GET("/pools", poolHandler.List)
 		adminGroup.POST("/pools", poolHandler.Create)
-		// NOTE: static routes (/pools/bulk-test, /pools/bulk-delete) must be
-		// registered before Gin's parameterised :id patterns to avoid conflicts.
+		// NOTE: static routes must be registered before Gin's parameterised :id patterns.
 		adminGroup.POST("/pools/bulk-test", poolHandler.BulkTest)
 		adminGroup.POST("/pools/bulk-delete", poolHandler.BulkDelete)
+		adminGroup.POST("/pools/purge-unhealthy", poolHandler.PurgeUnhealthyPools)
 		adminGroup.GET("/pools/:id", poolHandler.Get)
 		adminGroup.PUT("/pools/:id", poolHandler.Update)
 		adminGroup.DELETE("/pools/:id", poolHandler.Delete)

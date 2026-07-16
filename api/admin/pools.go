@@ -137,6 +137,13 @@ func (h *PoolHandler) List(c *gin.Context) {
 			_ = json.Unmarshal(p.Capabilities, &caps)
 		}
 
+		// Compute health percentage (nil when no credentials)
+		var healthPct *float64
+		if p.CredentialCount > 0 {
+			v := float64(p.HealthyCount) / float64(p.CredentialCount) * 100
+			healthPct = &v
+		}
+
 		resp[i] = dto.PoolResponse{
 			ID:              p.ID,
 			ModelPattern:    p.ModelPattern,
@@ -144,6 +151,8 @@ func (h *PoolHandler) List(c *gin.Context) {
 			FallbackPoolID:  p.FallbackPoolID,
 			Capabilities:    caps,
 			CredentialCount: p.CredentialCount,
+			HealthyCount:    p.HealthyCount,
+			HealthPercent:   healthPct,
 			CreatedAt:       p.CreatedAt,
 		}
 	}
@@ -633,5 +642,39 @@ func (h *PoolHandler) BulkTest(c *gin.Context) {
 
 	c.JSON(http.StatusAccepted, dto.SuccessResponse{
 		Message: fmt.Sprintf("Bulk health check dispatched. Run ID: %s", runID),
+	})
+}
+
+// PurgeUnhealthyPools permanently removes all model pools where every credential
+// is unhealthy (health_percent = 0%) or the pool contains no credentials at all.
+// This instantly removes those model patterns from the OpenAI-compatible proxy API.
+// A PostgreSQL NOTIFY is broadcast so all cluster nodes hot-swap their routing cache.
+//
+// @Summary      Purge zero-health model pools
+// @Description  Deletes all pools with 0% healthy credentials, removing them from the proxy API immediately
+// @Tags         Pools
+// @Produce      json
+// @Security     BearerAuth
+// @Success      200  {object}  dto.SuccessResponse
+// @Failure      500  {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/pools/purge-unhealthy [post]
+func (h *PoolHandler) PurgeUnhealthyPools(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	deleted, err := database.DeleteZeroHealthPools(ctx, h.db)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{
+			Error:   "failed to purge unhealthy pools",
+			Details: err.Error(),
+		})
+		return
+	}
+
+	// Broadcast reload so all cluster nodes evict the deleted patterns immediately.
+	_, _ = h.db.Exec(ctx, "NOTIFY config_change, 'model_pools:reload'")
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("%d pool(s) with 0%% healthy credentials permanently removed from the gateway.", deleted),
+		"deleted": deleted,
 	})
 }

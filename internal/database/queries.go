@@ -138,10 +138,12 @@ func ListModelPools(ctx context.Context, pool *pgxpool.Pool) ([]*ModelPoolRow, e
 }
 
 // ModelPoolRowWithCount extends ModelPoolRow with the number of credentials
-// attached to the pool, used by the paginated admin pools list.
+// attached to the pool and the number of healthy ones, used by the paginated
+// admin pools list.
 type ModelPoolRowWithCount struct {
 	ModelPoolRow
 	CredentialCount int
+	HealthyCount    int
 }
 
 // PoolFilter holds the filtering and sorting parameters for paginated model pools.
@@ -238,6 +240,8 @@ func ListModelPoolsPaginated(ctx context.Context, pool *pgxpool.Pool, limit, off
 			sortBy = "credential_count"
 		case "strategy":
 			sortBy = "mp.strategy"
+		case "health_percent":
+			sortBy = "CASE WHEN COUNT(c.id) = 0 THEN -1 ELSE ROUND(100.0 * SUM(CASE WHEN c.is_healthy THEN 1 ELSE 0 END) / COUNT(c.id)) END"
 		}
 	}
 
@@ -249,6 +253,7 @@ func ListModelPoolsPaginated(ctx context.Context, pool *pgxpool.Pool, limit, off
 	query := `
 		SELECT mp.id, mp.model_pattern, mp.strategy, mp.fallback_pool_id, mp.capabilities, mp.created_at::text,
 		       COUNT(c.id) AS credential_count,
+		       COALESCE(SUM(CASE WHEN c.is_healthy THEN 1 ELSE 0 END), 0) AS healthy_count,
 		       COUNT(*) OVER() AS total_count
 		FROM model_pools mp
 		LEFT JOIN credentials c ON c.pool_id = mp.id
@@ -277,7 +282,7 @@ func ListModelPoolsPaginated(ctx context.Context, pool *pgxpool.Pool, limit, off
 	total := 0
 	for rows.Next() {
 		p := &ModelPoolRowWithCount{}
-		if err := rows.Scan(&p.ID, &p.ModelPattern, &p.Strategy, &p.FallbackPoolID, &p.Capabilities, &p.CreatedAt, &p.CredentialCount, &total); err != nil {
+		if err := rows.Scan(&p.ID, &p.ModelPattern, &p.Strategy, &p.FallbackPoolID, &p.Capabilities, &p.CreatedAt, &p.CredentialCount, &p.HealthyCount, &total); err != nil {
 			return nil, 0, fmt.Errorf("failed to scan pool: %w", err)
 		}
 		pools = append(pools, p)
@@ -349,6 +354,28 @@ func DeleteModelPoolsBulk(ctx context.Context, pool *pgxpool.Pool, ids []int) er
 		return fmt.Errorf("failed to delete pools in bulk: %w", err)
 	}
 	return nil
+}
+
+// DeleteZeroHealthPools deletes all model pools where every credential is
+// unhealthy (is_healthy = FALSE) or where the pool has no credentials at all.
+// Credentials are cascade-deleted by the foreign key constraint.
+// Returns the number of pools deleted.
+func DeleteZeroHealthPools(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
+	result, err := pool.Exec(ctx, `
+		DELETE FROM model_pools
+		WHERE id IN (
+			SELECT mp.id
+			FROM model_pools mp
+			LEFT JOIN credentials c ON c.pool_id = mp.id
+			GROUP BY mp.id
+			HAVING COUNT(c.id) = 0
+			    OR SUM(CASE WHEN c.is_healthy THEN 1 ELSE 0 END) = 0
+		)
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("failed to purge zero-health pools: %w", err)
+	}
+	return result.RowsAffected(), nil
 }
 
 // --- Credential Queries ---

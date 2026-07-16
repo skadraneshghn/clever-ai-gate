@@ -3,7 +3,7 @@
   import { 
     Cpu, Plus, RefreshCw, Shield, AlertTriangle, Trash2, Pencil, X, Sparkles,
     ArrowLeft, Search, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Heart,
-    SlidersHorizontal, ArrowUpDown, Activity
+    SlidersHorizontal, ArrowUpDown, Activity, ShieldOff
   } from '@lucide/svelte';
   import { appState } from '$lib/state.svelte.js';
   import Button from '$lib/components/Button.svelte';
@@ -156,6 +156,42 @@
       isBulkTesting = false;
       appState.apiLoading = false;
     }
+  }
+
+  // Purge zero-health pools state
+  let showPurgeConfirm = $state(false);
+  let isPurging = $state(false);
+
+  async function purgeUnhealthyPools() {
+    isPurging = true;
+    appState.apiLoading = true;
+    try {
+      const res = await fetch('/api/v1/admin/pools/purge-unhealthy', {
+        method: 'POST',
+        headers: adminHeaders()
+      });
+      const result = await res.json();
+      if (res.ok) {
+        appState.addToast('success', result.message || `${result.deleted} unhealthy pool(s) purged.`);
+        showPurgeConfirm = false;
+        reloadPools();
+      } else {
+        appState.addToast('error', result.error || `Purge failed (${res.status})`);
+      }
+    } catch (err) {
+      appState.addToast('error', `Network error: ${err.message}`);
+    } finally {
+      isPurging = false;
+      appState.apiLoading = false;
+    }
+  }
+
+  /** Returns colour class for a health percentage value */
+  function healthColor(pct) {
+    if (pct === null || pct === undefined) return '#64748b'; // no creds → grey
+    if (pct === 0) return '#ef4444';    // 0% → red
+    if (pct < 100) return '#f59e0b';   // partial → amber
+    return '#22c55e';                   // 100% → green
   }
 
   // Auto-fetch when adminKey changes
@@ -636,6 +672,15 @@
             Bulk Test All Models
           {/if}
         </Button>
+        <Button
+          variant="danger"
+          size="sm"
+          onclick={() => showPurgeConfirm = true}
+          title="Permanently delete all model pools where 0% of credentials are healthy, removing them from the proxy API"
+        >
+          <ShieldOff size={14} />
+          Purge 0% Pools
+        </Button>
         <Button variant="primary" size="sm" onclick={openAddModal}>
           <Plus size={14} />
           Create Pool
@@ -1107,6 +1152,7 @@
                 <option value="id">Pool ID</option>
                 <option value="created_at">Date Created</option>
                 <option value="credential_count">Keys Count</option>
+                <option value="health_percent">Health %</option>
               </select>
             </div>
 
@@ -1195,6 +1241,7 @@
             <div style="font-size: 11px;">Strategy</div>
             <div style="font-size: 11px;">Fallback Pool ID</div>
             <div style="font-size: 11px; text-align: center;">Credentials</div>
+            <div style="font-size: 11px; text-align: center;">Health</div>
             <div style="font-size: 11px; text-align: center;">Actions</div>
           </div>
         </div>
@@ -1210,7 +1257,10 @@
               {#each visibleItems as pool (pool.id)}
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div class="pools-table-row pool-row cursor-pointer" style="height: {ROW_HEIGHT}px;" onclick={() => openPoolDetails(pool)}>
+                <div class="pools-table-row pool-row cursor-pointer"
+                  style="height: {ROW_HEIGHT}px; {pool.credential_count > 0 && pool.health_percent === 0 ? 'opacity:0.55;' : ''}"
+                  onclick={() => openPoolDetails(pool)}
+                >
                   <div style="text-align: center; width: 40px;" onclick={(e) => e.stopPropagation()}>
                     <input
                       type="checkbox"
@@ -1242,6 +1292,30 @@
                   </div>
                   <div class="font-mono text-sm">{pool.fallback_pool_id !== null && pool.fallback_pool_id !== undefined ? `#${pool.fallback_pool_id}` : '—'}</div>
                   <div class="font-mono text-sm text-center">{pool.credential_count || 0} keys</div>
+                  <!-- Health percentage mini-bar -->
+                  <div class="flex flex-col items-center justify-center gap-0.5" style="min-width:72px;">
+                    {#if pool.credential_count === 0}
+                      <span class="text-xs opacity-30">no keys</span>
+                    {:else}
+                      {@const pct = pool.health_percent ?? 0}
+                      {@const color = healthColor(pct)}
+                      <div style="
+                        width: 64px; height: 5px;
+                        background: rgba(100,116,139,0.18);
+                        border-radius: 3px; overflow: hidden;
+                      ">
+                        <div style="
+                          width: {pct}%; height: 100%;
+                          background: {color};
+                          border-radius: 3px;
+                          transition: width 0.4s ease;
+                        "></div>
+                      </div>
+                      <span style="font-size:10px; font-weight:700; color:{color}; font-variant-numeric: tabular-nums;">
+                        {pool.healthy_count ?? 0}/{pool.credential_count} · {Math.round(pct)}%
+                      </span>
+                    {/if}
+                  </div>
                   <div onclick={(e) => e.stopPropagation()}>
                     <div class="flex items-center justify-center gap-1">
                       <Button variant="ghost" size="sm" onclick={(e) => openEditModal(pool, e)} title="Edit pool">
@@ -1385,6 +1459,34 @@
           <span class="animate-spin">⟳</span>
         {:else}
           Delete ({selectedPoolIds.length})
+        {/if}
+      </Button>
+    </div>
+  {/snippet}
+</Modal>
+
+<!-- ─── PURGE UNHEALTHY POOLS CONFIRMATION DIALOG ──────────────────────── -->
+<Modal bind:show={showPurgeConfirm} title="Purge All 0% Health Pools?">
+  <div class="flex flex-col items-center gap-4 text-center">
+    <ShieldOff size={48} class="text-red-500 mb-2" />
+    <p class="text-sm text-secondary">
+      This will <strong>permanently delete</strong> every model pool where
+      <strong class="text-red-500">0% of credentials are healthy</strong>
+      (or the pool has no credentials at all).
+      Those model patterns are <strong>immediately removed</strong> from the
+      OpenAI-compatible proxy API across all cluster nodes.
+    </p>
+    <p class="text-xs text-red-500 font-bold">This action is permanent and cannot be undone.</p>
+  </div>
+
+  {#snippet footer()}
+    <div class="flex justify-center gap-3 w-full">
+      <Button variant="outline" onclick={() => showPurgeConfirm = false}>Cancel</Button>
+      <Button variant="danger" onclick={purgeUnhealthyPools} disabled={isPurging}>
+        {#if isPurging}
+          <span class="animate-spin">⟳</span> Purging...
+        {:else}
+          <ShieldOff size={14} /> Purge 0% Pools
         {/if}
       </Button>
     </div>

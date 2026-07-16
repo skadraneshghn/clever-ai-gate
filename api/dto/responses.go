@@ -22,6 +22,8 @@ type PoolResponse struct {
 	FallbackPoolID  *int                 `json:"fallback_pool_id,omitempty" example:"2"`
 	Capabilities    map[string]bool      `json:"capabilities,omitempty"`
 	CredentialCount int                  `json:"credential_count,omitempty" example:"3"`
+	HealthyCount    int                  `json:"healthy_count,omitempty" example:"2"`
+	HealthPercent   *float64             `json:"health_percent,omitempty" example:"66.7"`
 	Credentials     []CredentialResponse `json:"credentials,omitempty"`
 	CreatedAt       string               `json:"created_at" example:"2024-01-15T10:30:00Z"`
 }
