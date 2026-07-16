@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/skadraneshghn/clever-ai-gate/api/dto"
 	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
@@ -583,7 +584,12 @@ func (h *PoolHandler) BulkTest(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	const systemJobID = "sys-bulk-health-check"
+
+	// Derive a stable, deterministic UUID (v5/SHA-1) from the canonical job name.
+	// This satisfies the UUID PRIMARY KEY constraint while remaining reproducible
+	// across restarts so the idempotent EXISTS check always resolves the same row.
+	const systemJobName = "sys-bulk-health-check"
+	systemJobID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(systemJobName))
 
 	// Idempotently ensure the system job definition exists in the database.
 	var exists bool
@@ -616,7 +622,7 @@ func (h *PoolHandler) BulkTest(c *gin.Context) {
 		}
 	}
 
-	runID, err := h.scheduler.TriggerNow(ctx, systemJobID)
+	runID, err := h.scheduler.TriggerNow(ctx, systemJobID.String())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{
 			Error:   "failed to dispatch bulk health check job",
