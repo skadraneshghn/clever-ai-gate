@@ -12,6 +12,8 @@ import (
 	"github.com/skadraneshghn/clever-ai-gate/internal/config"
 	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
 	"github.com/skadraneshghn/clever-ai-gate/internal/health"
+	"github.com/skadraneshghn/clever-ai-gate/internal/jobs"
+	"github.com/skadraneshghn/clever-ai-gate/internal/jobs/ui"
 	"github.com/skadraneshghn/clever-ai-gate/internal/middleware"
 	"github.com/skadraneshghn/clever-ai-gate/internal/playground"
 	"github.com/skadraneshghn/clever-ai-gate/internal/proxy"
@@ -34,6 +36,7 @@ type Dependencies struct {
 	Health      *health.Handler
 	Proxy       *proxy.Handler
 	LogHub      *telemetry.LogHub // non-blocking log broadcaster for the admin log viewer
+	Scheduler   *jobs.Scheduler  // nil when not initialized
 }
 
 // NewEngine creates and configures the Gin engine with all routes.
@@ -229,6 +232,64 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		// Dashboard statistics & metrics
 		metricsCtrl := admin.NewMetricsController(deps.DB)
 		adminGroup.GET("/metrics", metricsCtrl.GetDashboardStats)
+
+		// Job scheduling system
+		if deps.Scheduler != nil {
+			jobHandler := admin.NewJobHandler(deps.DB, deps.Scheduler, deps.Logger)
+
+			// Job CRUD & lifecycle
+			adminGroup.GET("/jobs", jobHandler.ListJobs)
+			adminGroup.POST("/jobs", jobHandler.CreateJob)
+			adminGroup.GET("/jobs/runs", jobHandler.GetAllRuns)
+			adminGroup.GET("/jobs/:id", jobHandler.GetJob)
+			adminGroup.PUT("/jobs/:id", jobHandler.UpdateJob)
+			adminGroup.DELETE("/jobs/:id", jobHandler.DeleteJob)
+			adminGroup.POST("/jobs/:id/trigger", jobHandler.TriggerJob)
+			adminGroup.POST("/jobs/:id/pause", jobHandler.PauseJob)
+			adminGroup.POST("/jobs/:id/resume", jobHandler.ResumeJob)
+			adminGroup.GET("/jobs/:id/runs", jobHandler.GetJobRuns)
+			adminGroup.DELETE("/jobs/runs/:run_id", jobHandler.DeleteRun)
+
+			// Scheduler settings & operations
+			adminGroup.GET("/scheduler/settings", jobHandler.GetSchedulerSettings)
+			adminGroup.PUT("/scheduler/settings", jobHandler.UpdateSchedulerSettings)
+			adminGroup.GET("/scheduler/stats", jobHandler.GetSchedulerStats)
+			adminGroup.GET("/scheduler/types", jobHandler.GetRegisteredTypes)
+			adminGroup.POST("/scheduler/restart", jobHandler.RestartScheduler)
+		}
+	}
+
+	// --- Job Scheduler Admin UI (protected by HTTP Basic Auth) ---
+	if deps.Scheduler != nil {
+		jobsSubFS, err := fs.Sub(ui.DistFS, "dist")
+		if err != nil {
+			deps.Logger.Warn("failed to read embedded jobs UI", zap.Error(err))
+		} else {
+			jobsIndexContent, err := fs.ReadFile(jobsSubFS, "index.html")
+			if err != nil {
+				deps.Logger.Warn("failed to read jobs UI index.html", zap.Error(err))
+			} else {
+				jobsGroup := engine.Group("", middleware.PlaygroundBasicAuth(deps.Config.PlaygroundUser, deps.Config.PlaygroundPass))
+				jobsFileServer := http.StripPrefix("/jobs", http.FileServer(http.FS(jobsSubFS)))
+
+				jobsGroup.GET("/jobs", func(c *gin.Context) {
+					c.Data(200, "text/html; charset=utf-8", jobsIndexContent)
+				})
+				jobsGroup.GET("/jobs/*any", func(c *gin.Context) {
+					path := c.Param("any")
+					if path == "" || path == "/" {
+						c.Data(200, "text/html; charset=utf-8", jobsIndexContent)
+						return
+					}
+					lastSegment := path[strings.LastIndex(path, "/")+1:]
+					if strings.Contains(lastSegment, ".") {
+						jobsFileServer.ServeHTTP(c.Writer, c.Request)
+						return
+					}
+					c.Data(200, "text/html; charset=utf-8", jobsIndexContent)
+				})
+			}
+		}
 	}
 
 	return engine

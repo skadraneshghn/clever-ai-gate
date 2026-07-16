@@ -38,6 +38,7 @@ import (
 	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
 	"github.com/skadraneshghn/clever-ai-gate/internal/database"
 	"github.com/skadraneshghn/clever-ai-gate/internal/health"
+	"github.com/skadraneshghn/clever-ai-gate/internal/jobs"
 	"github.com/skadraneshghn/clever-ai-gate/internal/proxy"
 	"github.com/skadraneshghn/clever-ai-gate/internal/redisclient"
 	"github.com/skadraneshghn/clever-ai-gate/internal/router"
@@ -177,6 +178,22 @@ func main() {
 	// --- Step 9: Initialize health handler ---
 	healthHandler := health.New(dbPool)
 
+	// --- Step 9.5: Initialize Job Scheduler ---
+	var jobScheduler *jobs.Scheduler
+	jobScheduler, err = jobs.NewScheduler(dbPool, rawRedis, logger)
+	if err != nil {
+		logger.Warn("failed to initialize job scheduler, jobs disabled", zap.Error(err))
+		jobScheduler = nil
+	} else {
+		if err := jobScheduler.Start(ctx); err != nil {
+			logger.Warn("failed to start job scheduler", zap.Error(err))
+			jobScheduler = nil
+		} else {
+			defer jobScheduler.Stop()
+			logger.Info("job scheduler started")
+		}
+	}
+
 	// --- Step 10: Build Gin engine with all routes ---
 	engine := router.NewEngine(&router.Dependencies{
 		Config:      cfg,
@@ -189,6 +206,7 @@ func main() {
 		Health:      healthHandler,
 		Proxy:       proxyHandler,
 		LogHub:      logHub,
+		Scheduler:   jobScheduler,
 	})
 
 	// --- Step 11: Start HTTP server ---
