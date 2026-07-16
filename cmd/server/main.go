@@ -180,7 +180,7 @@ func main() {
 
 	// --- Step 9.5: Initialize Job Scheduler ---
 	var jobScheduler *jobs.Scheduler
-	jobScheduler, err = jobs.NewScheduler(dbPool, rawRedis, logger)
+	jobScheduler, err = jobs.NewScheduler(dbPool, rawRedis, vault, logger)
 	if err != nil {
 		logger.Warn("failed to initialize job scheduler, jobs disabled", zap.Error(err))
 		jobScheduler = nil

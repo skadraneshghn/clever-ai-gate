@@ -1,23 +1,33 @@
 package jobs
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
+	"github.com/skadraneshghn/clever-ai-gate/internal/database"
 	"go.uber.org/zap"
 )
 
 // RegisterBuiltinExecutors registers all built-in job types into the registry.
 // Call this once at startup before calling Scheduler.Start().
-func RegisterBuiltinExecutors(reg *Registry, db *pgxpool.Pool, logger *zap.Logger) {
+func RegisterBuiltinExecutors(reg *Registry, db *pgxpool.Pool, vault *credentials.Vault, logger *zap.Logger) {
 	reg.Register("telemetry_cleanup", newTelemetryCleanupExecutor(db, logger))
 	reg.Register("credential_health_check", newCredentialHealthCheckExecutor(db, logger))
 	reg.Register("log_rotation", newLogRotationExecutor(logger))
 	reg.Register("cache_warmup", newCacheWarmupExecutor(db, logger))
 	reg.Register("job_log_cleanup", newJobLogCleanupExecutor(db, logger))
 	reg.Register("noop", newNoopExecutor(logger))
+	reg.Register("bulk_pool_health_check", newBulkPoolHealthCheckExecutor(db, vault, logger))
 
 	logger.Info("built-in job executors registered",
 		zap.Strings("types", reg.ListTypes()),
@@ -170,4 +180,166 @@ func newNoopExecutor(logger *zap.Logger) ExecutorFunc {
 		logger.Debug("noop job executed", zap.String("job_id", ctx.JobID), zap.String("run_id", ctx.RunID))
 		return "No operation performed (noop)", nil
 	}
+}
+
+// --- Built-in Executor: bulk_pool_health_check ---
+// Iterates all credentials across every pool, executes a lightweight live
+// HTTP probe per credential (bounded by a semaphore of 20 workers),
+// persists the health result, and broadcasts a NOTIFY reload signal.
+
+func newBulkPoolHealthCheckExecutor(db *pgxpool.Pool, vault *credentials.Vault, logger *zap.Logger) ExecutorFunc {
+	return func(execCtx *ExecutionContext) (string, error) {
+		ctx := context.Background()
+
+		// 1. Pull all active credentials joined with pool model_pattern
+		creds, err := database.ListAllCredentials(ctx, db)
+		if err != nil {
+			return "", fmt.Errorf("bulk health check: failed to list credentials: %w", err)
+		}
+		if len(creds) == 0 {
+			return "No credentials found in database to evaluate.", nil
+		}
+
+		logger.Info("bulk_pool_health_check started",
+			zap.String("run_id", execCtx.RunID),
+			zap.Int("total_credentials", len(creds)),
+		)
+
+		// 2. Bounded semaphore — max 20 parallel outbound connections
+		const maxWorkers = 20
+		sem := make(chan struct{}, maxWorkers)
+		var wg sync.WaitGroup
+
+		var successCount atomic.Int64
+		var failureCount atomic.Int64
+
+		client := &http.Client{Timeout: 10 * time.Second}
+
+		for _, cr := range creds {
+			wg.Add(1)
+			sem <- struct{}{}
+
+			go func(c *database.CredentialWithPool) {
+				defer wg.Done()
+				defer func() { <-sem }()
+
+				// Decrypt key securely per credential
+				apiKey, decErr := vault.Decrypt(c.EncryptedKey)
+				if decErr != nil {
+					logger.Error("bulk health: key decryption failed",
+						zap.Int("cred_id", c.ID), zap.Error(decErr))
+					errStr := fmt.Sprintf("decryption failure: %v", decErr)
+					_ = database.UpdateCredentialHealthState(ctx, db, c.ID, false, &errStr)
+					failureCount.Add(1)
+					return
+				}
+
+				isHealthy, errStr := probeCredential(ctx, client, c, apiKey)
+
+				updateErr := database.UpdateCredentialHealthState(ctx, db, c.ID, isHealthy, errStr)
+				if updateErr != nil {
+					logger.Warn("bulk health: failed to persist health state",
+						zap.Int("cred_id", c.ID), zap.Error(updateErr))
+				}
+
+				if isHealthy {
+					successCount.Add(1)
+				} else {
+					failureCount.Add(1)
+				}
+			}(cr)
+		}
+
+		wg.Wait()
+
+		// 3. Broadcast reload to all cluster nodes via PostgreSQL NOTIFY
+		_, _ = db.Exec(ctx, "NOTIFY config_change, 'model_pools:reload'")
+
+		summary := fmt.Sprintf(
+			"Bulk health evaluation complete — healthy: %d, unhealthy: %d (total: %d).",
+			successCount.Load(), failureCount.Load(), len(creds),
+		)
+		logger.Info("bulk_pool_health_check finished",
+			zap.String("run_id", execCtx.RunID),
+			zap.Int64("healthy", successCount.Load()),
+			zap.Int64("unhealthy", failureCount.Load()),
+		)
+		return summary, nil
+	}
+}
+
+// probeCredential sends a lightweight HTTP health probe to the upstream provider
+// for a single credential and returns (isHealthy, *errorString).
+func probeCredential(ctx context.Context, client *http.Client, c *database.CredentialWithPool, apiKey string) (bool, *string) {
+	var req *http.Request
+	var buildErr error
+
+	if c.Provider == "ollama" {
+		// Ollama: use /api/tags instead of chat completions
+		url := strings.TrimRight(c.BaseURL, "/") + "/api/tags"
+		req, buildErr = http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if buildErr == nil {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+	} else {
+		// All other providers: POST /v1/chat/completions with a minimal payload
+		url := strings.TrimRight(c.BaseURL, "/")
+		if !strings.HasSuffix(url, "/v1") && c.Provider != "custom" {
+			url += "/v1"
+		}
+		url += "/chat/completions"
+
+		// Resolve wildcard model patterns to a concrete, tiny target model
+		testModel := c.ModelPattern
+		if strings.Contains(testModel, "*") {
+			switch {
+			case strings.Contains(testModel, "gpt"):
+				testModel = "gpt-4o-mini"
+			case strings.Contains(testModel, "claude"):
+				testModel = "claude-3-5-haiku-20241022"
+			case strings.Contains(testModel, "nvidia"):
+				testModel = "nvidia/llama-3.1-nemotron-70b-instruct"
+			default:
+				testModel = strings.ReplaceAll(testModel, "*", "latest")
+			}
+		}
+		testModel = strings.TrimPrefix(testModel, "nvidia/")
+		testModel = strings.TrimPrefix(testModel, "ollama/")
+
+		payload := map[string]interface{}{
+			"model": testModel,
+			"messages": []map[string]string{
+				{"role": "user", "content": "Reply with exactly: OK"},
+			},
+			"temperature": 0,
+			"max_tokens":  2,
+		}
+		bodyBytes, _ := json.Marshal(payload)
+		req, buildErr = http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+		if buildErr == nil {
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+	}
+
+	if buildErr != nil {
+		errStr := fmt.Sprintf("failed to build probe request: %v", buildErr)
+		return false, &errStr
+	}
+
+	resp, doErr := client.Do(req)
+	if doErr != nil {
+		errStr := fmt.Sprintf("connection error: %v", doErr)
+		return false, &errStr
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return true, nil
+	}
+
+	limitReader := io.LimitReader(resp.Body, 512)
+	respBytes, _ := io.ReadAll(limitReader)
+	errStr := fmt.Sprintf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBytes)))
+	return false, &errStr
 }

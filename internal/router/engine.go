@@ -191,13 +191,16 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		adminGroup.DELETE("/tenants/:id", tenantHandler.Delete)
 
 		// Model pool management
-		poolHandler := admin.NewPoolHandler(deps.DB, deps.Vault)
+		poolHandler := admin.NewPoolHandler(deps.DB, deps.Vault, deps.Scheduler)
 		adminGroup.GET("/pools", poolHandler.List)
 		adminGroup.POST("/pools", poolHandler.Create)
+		// NOTE: static routes (/pools/bulk-test, /pools/bulk-delete) must be
+		// registered before Gin's parameterised :id patterns to avoid conflicts.
+		adminGroup.POST("/pools/bulk-test", poolHandler.BulkTest)
+		adminGroup.POST("/pools/bulk-delete", poolHandler.BulkDelete)
 		adminGroup.GET("/pools/:id", poolHandler.Get)
 		adminGroup.PUT("/pools/:id", poolHandler.Update)
 		adminGroup.DELETE("/pools/:id", poolHandler.Delete)
-		adminGroup.POST("/pools/bulk-delete", poolHandler.BulkDelete)
 		adminGroup.GET("/pools/:id/logs", poolHandler.GetLogs)
 		adminGroup.POST("/pools/:id/credentials/:cred_id/test", poolHandler.TestCredential)
 

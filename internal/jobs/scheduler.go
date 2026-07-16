@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
 	"go.uber.org/zap"
 )
 
@@ -27,6 +28,7 @@ type Scheduler struct {
 	worker    *Worker
 	db        *pgxpool.Pool
 	rdb       *redis.Client
+	vault     *credentials.Vault
 	logger    *zap.Logger
 	cfg       SchedulerSettings
 
@@ -37,7 +39,7 @@ type Scheduler struct {
 
 // NewScheduler creates and initializes the Scheduler.
 // rdb may be nil — in that case distributed locking and the async queue are disabled.
-func NewScheduler(db *pgxpool.Pool, rdb *redis.Client, logger *zap.Logger) (*Scheduler, error) {
+func NewScheduler(db *pgxpool.Pool, rdb *redis.Client, vault *credentials.Vault, logger *zap.Logger) (*Scheduler, error) {
 	hostname, _ := os.Hostname()
 
 	settingsStore := NewSettingsStore(db, logger)
@@ -95,6 +97,7 @@ func NewScheduler(db *pgxpool.Pool, rdb *redis.Client, logger *zap.Logger) (*Sch
 		worker:    w,
 		db:        db,
 		rdb:       rdb,
+		vault:     vault,
 		logger:    logger,
 		cfg:       cfg,
 		jobMap:    make(map[string]gocron.Job),
@@ -123,8 +126,8 @@ func (s *Scheduler) Config() SchedulerSettings {
 
 // Start initializes all scheduled jobs from the database and begins scheduling.
 func (s *Scheduler) Start(ctx context.Context) error {
-	// Register built-in executors
-	RegisterBuiltinExecutors(s.registry, s.db, s.logger)
+	// Register built-in executors (vault forwarded for bulk health check)
+	RegisterBuiltinExecutors(s.registry, s.db, s.vault, s.logger)
 
 	// Load jobs from DB and register them
 	if err := s.loadJobsFromDB(ctx); err != nil {

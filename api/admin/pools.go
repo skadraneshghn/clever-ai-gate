@@ -15,17 +15,19 @@ import (
 	"github.com/skadraneshghn/clever-ai-gate/api/dto"
 	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
 	"github.com/skadraneshghn/clever-ai-gate/internal/database"
+	"github.com/skadraneshghn/clever-ai-gate/internal/jobs"
 )
 
 // PoolHandler provides CRUD operations for model routing pools.
 type PoolHandler struct {
-	db    *pgxpool.Pool
-	vault *credentials.Vault
+	db        *pgxpool.Pool
+	vault     *credentials.Vault
+	scheduler *jobs.Scheduler
 }
 
 // NewPoolHandler creates a new pool handler.
-func NewPoolHandler(db *pgxpool.Pool, vault *credentials.Vault) *PoolHandler {
-	return &PoolHandler{db: db, vault: vault}
+func NewPoolHandler(db *pgxpool.Pool, vault *credentials.Vault, scheduler *jobs.Scheduler) *PoolHandler {
+	return &PoolHandler{db: db, vault: vault, scheduler: scheduler}
 }
 
 // List returns all model routing pools.
@@ -558,4 +560,72 @@ func (h *PoolHandler) BulkDelete(c *gin.Context) {
 	c.JSON(http.StatusOK, dto.SuccessResponse{Message: fmt.Sprintf("%d model pools deleted successfully", len(req.IDs))})
 }
 
+// BulkTest launches an asynchronous background cluster job to health-check all model credentials.
+// It ensures the system job definition row exists in the database (idempotent) and fires
+// scheduler.TriggerNow, which enqueues a run via the Redis async queue (or a goroutine when
+// Redis is unavailable). The caller receives an immediate 202 Accepted response with the run ID.
+//
+// @Summary      Bulk test all model credentials
+// @Description  Launches a background distributed job that health-checks every credential across all pools
+// @Tags         Pools
+// @Produce      json
+// @Security     BearerAuth
+// @Success      202  {object}  dto.SuccessResponse
+// @Failure      503  {object}  dto.ErrorResponse
+// @Failure      500  {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/pools/bulk-test [post]
+func (h *PoolHandler) BulkTest(c *gin.Context) {
+	if h.scheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, dto.ErrorResponse{
+			Error: "job scheduler is unavailable on this gateway node",
+		})
+		return
+	}
 
+	ctx := c.Request.Context()
+	const systemJobID = "sys-bulk-health-check"
+
+	// Idempotently ensure the system job definition exists in the database.
+	var exists bool
+	_ = h.db.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM jobs WHERE id = $1)",
+		systemJobID,
+	).Scan(&exists)
+
+	if !exists {
+		_, err := h.db.Exec(ctx, `
+			INSERT INTO jobs (
+				id, name, description, job_type, schedule_type, payload,
+				timezone, max_retries, retry_delay_seconds, timeout_seconds,
+				is_enabled, is_singleton
+			) VALUES (
+				$1, 'System Bulk Pool Health Check',
+				'On-demand live health evaluation of all model provider credentials across pools',
+				'bulk_pool_health_check', 'manual', '{}',
+				'UTC', 0, 0, 600,
+				true, true
+			)`,
+			systemJobID,
+		)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.ErrorResponse{
+				Error:   "failed to provision system job schema",
+				Details: err.Error(),
+			})
+			return
+		}
+	}
+
+	runID, err := h.scheduler.TriggerNow(ctx, systemJobID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{
+			Error:   "failed to dispatch bulk health check job",
+			Details: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusAccepted, dto.SuccessResponse{
+		Message: fmt.Sprintf("Bulk health check dispatched. Run ID: %s", runID),
+	})
+}

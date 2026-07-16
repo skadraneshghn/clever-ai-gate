@@ -3,7 +3,7 @@
   import { 
     Cpu, Plus, RefreshCw, Shield, AlertTriangle, Trash2, Pencil, X, Sparkles,
     ArrowLeft, Search, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Heart,
-    SlidersHorizontal, ArrowUpDown
+    SlidersHorizontal, ArrowUpDown, Activity
   } from '@lucide/svelte';
   import { appState } from '$lib/state.svelte.js';
   import Button from '$lib/components/Button.svelte';
@@ -131,6 +131,32 @@
   let selectedPoolIds = $state([]);
   let showBulkDeletePoolsConfirm = $state(false);
   let bulkDeletePoolsLoading = $state(false);
+
+  // Bulk health-check state
+  let isBulkTesting = $state(false);
+
+  async function triggerBulkHealthCheck() {
+    if (isBulkTesting) return;
+    isBulkTesting = true;
+    appState.apiLoading = true;
+    try {
+      const res = await fetch('/api/v1/admin/pools/bulk-test', {
+        method: 'POST',
+        headers: adminHeaders()
+      });
+      const result = await res.json();
+      if (res.ok) {
+        appState.addToast('success', result.message || 'Bulk health check queued in background job cluster!');
+      } else {
+        appState.addToast('error', result.error || `Request failed (${res.status})`);
+      }
+    } catch (err) {
+      appState.addToast('error', `Network error: ${err.message}`);
+    } finally {
+      isBulkTesting = false;
+      appState.apiLoading = false;
+    }
+  }
 
   // Auto-fetch when adminKey changes
   $effect(() => {
@@ -591,6 +617,24 @@
         <Button variant="secondary" size="sm" onclick={() => { reloadPools(); appState.addToast('info', 'Refreshing pools list...'); }}>
           <RefreshCw size={14} />
           Refresh
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          onclick={triggerBulkHealthCheck}
+          disabled={isBulkTesting}
+          title="Run a live health check on every model credential across all pools via background job"
+        >
+          {#if isBulkTesting}
+            <svg class="animate-spin" style="width:14px;height:14px;" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4v0z"></path>
+            </svg>
+            Scheduling...
+          {:else}
+            <Activity size={14} />
+            Bulk Test All Models
+          {/if}
         </Button>
         <Button variant="primary" size="sm" onclick={openAddModal}>
           <Plus size={14} />
