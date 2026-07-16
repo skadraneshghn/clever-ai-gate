@@ -1,7 +1,7 @@
 <script>
   import { page } from '$app/stores';
   import { 
-    Settings, Plus, Trash2, Sparkles, Sun, Moon, KeyRound, Terminal, Users, Cpu, Activity
+    Settings, Plus, Trash2, Sparkles, Sun, Moon, KeyRound, Terminal, Users, Cpu, Activity, CalendarClock
   } from '@lucide/svelte';
   import { appState } from '$lib/state.svelte.js';
   import Button from '$lib/components/Button.svelte';
@@ -20,6 +20,7 @@
   let isTenants = $derived($page.url.pathname.includes('/tenants'));
   let isPools = $derived($page.url.pathname.includes('/pools'));
   let isLogs = $derived($page.url.pathname.includes('/logs'));
+  let isJobs = $derived($page.url.pathname.includes('/jobs'));
 </script>
 
 <LoadingBar />
@@ -161,6 +162,15 @@
           {#if appState.logsStreaming}
             <span class="logs-live-badge">LIVE</span>
           {/if}
+        </Button>
+        <Button
+          href="/playground/jobs"
+          variant={isJobs ? 'secondary' : 'ghost'}
+          align="left"
+          class="nav-link w-full {isJobs ? 'nav-link-active' : ''}"
+        >
+          <CalendarClock size={18} />
+          <span>Job Scheduler</span>
         </Button>
         <Button
           variant="ghost"
