@@ -320,16 +320,8 @@ func (s *Scheduler) makeTaskFunc(j Job) func() {
 			WHERE id = $1
 		`, j.ID)
 
-		// Execute
+		// Execute — build timeout context FIRST so it can be passed to execCtx.Context.
 		executor, _ := s.registry.Get(j.JobType)
-		execCtx := &ExecutionContext{
-			Context: tCtx, // ← propagate timeout; executor MUST use this, not context.Background()
-			JobID:   j.ID,
-			RunID:   runID,
-			JobType: j.JobType,
-			Payload: j.Payload,
-			Attempt: 1,
-		}
 
 		timeout := time.Duration(j.TimeoutSeconds) * time.Second
 		if timeout <= 0 {
@@ -337,6 +329,15 @@ func (s *Scheduler) makeTaskFunc(j Job) func() {
 		}
 		tCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
+
+		execCtx := &ExecutionContext{
+			Context: tCtx, // propagate timeout so HTTP/DB ops cancel when job times out
+			JobID:   j.ID,
+			RunID:   runID,
+			JobType: j.JobType,
+			Payload: j.Payload,
+			Attempt: 1,
+		}
 
 		start := time.Now()
 		var output string
@@ -466,16 +467,18 @@ func (s *Scheduler) makeTaskFuncWithRunID(j Job, runID string) func() {
 			return
 		}
 
-		execCtx := &ExecutionContext{
-			Context: tCtx, // ← propagate timeout; executor MUST use this, not context.Background()
-			JobID: j.ID, RunID: runID, JobType: j.JobType, Payload: j.Payload, Attempt: 1,
-		}
+		// Build timeout context FIRST so it can be passed into execCtx.Context.
 		timeout := time.Duration(j.TimeoutSeconds) * time.Second
 		if timeout <= 0 {
 			timeout = 5 * time.Minute
 		}
 		tCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
+
+		execCtx := &ExecutionContext{
+			Context: tCtx, // propagate timeout so HTTP/DB ops cancel when job times out
+			JobID: j.ID, RunID: runID, JobType: j.JobType, Payload: j.Payload, Attempt: 1,
+		}
 
 		start := time.Now()
 		output, execErr := s.runWithTimeout(tCtx, executor, execCtx)
