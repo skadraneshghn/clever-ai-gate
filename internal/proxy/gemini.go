@@ -400,27 +400,60 @@ func geminiReasoningBudget(effort string) int {
 }
 
 // normalizeGeminiModel maps unknown/unsupported Gemini model names to actual
-// existing Google AI Studio model IDs. This allows fictional or custom client-side
-// model aliases (like gemini-3.5-flash) to route and execute successfully.
+// existing Google AI Studio model IDs. This is ONLY used by findPoolByPrefix
+// to locate a fallback pool when the exact requested model is not registered.
+// It is intentionally NOT called in geminiPath (URL generation) — the pool
+// system guarantees that resolved model IDs are real and should be passed
+// through unchanged to Google's API.
 func normalizeGeminiModel(model string) string {
 	lower := strings.ToLower(model)
 
-	// If it is a known real Gemini model ID, pass it through as-is
-	switch lower {
-	case "gemini-2.5-pro", "gemini-2.5-flash", "gemini-1.5-pro", "gemini-1.5-flash",
-		"gemini-2.5-flash-lite", "gemini-2.0-flash-exp", "gemini-2.0-flash-thinking-exp-1219",
-		"gemini-2.0-pro-exp-02-05", "text-embedding-004", "embedding-001":
+	// Known real Gemini model IDs — pass through as-is.
+	// This list covers both historic and newly discovered models.
+	knownModels := map[string]bool{
+		// 2.5 generation
+		"gemini-2.5-pro": true, "gemini-2.5-flash": true, "gemini-2.5-flash-lite": true,
+		"gemini-2.5-computer-use-preview-10-2025": true,
+		"gemini-2.5-flash-image": true, "gemini-2.5-flash-preview-tts": true,
+		"gemini-2.5-pro-preview-tts": true,
+		// 2.0 generation
+		"gemini-2.0-flash": true, "gemini-2.0-flash-001": true,
+		"gemini-2.0-flash-lite": true, "gemini-2.0-flash-lite-001": true,
+		"gemini-2.0-flash-exp": true, "gemini-2.0-flash-thinking-exp-1219": true,
+		"gemini-2.0-pro-exp-02-05": true,
+		// 3.x generation (newly discovered real models)
+		"gemini-3.5-flash": true,
+		"gemini-3.1-flash-image": true, "gemini-3.1-flash-image-preview": true,
+		"gemini-3.1-flash-lite": true, "gemini-3.1-flash-lite-image": true,
+		"gemini-3.1-flash-lite-preview": true, "gemini-3.1-flash-tts-preview": true,
+		"gemini-3.1-pro-preview": true, "gemini-3.1-pro-preview-customtools": true,
+		"gemini-3-flash-preview": true,
+		"gemini-3-pro-image": true, "gemini-3-pro-image-preview": true, "gemini-3-pro-preview": true,
+		// 1.5 generation
+		"gemini-1.5-pro": true, "gemini-1.5-flash": true,
+		// Embeddings
+		"gemini-embedding-001": true, "gemini-embedding-2": true, "gemini-embedding-2-preview": true,
+		"text-embedding-004": true, "embedding-001": true,
+		// Latest aliases
+		"gemini-flash-latest": true, "gemini-flash-lite-latest": true, "gemini-pro-latest": true,
+		"gemini-omni-flash-preview": true,
+		// Gemma / other models under AI Studio
+		"gemma-4-26b-a4b-it": true, "gemma-4-31b-it": true,
+	}
+	if knownModels[lower] {
 		return model
 	}
 
-	// Dynamic fallback mapping for custom/fictional model aliases
+	// Dynamic fallback mapping for truly unknown/fictional model aliases.
+	// Prefer the newest generation available.
 	if strings.Contains(lower, "pro") {
 		return "gemini-2.5-pro"
 	}
 	if strings.Contains(lower, "flash-lite") {
 		return "gemini-2.5-flash-lite"
 	}
-	return "gemini-2.5-flash"
+	// Default to gemini-3.5-flash as it is the most capable generally available model
+	return "gemini-3.5-flash"
 }
 
 

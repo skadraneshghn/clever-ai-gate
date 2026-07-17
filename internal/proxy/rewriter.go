@@ -203,7 +203,10 @@ func anthropicPath(baseURL, requestPath, _ string) string {
 // replaces ":streamGenerateContent?alt=sse" with ":generateContent" for non-stream
 // requests before appending the API key.
 func geminiPath(baseURL, requestPath, model string) string {
-	model = normalizeGeminiModel(model)
+	// Do NOT normalize the model name here — the pool system (via discovery)
+	// has already validated that this model ID exists in the user's account.
+	// Calling normalizeGeminiModel would remap real discovered models (e.g.
+	// gemini-3.5-flash) to a static fallback that may be deprecated.
 	if strings.Contains(requestPath, "/chat/completions") {
 		// Default to streaming — forwardRequest will switch to generateContent for non-stream.
 		return fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?alt=sse", baseURL, model)
