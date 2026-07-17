@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { KeyRound, RefreshCw, Plus, Shield, AlertTriangle, Server, Pencil, Trash2, X, Search } from '@lucide/svelte';
+  import { KeyRound, RefreshCw, Plus, Shield, AlertTriangle, Server, Pencil, Trash2, X, Search, Radar, ChevronDown, ChevronUp, CheckCircle, XCircle, Clock } from '@lucide/svelte';
   import { appState } from '$lib/state.svelte.js';
   import Button from '$lib/components/Button.svelte';
   import Input from '$lib/components/Input.svelte';
@@ -77,6 +77,13 @@
 
   // Refresh all providers
   let refreshLoading = $state(false);
+
+  // Re-discovery state
+  let rediscoveryStatus = $state({ status: 'IDLE' });
+  let isRediscovering = $state(false);
+  let showRediscoveryDetails = $state(false);
+  let parsedRediscoveryReport = $state(null);
+  let rediscoveryPollInterval = null;
 
   // ─── Load state on adminKey change ─────────────────────────────────────────
   $effect(() => {
@@ -453,11 +460,91 @@
     }
   }
 
+  // ─── Re-Discovery Functions ────────────────────────────────────────────────
+  async function checkRediscoveryStatus() {
+    try {
+      const res = await fetch('/api/v1/admin/providers/rediscover/status', {
+        headers: adminHeaders()
+      });
+      if (res.ok) {
+        rediscoveryStatus = await res.json();
+        if (rediscoveryStatus.report) {
+          try {
+            parsedRediscoveryReport = typeof rediscoveryStatus.report === 'string'
+              ? JSON.parse(rediscoveryStatus.report)
+              : rediscoveryStatus.report;
+          } catch (e) {
+            parsedRediscoveryReport = null;
+          }
+        } else {
+          parsedRediscoveryReport = null;
+        }
+      }
+    } catch (e) {
+      console.error('Failed to check re-discovery status', e);
+    }
+  }
+
+  async function runReDiscovery() {
+    isRediscovering = true;
+    showRediscoveryDetails = false;
+    parsedRediscoveryReport = null;
+    try {
+      const res = await fetch('/api/v1/admin/providers/rediscover', {
+        method: 'POST',
+        headers: adminHeaders()
+      });
+      if (res.ok) {
+        rediscoveryStatus = { status: 'RUNNING' };
+        // Start polling for status updates
+        rediscoveryPollInterval = setInterval(async () => {
+          await checkRediscoveryStatus();
+          if (rediscoveryStatus.status !== 'RUNNING' && rediscoveryStatus.status !== 'PENDING') {
+            clearInterval(rediscoveryPollInterval);
+            rediscoveryPollInterval = null;
+            isRediscovering = false;
+            // Reload credentials to reflect any new models
+            await reloadCredentials();
+            if (appState.apiKey) appState.loadModels();
+          }
+        }, 2000);
+      } else if (res.status === 409) {
+        appState.addToast('warning', 'Re-discovery is already running. Please wait for it to complete.');
+        isRediscovering = false;
+      } else {
+        const err = await res.json();
+        appState.addToast('error', err.details || err.error || 'Failed to start re-discovery');
+        isRediscovering = false;
+      }
+    } catch (e) {
+      appState.addToast('error', `Network error: ${e.message}`);
+      isRediscovering = false;
+    }
+  }
+
+  function dismissRediscoveryBanner() {
+    rediscoveryStatus = { status: 'IDLE' };
+    parsedRediscoveryReport = null;
+    showRediscoveryDetails = false;
+  }
+
+  function formatDuration(ms) {
+    if (!ms) return '—';
+    if (ms < 1000) return `${ms}ms`;
+    const secs = Math.floor(ms / 1000);
+    if (secs < 60) return `${secs}s`;
+    return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  }
+
   onMount(() => {
     if (appState.adminKey.trim()) {
       reloadCredentials();
       loadPools();
+      checkRediscoveryStatus();
     }
+    return () => {
+      if (rediscoveryPollInterval) clearInterval(rediscoveryPollInterval);
+    };
   });
 </script>
 
@@ -482,6 +569,15 @@
         <RefreshCw size={14} class={refreshLoading ? 'animate-spin' : ''} />
         {refreshLoading ? 'Refreshing...' : 'Refresh'}
       </Button>
+      <button 
+        onclick={runReDiscovery}
+        disabled={isRediscovering || rediscoveryStatus.status === 'RUNNING'}
+        class="rediscover-btn"
+        title="Scan all provider endpoints for newly available models and auto-register them"
+      >
+        <Radar size={14} class={isRediscovering || rediscoveryStatus.status === 'RUNNING' ? 'animate-spin' : ''} />
+        <span>{isRediscovering || rediscoveryStatus.status === 'RUNNING' ? 'Scanning...' : 'Re-Discover Models'}</span>
+      </button>
       <Button variant="primary" size="sm" onclick={openAddProviderModal}>
         <Plus size={14} />
         Add Provider
@@ -518,6 +614,141 @@
 {:else}
   <!-- Providers data grid (virtualized + lazy-loaded) -->
   <div class="providers-grid-wrap flex flex-col flex-grow overflow-hidden">
+
+    <!-- ─── Re-Discovery Status Banner ──────────────────────────────────────── -->
+    {#if rediscoveryStatus.status === 'RUNNING' || rediscoveryStatus.status === 'PENDING'}
+      <div class="rediscovery-banner running">
+        <div class="flex items-center gap-3">
+          <div class="rediscovery-spinner"></div>
+          <div>
+            <p class="font-semibold text-sm">Scanning all provider endpoints for new models...</p>
+            <p class="text-xs opacity-70 mt-0.5">This may take a minute depending on the number of providers.</p>
+          </div>
+        </div>
+      </div>
+    {:else if rediscoveryStatus.status === 'SUCCESS' && parsedRediscoveryReport}
+      <div class="rediscovery-banner success">
+        <div class="flex items-center justify-between w-full">
+          <div class="flex items-center gap-2.5">
+            <CheckCircle size={18} class="text-emerald-500 shrink-0" />
+            <div>
+              {#if parsedRediscoveryReport.new_models_added > 0}
+                <span class="font-semibold text-sm">
+                  Re-Discovery complete: Found and auto-registered {parsedRediscoveryReport.new_models_added} new model{parsedRediscoveryReport.new_models_added !== 1 ? 's' : ''}!
+                </span>
+              {:else}
+                <span class="font-semibold text-sm">All models are up to date — no new models found.</span>
+              {/if}
+              <span class="text-xs opacity-60 ml-2">
+                {parsedRediscoveryReport.successful_endpoints}/{parsedRediscoveryReport.total_endpoints_scanned} endpoints scanned
+                · {formatDuration(parsedRediscoveryReport.duration_ms)}
+              </span>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            {#if parsedRediscoveryReport.new_models_added > 0 || parsedRediscoveryReport.provider_breakdown?.length > 0}
+              <button 
+                onclick={() => showRediscoveryDetails = !showRediscoveryDetails}
+                class="rediscovery-details-toggle"
+              >
+                {showRediscoveryDetails ? 'Hide Details' : 'View Details'}
+                {#if showRediscoveryDetails}
+                  <ChevronUp size={14} />
+                {:else}
+                  <ChevronDown size={14} />
+                {/if}
+              </button>
+            {/if}
+            <button onclick={dismissRediscoveryBanner} class="rediscovery-dismiss" title="Dismiss">
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+
+        {#if showRediscoveryDetails}
+          <div class="rediscovery-details">
+            {#if parsedRediscoveryReport.new_models?.length > 0}
+              <div class="rediscovery-section">
+                <h4 class="rediscovery-section-title">
+                  <CheckCircle size={13} class="text-emerald-500" />
+                  New Models Registered ({parsedRediscoveryReport.new_models.length})
+                </h4>
+                <div class="rediscovery-model-list">
+                  {#each parsedRediscoveryReport.new_models as model}
+                    <span class="rediscovery-model-tag new">{model}</span>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+
+            {#if parsedRediscoveryReport.provider_breakdown?.length > 0}
+              <div class="rediscovery-section">
+                <h4 class="rediscovery-section-title">
+                  <Server size={13} />
+                  Provider Breakdown
+                </h4>
+                <div class="rediscovery-provider-list">
+                  {#each parsedRediscoveryReport.provider_breakdown as scan}
+                    <div class="rediscovery-provider-row">
+                      <div class="flex items-center gap-2">
+                        {#if scan.status === 'success'}
+                          <CheckCircle size={13} class="text-emerald-500 shrink-0" />
+                        {:else}
+                          <XCircle size={13} class="text-red-400 shrink-0" />
+                        {/if}
+                        <span class="provider-badge {providerBadgeClass(scan.provider)}" style="font-size: 10px;">{scan.provider}</span>
+                        <span class="text-xs opacity-60 truncate" style="max-width: 200px;" title={scan.base_url}>{scan.base_url}</span>
+                      </div>
+                      <div class="flex items-center gap-3 text-xs">
+                        {#if scan.status === 'success'}
+                          <span class="opacity-70">{scan.models_synced} models synced</span>
+                          {#if scan.new_models?.length > 0}
+                            <span class="font-semibold text-emerald-600">+{scan.new_models.length} new</span>
+                          {/if}
+                        {:else}
+                          <span class="text-red-400 truncate" style="max-width: 250px;" title={scan.error}>{scan.error}</span>
+                        {/if}
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+
+            {#if parsedRediscoveryReport.errors?.length > 0}
+              <div class="rediscovery-section">
+                <h4 class="rediscovery-section-title text-red-400">
+                  <AlertTriangle size={13} />
+                  Errors ({parsedRediscoveryReport.errors.length})
+                </h4>
+                <ul class="rediscovery-error-list">
+                  {#each parsedRediscoveryReport.errors as err}
+                    <li>{err}</li>
+                  {/each}
+                </ul>
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </div>
+    {:else if rediscoveryStatus.status === 'FAILED'}
+      <div class="rediscovery-banner error">
+        <div class="flex items-center justify-between w-full">
+          <div class="flex items-center gap-2.5">
+            <XCircle size={18} class="text-red-400 shrink-0" />
+            <div>
+              <span class="font-semibold text-sm">Re-discovery scan failed</span>
+              {#if rediscoveryStatus.error}
+                <span class="text-xs opacity-70 ml-2">{rediscoveryStatus.error}</span>
+              {/if}
+            </div>
+          </div>
+          <button onclick={dismissRediscoveryBanner} class="rediscovery-dismiss" title="Dismiss">
+            <X size={14} />
+          </button>
+        </div>
+      </div>
+    {/if}
     <!-- Filter / search toolbar -->
     <div class="flex items-center gap-3 px-6 py-3 border-b shrink-0">
       <div class="relative flex-grow max-w-sm">
@@ -1036,5 +1267,205 @@
     background: rgba(59, 130, 246, 0.12);
     color: #60a5fa;
     border: 1px solid rgba(59, 130, 246, 0.25);
+  }
+
+  /* ─── Re-Discovery Button ─── */
+  .rediscover-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    background: linear-gradient(135deg, #f97316 0%, #ea580c 50%, #dc2626 100%);
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    box-shadow: 0 2px 8px rgba(249, 115, 22, 0.3);
+    white-space: nowrap;
+  }
+  .rediscover-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 16px rgba(249, 115, 22, 0.45);
+    filter: brightness(1.08);
+  }
+  .rediscover-btn:active:not(:disabled) {
+    transform: translateY(0);
+  }
+  .rediscover-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+
+  /* ─── Re-Discovery Status Banner ─── */
+  .rediscovery-banner {
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
+    animation: bannerSlideIn 0.3s ease;
+  }
+  .rediscovery-banner.running {
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.08) 0%, rgba(99, 102, 241, 0.06) 100%);
+    border-left: 3px solid #3b82f6;
+  }
+  .rediscovery-banner.success {
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.06) 0%, rgba(5, 150, 105, 0.04) 100%);
+    border-left: 3px solid #10b981;
+  }
+  .rediscovery-banner.error {
+    background: linear-gradient(135deg, rgba(239, 68, 68, 0.06) 0%, rgba(220, 38, 38, 0.04) 100%);
+    border-left: 3px solid #ef4444;
+  }
+
+  @keyframes bannerSlideIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Spinner for the running state */
+  .rediscovery-spinner {
+    width: 18px;
+    height: 18px;
+    border: 2.5px solid rgba(59, 130, 246, 0.2);
+    border-top-color: #3b82f6;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  /* View Details toggle */
+  .rediscovery-details-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #10b981;
+    background: rgba(16, 185, 129, 0.08);
+    border: 1px solid rgba(16, 185, 129, 0.2);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .rediscovery-details-toggle:hover {
+    background: rgba(16, 185, 129, 0.14);
+    border-color: rgba(16, 185, 129, 0.35);
+  }
+
+  /* Dismiss button */
+  .rediscovery-dismiss {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border: none;
+    background: transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--text-secondary);
+    opacity: 0.5;
+    transition: all 0.15s;
+  }
+  .rediscovery-dismiss:hover {
+    opacity: 1;
+    background: rgba(0,0,0,0.06);
+  }
+
+  /* Expandable details panel */
+  .rediscovery-details {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(16, 185, 129, 0.15);
+    max-height: 350px;
+    overflow-y: auto;
+    animation: detailsExpand 0.25s ease;
+  }
+  @keyframes detailsExpand {
+    from { opacity: 0; max-height: 0; }
+    to   { opacity: 1; max-height: 350px; }
+  }
+
+  .rediscovery-section {
+    margin-bottom: 12px;
+  }
+  .rediscovery-section:last-child {
+    margin-bottom: 0;
+  }
+  .rediscovery-section-title {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+  }
+
+  /* New model tags */
+  .rediscovery-model-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+  .rediscovery-model-tag {
+    display: inline-block;
+    padding: 3px 8px;
+    font-size: 11px;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-weight: 500;
+    border-radius: 5px;
+    white-space: nowrap;
+  }
+  .rediscovery-model-tag.new {
+    background: rgba(16, 185, 129, 0.1);
+    color: #059669;
+    border: 1px solid rgba(16, 185, 129, 0.25);
+  }
+
+  /* Provider breakdown list */
+  .rediscovery-provider-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .rediscovery-provider-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.02);
+    border: 1px solid var(--border-color);
+    transition: background 0.15s;
+  }
+  .rediscovery-provider-row:hover {
+    background: rgba(0, 0, 0, 0.04);
+  }
+
+  /* Error list */
+  .rediscovery-error-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .rediscovery-error-list li {
+    font-size: 11px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    color: #f87171;
+    padding: 4px 8px;
+    border-left: 2px solid rgba(239, 68, 68, 0.3);
+    margin-bottom: 3px;
+    word-break: break-word;
   }
 </style>

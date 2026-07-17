@@ -28,10 +28,43 @@ func RegisterBuiltinExecutors(reg *Registry, db *pgxpool.Pool, vault *credential
 	reg.Register("job_log_cleanup", newJobLogCleanupExecutor(db, logger))
 	reg.Register("noop", newNoopExecutor(logger))
 	reg.Register("bulk_pool_health_check", newBulkPoolHealthCheckExecutor(db, vault, logger))
+	reg.Register("provider_rediscovery", newProviderRediscoveryExecutor(db, vault, logger))
 
 	logger.Info("built-in job executors registered",
 		zap.Strings("types", reg.ListTypes()),
 	)
+}
+
+// --- Built-in Executor: provider_rediscovery ---
+// Scans all registered provider endpoints for newly available models and
+// auto-registers them into the pool system. Produces a structured JSON report
+// with counts of truly new models (diff-based) and per-provider breakdown.
+
+func newProviderRediscoveryExecutor(db *pgxpool.Pool, vault *credentials.Vault, logger *zap.Logger) ExecutorFunc {
+	return func(execCtx *ExecutionContext) (string, error) {
+		ctx := context.Background()
+
+		logger.Info("provider_rediscovery job started",
+			zap.String("run_id", execCtx.RunID),
+		)
+
+		report, err := credentials.RunReDiscovery(ctx, db, vault, logger)
+		if err != nil {
+			return "", fmt.Errorf("re-discovery failed: %w", err)
+		}
+
+		// Broadcast reload to all cluster nodes so new pools are active immediately
+		_, _ = db.Exec(ctx, "NOTIFY config_change, 'model_pools:reload'")
+
+		logger.Info("provider_rediscovery job finished",
+			zap.String("run_id", execCtx.RunID),
+			zap.Int("new_models", report.NewModelsAdded),
+			zap.Int("total_synced", report.TotalModelsSynced),
+			zap.Int64("duration_ms", report.DurationMs),
+		)
+
+		return credentials.MarshalReport(report), nil
+	}
 }
 
 // --- Built-in Executor: telemetry_cleanup ---

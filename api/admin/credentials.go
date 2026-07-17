@@ -11,17 +11,19 @@ import (
 	"github.com/skadraneshghn/clever-ai-gate/api/dto"
 	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
 	"github.com/skadraneshghn/clever-ai-gate/internal/database"
+	"github.com/skadraneshghn/clever-ai-gate/internal/jobs"
 )
 
 // CredentialHandler provides CRUD operations for provider credentials.
 type CredentialHandler struct {
-	db    *pgxpool.Pool
-	vault *credentials.Vault
+	db        *pgxpool.Pool
+	vault     *credentials.Vault
+	scheduler *jobs.Scheduler
 }
 
 // NewCredentialHandler creates a new credential handler.
-func NewCredentialHandler(db *pgxpool.Pool, vault *credentials.Vault) *CredentialHandler {
-	return &CredentialHandler{db: db, vault: vault}
+func NewCredentialHandler(db *pgxpool.Pool, vault *credentials.Vault, scheduler *jobs.Scheduler) *CredentialHandler {
+	return &CredentialHandler{db: db, vault: vault, scheduler: scheduler}
 }
 
 // List returns provider credentials with masked keys.
@@ -918,6 +920,128 @@ func (h *CredentialHandler) RefreshAllProviders(c *gin.Context) {
 		ModelsCount:   len(allDiscovered),
 		DiscoveredIDs: allDiscovered,
 	})
+}
+
+// TriggerReDiscovery launches an asynchronous re-discovery job that scans all
+// registered provider endpoints for newly available models and auto-registers
+// them into the pool system. The job runs in the background via the scheduler
+// framework and produces a structured JSON report stored in job_runs.output.
+//
+// @Summary      Trigger model re-discovery
+// @Description  Launches an async scan of all provider endpoints to discover and register new models
+// @Tags         Credentials
+// @Produce      json
+// @Security     BearerAuth
+// @Success      202  {object}  map[string]string
+// @Failure      500  {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/providers/rediscover [post]
+func (h *CredentialHandler) TriggerReDiscovery(c *gin.Context) {
+	if h.scheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, dto.ErrorResponse{
+			Error:   "Job scheduler is not available",
+			Details: "The scheduler is required for async re-discovery but was not initialized",
+		})
+		return
+	}
+
+	ctx := c.Request.Context()
+	jobID := "sys-provider-rediscovery"
+
+	// Ensure the job definition exists in the database (idempotent upsert).
+	// This registers it as a manual-trigger-only singleton job.
+	var exists bool
+	_ = h.db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM jobs WHERE id = $1)", jobID).Scan(&exists)
+	if !exists {
+		_, _ = h.db.Exec(ctx, `
+			INSERT INTO jobs (id, name, description, job_type, schedule_type, payload, timezone, max_retries, timeout_seconds, is_enabled, is_singleton)
+			VALUES ($1, 'Provider Re-Discovery', 'Scans all registered provider endpoints for new AI models and auto-registers them', 'provider_rediscovery', 'manual', '{}'::jsonb, 'UTC', 0, 600, true, true)
+		`, jobID)
+	}
+
+	// Check if a run is already in progress (singleton guard)
+	var runningCount int
+	_ = h.db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM job_runs
+		WHERE job_id = $1 AND status IN ('pending', 'running')
+	`, jobID).Scan(&runningCount)
+	if runningCount > 0 {
+		c.JSON(http.StatusConflict, dto.ErrorResponse{
+			Error:   "Re-discovery is already running",
+			Details: "Please wait for the current scan to complete before starting another",
+		})
+		return
+	}
+
+	runID, err := h.scheduler.TriggerNow(ctx, jobID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{
+			Error:   "Failed to dispatch re-discovery job",
+			Details: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"message": "Re-discovery scan started — scanning all provider endpoints for new models",
+		"run_id":  runID,
+	})
+}
+
+// GetReDiscoveryStatus returns the status and report from the most recent
+// re-discovery job run. The frontend polls this endpoint to display progress
+// and the expandable results banner.
+//
+// @Summary      Get re-discovery status
+// @Description  Returns the status and report from the latest re-discovery run
+// @Tags         Credentials
+// @Produce      json
+// @Security     BearerAuth
+// @Success      200  {object}  map[string]string
+// @Router       /api/v1/admin/providers/rediscover/status [get]
+func (h *CredentialHandler) GetReDiscoveryStatus(c *gin.Context) {
+	var runID string
+	var status string
+	var result *string
+	var errorMsg *string
+	var durationMs *int64
+	var startedAt *string
+	var finishedAt *string
+
+	err := h.db.QueryRow(c.Request.Context(), `
+		SELECT id, status, output, error_message, duration_ms,
+		       started_at::text, finished_at::text
+		FROM job_runs
+		WHERE job_id = 'sys-provider-rediscovery'
+		ORDER BY created_at DESC LIMIT 1
+	`).Scan(&runID, &status, &result, &errorMsg, &durationMs, &startedAt, &finishedAt)
+
+	if err != nil {
+		// No runs found — system is idle
+		c.JSON(http.StatusOK, gin.H{"status": "IDLE"})
+		return
+	}
+
+	resp := gin.H{
+		"run_id": runID,
+		"status": strings.ToUpper(status),
+	}
+	if result != nil {
+		resp["report"] = *result
+	}
+	if errorMsg != nil {
+		resp["error"] = *errorMsg
+	}
+	if durationMs != nil {
+		resp["duration_ms"] = *durationMs
+	}
+	if startedAt != nil {
+		resp["started_at"] = *startedAt
+	}
+	if finishedAt != nil {
+		resp["finished_at"] = *finishedAt
+	}
+
+	c.JSON(http.StatusOK, resp)
 }
 
 // BulkDelete deletes multiple credentials at once.

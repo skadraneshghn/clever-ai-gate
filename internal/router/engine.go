@@ -205,7 +205,7 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		adminGroup.POST("/pools/:id/credentials/:cred_id/test", poolHandler.TestCredential)
 
 		// Credential management
-		credHandler := admin.NewCredentialHandler(deps.DB, deps.Vault)
+		credHandler := admin.NewCredentialHandler(deps.DB, deps.Vault, deps.Scheduler)
 		adminGroup.GET("/credentials", credHandler.List)
 		adminGroup.POST("/credentials", credHandler.Create)
 		adminGroup.GET("/credentials/:id", credHandler.Get)
@@ -222,8 +222,10 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		adminGroup.POST("/providers/cloudflare", credHandler.RegisterCloudflareProvider)
 		adminGroup.POST("/providers/sarvam", credHandler.RegisterSarvamProvider)
 		adminGroup.POST("/providers/puter", credHandler.RegisterPuterProvider)
-		// Re-run discovery for ALL existing provider keys → provisions clean alias pools
 		adminGroup.POST("/providers/refresh", credHandler.RefreshAllProviders)
+		// Re-discovery: async scan of all provider endpoints for new models
+		adminGroup.POST("/providers/rediscover", credHandler.TriggerReDiscovery)
+		adminGroup.GET("/providers/rediscover/status", credHandler.GetReDiscoveryStatus)
 
 		// Live log streaming and daily log file download
 		if deps.LogHub != nil {
