@@ -144,7 +144,7 @@ func DiscoverAndRegisterZenMuxModels(ctx context.Context, db *pgxpool.Pool, vaul
 				_, err = tx.Exec(ctx,
 					`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
 					 VALUES ($1, 'zenmux', $2, $3, $4, true)`,
-					poolID, "zenmux", encryptedKey, ZenMuxBaseURL, weight,
+					poolID, encryptedKey, ZenMuxBaseURL, weight,
 				)
 				if err != nil {
 					return 0, nil, fmt.Errorf("failed to bind ZenMux credential to pool %s: %w", modelPattern, err)
