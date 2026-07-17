@@ -82,12 +82,14 @@ func hasReasoning(lower string) bool {
 	return containsAny(lower,
 		"o1-", "o3-", "o4-", // OpenAI o-series
 		"-r1", "r1-", // DeepSeek-R1 and variants
-		"thinking",   // QwQ-32B-Preview, etc.
+		"thinking",   // QwQ-32B-Preview, Gemini thinking models
 		"reasoning",  // explicit reasoning models
 		"nemotron",   // NVIDIA reasoning
 		"qwq",        // Qwen reasoning
 		"deepthink",  // DeepThink variants
 		"reflection", // Reflection-70B
+		"gemini-2.5", // Gemini 2.5 series has built-in thinking
+		"gemini-exp", // Gemini experimental models (often include thinking)
 	)
 }
 
@@ -98,7 +100,7 @@ func hasVision(lower string) bool {
 		"pixtral",      // Mistral vision
 		"gpt-4o",       // GPT-4o is multimodal
 		"claude-3",     // Claude 3 family supports vision
-		"gemini",       // Gemini is multimodal
+		"gemini",       // All Gemini models are natively multimodal
 		"qvq",          // Qwen VQA
 		"-vl",          // InternVL, Qwen-VL style
 		"vl-",          // VL prefix
@@ -180,17 +182,19 @@ func hasCode(lower string) bool {
 
 func hasEmbedding(lower string) bool {
 	return containsAny(lower,
-		"embed",          // Generic embed
-		"embedding",      // Generic embedding
-		"text-embedding", // OpenAI text-embedding-*
-		"e5-",            // E5 embedding family
-		"bge-",           // BGE embedding family
-		"gte-",           // GTE embedding family
-		"nomic-embed",    // Nomic Embed
-		"instructor",     // Instructor embeddings
-		"sentence",       // Sentence transformers
-		"all-minilm",     // MiniLM embeddings
-		"jina-embed",     // Jina embeddings
+		"embed",            // Generic embed
+		"embedding",        // Generic embedding
+		"text-embedding",   // OpenAI text-embedding-* and Google text-embedding-004
+		"e5-",              // E5 embedding family
+		"bge-",             // BGE embedding family
+		"gte-",             // GTE embedding family
+		"nomic-embed",      // Nomic Embed
+		"instructor",       // Instructor embeddings
+		"sentence",         // Sentence transformers
+		"all-minilm",       // MiniLM embeddings
+		"jina-embed",       // Jina embeddings
+		"embedding-001",    // Gemini legacy embedding model
+		"embedding-exp",    // Gemini experimental embedding models
 	)
 }
 

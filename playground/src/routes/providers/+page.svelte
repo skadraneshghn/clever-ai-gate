@@ -252,6 +252,8 @@
       endpoint = '/api/v1/admin/providers/puter';
     } else if (autoDiscoverForm.provider === 'zenmux') {
       endpoint = '/api/v1/admin/providers/zenmux';
+    } else if (autoDiscoverForm.provider === 'gemini') {
+      endpoint = '/api/v1/admin/providers/gemini';
     } else {
       endpoint = '/api/v1/admin/providers/custom';
     }
@@ -289,6 +291,7 @@
           : autoDiscoverForm.provider === 'sarvam' ? 'Sarvam AI'
           : autoDiscoverForm.provider === 'puter' ? 'Puter.com'
           : autoDiscoverForm.provider === 'zenmux' ? 'ZenMux'
+          : autoDiscoverForm.provider === 'gemini' ? 'Google AI Studio (Gemini)'
           : autoDiscoverForm.provider.toUpperCase();
         appState.addToast('success', `Successfully synchronized ${data.models_count || 0} ${displayName} models`);
         showAddProviderModal = false;
@@ -426,6 +429,7 @@
       case 'sarvam': return 'badge-sarvam';
       case 'puter': return 'badge-puter';
       case 'zenmux': return 'badge-zenmux';
+      case 'gemini': return 'badge-gemini';
       case 'custom': return 'badge-custom';
       default: return 'badge-default';
     }
@@ -934,6 +938,7 @@
         <option value="sarvam">Sarvam AI</option>
         <option value="puter">Puter.com</option>
         <option value="zenmux">ZenMux</option>
+        <option value="gemini">Google AI Studio (Gemini)</option>
         <option value="google">Google</option>
         <option value="custom">Custom</option>
       </Input>
@@ -965,6 +970,8 @@
           autoDiscoverForm.base_url = 'https://api.puter.com/puterai/openai/v1';
         } else if (autoDiscoverForm.provider === 'zenmux') {
           autoDiscoverForm.base_url = 'https://zenmux.ai/api/v1';
+        } else if (autoDiscoverForm.provider === 'gemini') {
+          autoDiscoverForm.base_url = 'https://generativelanguage.googleapis.com';
         } else {
           autoDiscoverForm.base_url = '';
         }
@@ -981,6 +988,7 @@
         <option value="sarvam">Sarvam AI</option>
         <option value="puter">Puter.com</option>
         <option value="zenmux">ZenMux</option>
+        <option value="gemini">Google AI Studio (Gemini)</option>
         <option value="custom">OpenAI-Compatible (Custom)</option>
       </Input>
 
@@ -1020,6 +1028,12 @@
         </div>
       {/if}
 
+      {#if autoDiscoverForm.provider === 'gemini'}
+        <div class="rounded-lg border border-cyan-500/20 bg-cyan-500/5 px-4 py-3 text-xs text-cyan-400 leading-relaxed">
+          ✨ <strong>Google AI Studio (Gemini)</strong> provides high-performance reasoning and multimodal models. Enter your Gemini API key (starts with <code>AIzaSy</code>) to discover and register all available models under both <code>gemini/&lt;model_id&gt;</code> and clean aliases. Get your API key at <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer" class="underline">aistudio.google.com</a>.
+        </div>
+      {/if}
+
       {#if autoDiscoverForm.provider === 'custom'}
         <Input type="text" label="Label (namespace prefix)" placeholder="e.g. huggingface, together, deepinfra" bind:value={autoDiscoverForm.label} />
         <div class="rounded-lg border border-[#f97316]/20 bg-[#f97316]/5 px-4 py-3 text-xs text-[#fb923c] leading-relaxed">
@@ -1053,12 +1067,13 @@
             autoDiscoverForm.provider === 'sarvam' ? 'Sarvam API key (api-subscription-key)...' :
             autoDiscoverForm.provider === 'puter' ? 'Puter Auth Token...' :
             autoDiscoverForm.provider === 'zenmux' ? 'ZenMux API Key...' :
+            autoDiscoverForm.provider === 'gemini' ? 'Google AI Studio API Key (AIzaSy...)...' :
             'Bearer API key...'
           } 
           bind:value={autoDiscoverForm.api_key} 
         />
         
-        {#if autoDiscoverForm.provider !== 'openrouter' && autoDiscoverForm.provider !== '1minai' && autoDiscoverForm.provider !== 'sarvam' && autoDiscoverForm.provider !== 'puter' && autoDiscoverForm.provider !== 'zenmux'}
+        {#if autoDiscoverForm.provider !== 'openrouter' && autoDiscoverForm.provider !== '1minai' && autoDiscoverForm.provider !== 'sarvam' && autoDiscoverForm.provider !== 'puter' && autoDiscoverForm.provider !== 'zenmux' && autoDiscoverForm.provider !== 'gemini'}
           <Input type="text" label="Base URL" placeholder={autoDiscoverForm.provider === 'custom' ? 'https://api.together.xyz/v1' : ''} bind:value={autoDiscoverForm.base_url} />
         {/if}
       {/if}
@@ -1104,6 +1119,7 @@
       <option value="cloudflare">Cloudflare Workers AI</option>
       <option value="sarvam">Sarvam AI</option>
       <option value="zenmux">ZenMux</option>
+      <option value="gemini">Google AI Studio (Gemini)</option>
       <option value="google">Google</option>
       <option value="custom">Custom</option>
     </Input>
@@ -1290,6 +1306,13 @@
     background: rgba(167, 139, 250, 0.12);
     color: #a78bfa;
     border: 1px solid rgba(167, 139, 250, 0.25);
+  }
+
+  /* Gemini brand badge — cyan/blue tone matching Google AI visual identity */
+  :global(.badge-gemini) {
+    background: rgba(6, 182, 212, 0.12);
+    color: #22d3ee;
+    border: 1px solid rgba(6, 182, 212, 0.25);
   }
 
   /* ─── Re-Discovery Button ─── */

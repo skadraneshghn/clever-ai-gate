@@ -99,6 +99,15 @@ type DiscoverZenMuxRequest struct {
 	Weight int    `json:"weight,omitempty" example:"1"`
 }
 
+// DiscoverGeminiRequest is the request body for POST /api/v1/admin/providers/gemini.
+// Google AI Studio only needs an API key — the base URL is hardcoded to
+// https://generativelanguage.googleapis.com. A dedicated minimal DTO keeps the
+// "add provider" modal contract to just the API key (plus an optional weight).
+type DiscoverGeminiRequest struct {
+	APIKey string `json:"api_key" binding:"required" example:"AIzaSy..."`
+	Weight int    `json:"weight,omitempty" example:"1"`
+}
+
 // BulkDeleteRequest represents a request containing multiple IDs to be deleted.
 type BulkDeleteRequest struct {
 	IDs []int `json:"ids" binding:"required,min=1" example:"[1,2,3]"`

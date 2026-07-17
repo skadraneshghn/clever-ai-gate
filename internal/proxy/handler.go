@@ -74,6 +74,7 @@ type proxyContext struct {
 	isSarvam       bool // True when model uses sarvam/ prefix — triggers prefix stripping
 	isPuter        bool // True when model uses puter/ prefix — triggers prefix stripping
 	isZenMux       bool // True when model uses zenmux/ prefix — triggers prefix stripping
+	isGemini       bool // True when model uses gemini/ prefix — triggers full body transpilation
 	requestedModel string // The original model requested by the client before prefix stripping
 	body           []byte
 	credential     *credentials.AcquireResult
@@ -258,6 +259,20 @@ func (h *Handler) Handle(c *gin.Context) {
 		)
 	}
 
+	// --- Google AI Studio (Gemini) Prefix Detection ---
+	// Models prefixed with "gemini/" are routed to Google AI Studio. The prefix is
+	// stripped and the full request body is transpiled from OpenAI format into Gemini's
+	// native generateContent format by transpileOpenAIToGemini() in forwardRequest.
+	// The credential's Provider="gemini" field also activates the transpilation pipeline
+	// for clean model names (without the prefix) registered during discovery.
+	isGemini := false
+	if strings.HasPrefix(model, "gemini/") {
+		isGemini = true
+		h.logger.Debug("google ai studio (gemini) model detected",
+			zap.String("model", model),
+		)
+	}
+
 	// --- Access log: first thing we know enough to emit a useful Info entry ---
 	// This fires for EVERY request and is the primary tool for diagnosing
 	// Kilo Code instability: you can see exactly what model/tenant/path was
@@ -277,6 +292,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		zap.Bool("is_sarvam", isSarvam),
 		zap.Bool("is_puter", isPuter),
 		zap.Bool("is_zenmux", isZenMux),
+		zap.Bool("is_gemini", isGemini),
 		zap.Int("body_bytes", len(body)),
 		zap.String("client_ip", c.ClientIP()),
 	)
@@ -377,6 +393,16 @@ func (h *Handler) Handle(c *gin.Context) {
 		model = strings.TrimPrefix(model, "zenmux/")
 	}
 
+	// --- Gemini Payload Preparation ---
+	// For Gemini-prefixed models we strip the routing prefix from the model name
+	// and the JSON body. The actual body transpilation (OpenAI → Gemini format)
+	// is deferred to forwardRequest where we have access to the credential and
+	// can handle errors cleanly within the retry loop.
+	if isGemini {
+		body = stripModelPrefixInPlace(body, model, "gemini/")
+		model = strings.TrimPrefix(model, "gemini/")
+	}
+
 	// Step 5-8: Attempt with automatic failover
 	// Note: The FULL body (not scanSlice) is forwarded to the upstream provider.
 	// Only the metadata extraction was bounded — the binary payload is piped as-is.
@@ -389,6 +415,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		isSarvam:       isSarvam,
 		isPuter:        isPuter,
 		isZenMux:       isZenMux,
+		isGemini:       isGemini,
 		requestedModel: requestedModel,
 		body:           body,
 		pool:           pool,
@@ -943,7 +970,47 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		bodyBytes = sanitizeNvidiaRequest(bodyBytes)
 	}
 
+	// --- Gemini AI Studio Request Body Transpilation ---
+	// Google AI Studio uses a fundamentally different request format from OpenAI.
+	// The transpiler converts the entire body — messages, tools, generation config,
+	// thinking budget, and safety settings — into Gemini's native generateContent
+	// format. This runs for BOTH the prefixed ("gemini/...") and clean ("gemini-2.5-pro")
+	// routing forms since it is gated on the resolved credential's provider.
+	if cred.Provider == "gemini" {
+		geminiBody, trErr := transpileOpenAIToGemini(bodyBytes)
+		if trErr != nil {
+			h.logger.Error("gemini request transpilation failed",
+				zap.String("model", pctx.model),
+				zap.Error(trErr),
+			)
+			return http.StatusBadRequest, upstreamURL, nil, trErr
+		}
+		bodyBytes = geminiBody
+	}
+
 	upstreamURL = h.rewriter.RewriteURL(cred.Provider, cred.BaseURL, c.Request.URL.Path, modelName)
+
+	// --- Gemini URL Adjustments ---
+	// Two fixes applied after URL construction:
+	//
+	//  1. Non-stream URL switch: geminiPath always produces streamGenerateContent?alt=sse
+	//     as a safe default. For non-streaming client requests we switch to the plain
+	//     generateContent endpoint (lower latency, simpler response parsing).
+	//
+	//  2. API key injection: Google AI Studio requires ?key=<apiKey> as a query
+	//     parameter. No Authorization header is used (see rewriter.go).
+	if cred.Provider == "gemini" {
+		if !pctx.isStream {
+			// Switch from streamGenerateContent?alt=sse to generateContent
+			upstreamURL = strings.Replace(upstreamURL, ":streamGenerateContent?alt=sse", ":generateContent", 1)
+		}
+		// Inject API key as query parameter
+		if strings.Contains(upstreamURL, "?") {
+			upstreamURL += "&key=" + cred.APIKey
+		} else {
+			upstreamURL += "?key=" + cred.APIKey
+		}
+	}
 
 	// --- 1min.ai Streaming ---
 	// 1min.ai enables streaming via the ?isStreaming=true query parameter
@@ -1127,7 +1194,66 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		return resp.StatusCode, upstreamURL, respBody, nil
 	}
 
+	// --- Gemini AI Studio Non-Streaming Response Translation ---
+	// Google AI Studio's generateContent endpoint returns a completely different
+	// response envelope from OpenAI. For non-streaming requests we translate the
+	// entire response into an OpenAI chat completion JSON so clients are unaware
+	// of the backend format.
+	//
+	// Note: Streaming requests (pctx.isStream) are handled by the transmux layer
+	// in internal/transmux/gemini.go via the ProxyStream path — they never reach
+	// this block.
+	if cred.Provider == "gemini" && !pctx.isStream {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return http.StatusInternalServerError, upstreamURL, nil, readErr
+		}
+
+		// Gemini sometimes returns HTTP 200 with an error payload embedded in the body.
+		// Detect and normalize these before attempting response translation.
+		if errMsg, _, _, detectErr := jsonparser.Get(respBody, "error", "message"); detectErr == nil && len(errMsg) > 0 {
+			normalized := normalizeGeminiError(resp.StatusCode, respBody)
+			h.logger.Warn("gemini returned error in 200 body",
+				zap.String("model", pctx.model),
+				zap.ByteString("error_msg", errMsg),
+			)
+			c.Writer.Header().Set("Content-Type", "application/json")
+			c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+			c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+			c.Writer.WriteHeader(normalized.HTTPStatus)
+			c.Writer.Write(normalized.Body) //nolint:errcheck
+			return normalized.HTTPStatus, upstreamURL, normalized.Body, nil
+		}
+
+		// Translate Gemini generateContent → OpenAI chat completion format
+		translated, trErr := translateGeminiResponse(respBody, pctx.requestedModel)
+		if trErr != nil {
+			h.logger.Warn("gemini non-stream response translation failed, passing raw body",
+				zap.String("model", pctx.model),
+				zap.Error(trErr),
+			)
+			// Fall through with raw body — better than a 502 to the client
+			c.Writer.Header().Set("Content-Type", "application/json")
+			c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+			c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+			c.Writer.WriteHeader(resp.StatusCode)
+			c.Writer.Write(respBody) //nolint:errcheck
+			return resp.StatusCode, upstreamURL, respBody, nil
+		}
+
+		// Apply thinking-tag normalization and model rewriting
+		translated = h.normalizeNonStreamingReasoning(translated)
+		translated = h.rewriteResponseModel(translated, pctx.requestedModel)
+		c.Writer.Header().Set("Content-Type", "application/json")
+		c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+		c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+		c.Writer.WriteHeader(resp.StatusCode)
+		c.Writer.Write(translated) //nolint:errcheck
+		return resp.StatusCode, upstreamURL, translated, nil
+	}
+
 	// --- Cloudflare Workers AI / AI Gateway Image Response Translation ---
+
 	// Two response formats can arrive depending on the model type:
 	//
 	//  Native @cf/* models (/ai/run/{model}):

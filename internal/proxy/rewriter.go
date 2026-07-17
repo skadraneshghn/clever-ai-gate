@@ -130,9 +130,10 @@ func (r *Rewriter) RewriteHeaders(req *http.Request, provider, apiKey string, so
 		}
 
 	case "gemini":
-		// Gemini uses API key as query parameter (handled in URL rewrite)
-		// But also supports Bearer token for OAuth
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+		// Gemini AI Studio uses API key as a query parameter, NOT an Authorization header.
+		// The key is appended to the upstream URL in forwardRequest after calling RewriteURL.
+		// No Authorization header is set here — sending one would still work but is unnecessary.
+		// (Vertex AI uses OAuth Bearer; that is a different provider "vertex".)
 
 	case "azure":
 		req.Header.Set("api-key", apiKey)
@@ -190,16 +191,27 @@ func anthropicPath(baseURL, requestPath, _ string) string {
 	return baseURL + requestPath
 }
 
-// geminiPath transforms to Gemini's REST API format.
-// /v1/chat/completions → /v1beta/models/{model}:generateContent
-// /v1/chat/completions (stream) → /v1beta/models/{model}:streamGenerateContent
+// geminiPath transforms OpenAI paths to Gemini's REST API format.
+//
+//	/v1/chat/completions  (stream) → /v1beta/models/{model}:streamGenerateContent?alt=sse
+//	/v1/chat/completions  (non-s)  → /v1beta/models/{model}:generateContent
+//	/v1/embeddings                  → /v1beta/models/{model}:embedContent
+//
+// Note: The stream/non-stream selection is performed in forwardRequest by inspecting
+// pctx.isStream and modifying the URL in-place after this transformer runs. The
+// transformer always returns the streaming URL as a safe default; forwardRequest
+// replaces ":streamGenerateContent?alt=sse" with ":generateContent" for non-stream
+// requests before appending the API key.
 func geminiPath(baseURL, requestPath, model string) string {
 	if strings.Contains(requestPath, "/chat/completions") {
-		// Default to streaming — the handler will switch based on stream flag
+		// Default to streaming — forwardRequest will switch to generateContent for non-stream.
 		return fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?alt=sse", baseURL, model)
 	}
 	if strings.Contains(requestPath, "/embeddings") {
 		return fmt.Sprintf("%s/v1beta/models/%s:embedContent", baseURL, model)
+	}
+	if strings.Contains(requestPath, "/models") {
+		return fmt.Sprintf("%s/v1beta/models", baseURL)
 	}
 	return baseURL + requestPath
 }

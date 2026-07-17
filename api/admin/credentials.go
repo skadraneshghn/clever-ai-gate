@@ -708,9 +708,69 @@ func (h *CredentialHandler) RegisterSarvamProvider(c *gin.Context) {
 	})
 }
 
+// RegisterGeminiProvider auto-discovers all models available under a Google AI Studio
+// API key, creates model pools for each, and binds the credential to all of them in
+// one transaction.
+//
+// Google AI Studio exposes a live /v1beta/models endpoint that returns the full
+// model catalog. Each model is registered under two pool patterns:
+//   - "gemini/<modelID>"  — explicit provider routing prefix
+//   - "<modelID>"          — clean name for direct use in Cline, Continue, etc.
+//
+// The discovery engine filters models to only those supporting generateContent
+// (chat) or embedContent (embeddings). The base URL is hardcoded to
+// https://generativelanguage.googleapis.com.
+//
+// @Summary      Auto-discover Google AI Studio (Gemini) Models
+// @Description  Submits a Google AI Studio API key, hits the /v1beta/models endpoint, and registers all available models automatically
+// @Tags         Credentials
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        body  body      dto.DiscoverGeminiRequest  true  "Google AI Studio provider details (api_key required)"
+// @Success      200   {object}  dto.DiscoverProviderResponse
+// @Failure      400   {object}  dto.ErrorResponse
+// @Failure      500   {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/providers/gemini [post]
+func (h *CredentialHandler) RegisterGeminiProvider(c *gin.Context) {
+	var req dto.DiscoverGeminiRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
+		return
+	}
+
+	if req.APIKey == "" {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "api_key is required for Google AI Studio auto-discovery"})
+		return
+	}
+
+	if req.Weight <= 0 {
+		req.Weight = 1
+	}
+
+	count, models, err := credentials.DiscoverAndRegisterGeminiModels(
+		c.Request.Context(),
+		h.db,
+		h.vault,
+		req.APIKey,
+		req.Weight,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Google AI Studio auto-discovery failed", Details: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.DiscoverProviderResponse{
+		Message:       fmt.Sprintf("Successfully synchronized %d Google AI Studio (Gemini) models", count),
+		ModelsCount:   count,
+		DiscoveredIDs: models,
+	})
+}
+
 // RegisterPuterProvider auto-discovers all Puter.com AI models available under
 // an API token, creates model pools for each, and binds the credential
 // to all of them in one transaction.
+
 //
 // @Summary      Auto-discover Puter.com Models
 // @Description  Submits a Puter token, fetches the model details, and registers all models automatically
