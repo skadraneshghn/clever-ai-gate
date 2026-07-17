@@ -385,6 +385,34 @@ func (h *PoolHandler) TestCredential(c *gin.Context) {
 		if probeErr == nil {
 			req.Header.Set("Authorization", "Bearer "+apiKey)
 		}
+	} else if cred.Provider == "gemini" {
+		// Gemini provider: check native generateContent REST endpoint
+		testModel := pool.ModelPattern
+		testModel = strings.TrimPrefix(testModel, "gemini/")
+		if testModel == "" || strings.Contains(testModel, "*") {
+			testModel = "gemini-2.5-flash"
+		}
+
+		url := fmt.Sprintf("%s/v1beta/models/%s:generateContent?key=%s",
+			strings.TrimRight(cred.BaseURL, "/"), testModel, apiKey)
+
+		payload := map[string]interface{}{
+			"contents": []map[string]interface{}{
+				{
+					"parts": []map[string]interface{}{
+						{"text": "ping"},
+					},
+				},
+			},
+			"generationConfig": map[string]interface{}{
+				"maxOutputTokens": 1,
+			},
+		}
+		bodyBytes, _ := json.Marshal(payload)
+		req, probeErr = http.NewRequestWithContext(c.Request.Context(), "POST", url, bytes.NewReader(bodyBytes))
+		if probeErr == nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
 	} else {
 		// Custom, NVIDIA, or OpenAI providers: check chat completions
 		url := strings.TrimRight(cred.BaseURL, "/")
