@@ -299,34 +299,56 @@ func ollamaPath(baseURL, requestPath, _ string) string {
 	return baseURL + requestPath
 }
 
-// cloudflarePath routes requests to the correct Cloudflare Workers AI endpoint.
+// cloudflarePath routes requests to the correct Cloudflare Workers AI / AI Gateway endpoint.
 //
 // The base_url convention used by this gateway is "cloudflare:<accountID>".
 // The account ID is extracted via strings.TrimPrefix.
 //
-// Two downstream paths exist:
+// Cloudflare exposes two distinct model namespaces:
 //
-//	Text completions (/v1/chat/completions, /v1/completions):
-//	  → https://api.cloudflare.com/client/v4/accounts/{accountID}/ai/v1/chat/completions
-//	  (Cloudflare's native OpenAI-compatible endpoint, supports streaming SSE)
+//  1. Native Workers AI models — prefixed with "@cf/" (e.g. "@cf/meta/llama-3.1-8b-instruct")
+//     These run serverless on Cloudflare's edge network.
 //
-//	All other paths (/v1/embeddings, /v1/images/generations, /v1/audio/*):
-//	  → https://api.cloudflare.com/client/v4/accounts/{accountID}/ai/run/{model}
-//	  (Cloudflare's universal inference endpoint)
+//  2. Third-party proxied models — "provider/model" form (e.g. "openai/gpt-5",
+//     "anthropic/claude-sonnet-5", "google/gemini-2.5-pro", "krea/krea-2-large").
+//     These are routed through Cloudflare AI Gateway's unified billing endpoint.
+//
+// Routing rules:
+//
+//	Chat/completion paths (/v1/chat/completions, /v1/completions):
+//	  → /ai/v1/chat/completions   (OpenAI-compatible, streaming SSE)
+//	  Works for BOTH @cf/* and third-party text-generation models.
+//
+//	Embedding path (/v1/embeddings):
+//	  → /ai/v1/embeddings         (OpenAI-compatible embeddings endpoint)
+//
+//	Image/audio/video paths (/v1/images/*, /v1/audio/*):
+//	  → /ai/run/{model}           (Universal inference endpoint)
+//	  For @cf/* models: model = "@cf/stabilityai/stable-diffusion-xl-base-1.0"
+//	  For third-party : model = "openai/gpt-image-2"  (provider/model kept intact)
 func cloudflarePath(baseURL, requestPath, model string) string {
 	// Parse the account ID from the stored base_url convention.
 	accountID := strings.TrimPrefix(baseURL, "cloudflare:")
 	cfBase := "https://api.cloudflare.com/client/v4/accounts/" + accountID
 
+	// Chat and completion requests: always route to the OpenAI-compatible endpoint.
+	// Cloudflare's /ai/v1 surface handles both @cf/* and third-party text models.
 	if strings.Contains(requestPath, "/chat/completions") ||
 		strings.Contains(requestPath, "/completions") {
-		// OpenAI-compatible endpoint — supports streaming and all standard parameters.
 		return cfBase + "/ai/v1/chat/completions"
 	}
 
-	// All other modalities (embeddings, images, audio, etc.) use the universal
-	// /ai/run/{model} endpoint. The model value here is already the clean upstream
-	// ID (e.g. "@cf/baai/bge-base-en-v1.5") with the "cloudflare/" prefix stripped
-	// by the handler before calling RewriteURL.
+	// Embedding requests: route to the OpenAI-compatible embeddings endpoint.
+	// Both @cf/* embedding models and third-party embedding models are served here.
+	if strings.Contains(requestPath, "/embeddings") {
+		return cfBase + "/ai/v1/embeddings"
+	}
+
+	// All other modalities (images, audio, video) use the universal /ai/run/{model}
+	// endpoint. The model value here is the clean upstream ID with the "cloudflare/"
+	// routing prefix already stripped by the handler — e.g.:
+	//   "@cf/stabilityai/stable-diffusion-xl-base-1.0"  (native)
+	//   "openai/gpt-image-2"                            (third-party)
+	//   "krea/krea-2-large"                             (third-party)
 	return cfBase + "/ai/run/" + model
 }

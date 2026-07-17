@@ -862,23 +862,30 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	}
 
 	// --- Cloudflare Workers AI Request Body Translation ---
-	// Cloudflare's /ai/run/{model} text-to-image endpoint rejects unknown
-	// OpenAI fields (model, n, size, response_format) with an "Invalid input"
-	// (code 8002) error. We translate image-generation requests down to the
-	// bare {"prompt":"..."} body Cloudflare expects. Chat completions are
-	// served via Cloudflare's OpenAI-compatible /ai/v1 endpoint and pass
-	// through unchanged.
+	// Native @cf/* text-to-image models served via /ai/run/{model} reject unknown
+	// OpenAI fields (model, n, size, response_format) with "Invalid input" (code 8002).
+	// We translate image-generation requests down to bare {"prompt":"..."} for native models.
+	//
+	// Third-party AI Gateway image models (openai/gpt-image-2, recraft/*, krea/*, etc.)
+	// accept the full OpenAI payload natively — pass those through unchanged.
+	//
+	// Chat completions are served via Cloudflare's OpenAI-compatible /ai/v1 endpoint
+	// and pass through unchanged regardless of model type.
 	if cred.Provider == "cloudflare" && isCloudflareImageRequest(c.Request.URL.Path) {
-		translated, ctOverride, trErr := translateCloudflareImageRequest(bodyBytes)
-		if trErr != nil {
-			h.logger.Error("cloudflare request translation failed",
-				zap.String("model", pctx.model),
-				zap.Error(trErr),
-			)
-			return http.StatusInternalServerError, upstreamURL, nil, trErr
+		if isCloudflareNativeImageModel(modelName) {
+			// Native @cf/* model: translate to bare {prompt:...} format
+			translated, ctOverride, trErr := translateCloudflareImageRequest(bodyBytes)
+			if trErr != nil {
+				h.logger.Error("cloudflare native image request translation failed",
+					zap.String("model", pctx.model),
+					zap.Error(trErr),
+				)
+				return http.StatusInternalServerError, upstreamURL, nil, trErr
+			}
+			bodyBytes = translated
+			contentTypeOverride = ctOverride
 		}
-		bodyBytes = translated
-		contentTypeOverride = ctOverride
+		// Third-party AI Gateway image models: pass OpenAI payload through unchanged
 	}
 
 	// --- Sarvam AI Request Sanitization ---
@@ -1080,48 +1087,73 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		return resp.StatusCode, upstreamURL, respBody, nil
 	}
 
-	// --- Cloudflare Workers AI Image Response Translation ---
-	// Cloudflare's /ai/run text-to-image endpoint returns a {success,result}
-	// envelope whose result.image holds a base64-encoded image. We translate
-	// it to the OpenAI images/generations shape so OpenAI-compatible clients
-	// (and this gateway's own chat app) can consume it directly. Chat
-	// completions use the OpenAI-compatible /ai/v1 endpoint and pass through.
+	// --- Cloudflare Workers AI / AI Gateway Image Response Translation ---
+	// Two response formats can arrive depending on the model type:
+	//
+	//  Native @cf/* models (/ai/run/{model}):
+	//    Return a Cloudflare-specific envelope: {"success":true,"result":{"image":"<b64>"}}
+	//    → Must be translated to OpenAI format: {"created":0,"data":[{"b64_json":"..."}]}
+	//
+	//  Third-party AI Gateway models (openai/*, recraft/*, krea/*, etc.):
+	//    Already return OpenAI-native format directly: {"created":...,"data":[...]}
+	//    → Pass through to the client unchanged.
 	if cred.Provider == "cloudflare" && isCloudflareImageRequest(c.Request.URL.Path) {
 		respBody, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
 			return http.StatusInternalServerError, upstreamURL, nil, readErr
 		}
 
-		// Cloudflare returns HTTP 200 with success=false for some validation
-		// failures (e.g. invalid input). Route those through the retry loop so
-		// the credential is penalised and a clear error reaches the client.
-		if success, err := jsonparser.GetBoolean(respBody, "success"); err == nil && !success {
-			h.logger.Warn("cloudflare returned internal failure (HTTP 200, success=false)",
-				zap.String("model", pctx.model),
-				zap.ByteString("response", respBody),
-			)
-			return http.StatusBadGateway, upstreamURL, respBody, nil
-		}
+		// Detect native Cloudflare envelope vs. OpenAI-native passthrough.
+		// isCloudflareNativeImageResponse checks for a top-level "success" boolean
+		// which is the canonical marker of the Cloudflare {success, result} envelope.
+		if isCloudflareNativeImageResponse(respBody) {
+			// Native @cf/* envelope: check for success=false failures first
+			if success, err := jsonparser.GetBoolean(respBody, "success"); err == nil && !success {
+				h.logger.Warn("cloudflare returned internal failure (HTTP 200, success=false)",
+					zap.String("model", pctx.model),
+					zap.ByteString("response", respBody),
+				)
+				return http.StatusBadGateway, upstreamURL, respBody, nil
+			}
 
-		translated, contentType, trErr := translateCloudflareImageResponse(respBody)
-		if trErr == nil && translated != nil {
-			c.Writer.Header().Set("Content-Type", contentType)
+			// Translate native Cloudflare envelope → OpenAI format
+			translated, contentType, trErr := translateCloudflareImageResponse(respBody)
+			if trErr == nil && translated != nil {
+				c.Writer.Header().Set("Content-Type", contentType)
+				c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+				c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+				c.Writer.WriteHeader(resp.StatusCode)
+				c.Writer.Write(translated) //nolint:errcheck
+				return resp.StatusCode, upstreamURL, translated, nil
+			}
+			// Translation failed — write original body as fallback
+			h.logger.Warn("cloudflare native image response translation failed, passing through original",
+				zap.String("model", pctx.model),
+				zap.Error(trErr),
+			)
+			for key, vals := range resp.Header {
+				for _, val := range vals {
+					c.Writer.Header().Add(key, val)
+				}
+			}
 			c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
 			c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
 			c.Writer.WriteHeader(resp.StatusCode)
-			c.Writer.Write(translated) //nolint:errcheck
-			return resp.StatusCode, upstreamURL, translated, nil
+			c.Writer.Write(respBody) //nolint:errcheck
+			return resp.StatusCode, upstreamURL, respBody, nil
 		}
-		// Translation failed — write original body as fallback
-		h.logger.Warn("cloudflare response translation failed, passing through original",
+
+		// Third-party AI Gateway image model — response is already OpenAI-native format.
+		// Pass through directly without any translation.
+		h.logger.Debug("cloudflare third-party image model: passing through OpenAI-native response",
 			zap.String("model", pctx.model),
-			zap.Error(trErr),
 		)
 		for key, vals := range resp.Header {
 			for _, val := range vals {
 				c.Writer.Header().Add(key, val)
 			}
 		}
+		c.Writer.Header().Set("Content-Type", "application/json")
 		c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
 		c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
 		c.Writer.WriteHeader(resp.StatusCode)
