@@ -430,3 +430,24 @@ func TestHandle_CloudflareImageStripsPrefixFromURL(t *testing.T) {
 		t.Errorf("expected b64_json 'aGVsbG8=', got %q", b64)
 	}
 }
+
+func TestRewriteResponseModel(t *testing.T) {
+	h := &Handler{}
+	respBody := []byte(`{"id":"chatcmpl-123","object":"chat.completion","created":1677652288,"model":"openai/gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"hello"}}]}`)
+	result := h.rewriteResponseModel(respBody, "zenmux/openai/gpt-4o")
+
+	modelVal, err := jsonparser.GetString(result, "model")
+	if err != nil {
+		t.Fatalf("failed to find model key: %v", err)
+	}
+
+	if modelVal != "zenmux/openai/gpt-4o" {
+		t.Errorf("expected rewritten model to be zenmux/openai/gpt-4o, got %s", modelVal)
+	}
+
+	// Verify it passes empty requestedModel unchanged
+	unchanged := h.rewriteResponseModel(respBody, "")
+	if string(unchanged) != string(respBody) {
+		t.Errorf("expected body to be unchanged when requestedModel is empty")
+	}
+}
