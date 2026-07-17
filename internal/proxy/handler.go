@@ -927,6 +927,22 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		bodyBytes = sanitizePuterRequest(bodyBytes)
 	}
 
+	// --- NVIDIA Request Sanitization ---
+	// NVIDIA NIM's API schema strictly validates top-level request fields and
+	// rejects unknown OpenAI-specific keys (stream_options, logprobs, service_tier,
+	// etc.) with HTTP 400 "Unsupported parameter(s)". Without this sanitizer the
+	// gateway's 400 fast-fail block would abort after the first attempt and return
+	// a misleading 502 gateway_exhaustion_error to the client.
+	//
+	// Note: reasoning_budget and chat_template_kwargs injection is handled
+	// separately in Handle() via injectNvidiaParams(), gated on
+	// supportsNvidiaReasoning(). The sanitizer here provides defence-in-depth
+	// for all other OpenAI-specific fields that neither reasoning nor standard
+	// NVIDIA models accept.
+	if cred.Provider == "nvidia" {
+		bodyBytes = sanitizeNvidiaRequest(bodyBytes)
+	}
+
 	upstreamURL = h.rewriter.RewriteURL(cred.Provider, cred.BaseURL, c.Request.URL.Path, modelName)
 
 	// --- 1min.ai Streaming ---
@@ -1708,8 +1724,22 @@ func injectNvidiaParams(body, scanSlice []byte, logger *zap.Logger) []byte {
 // stripped) supports NVIDIA's reasoning extensions (reasoning_budget,
 // chat_template_kwargs.enable_thinking). Standard models like GLM, Llama-base,
 // and Mistral reject these params with a 500, so they must be excluded.
+//
+// IMPORTANT: Only the final slash-separated segment (the model name itself) is
+// matched against reasoning keywords. Matching the full string would cause false
+// positives when the *organisation/namespace* portion contains a keyword — for
+// example "thinkingmachines/inkling" would incorrectly trigger on "think" inside
+// "thinkingmachines", causing reasoning_budget injection that NVIDIA rejects.
 func supportsNvidiaReasoning(upstreamModel string) bool {
-	lower := strings.ToLower(upstreamModel)
+	// Extract only the model name (last "/"-separated segment).
+	// e.g. "thinkingmachines/inkling"  → "inkling"   (org name excluded)
+	//      "deepseek/deepseek-r1"      → "deepseek-r1" (still matches -r1)
+	//      "nvidia/nemotron-3-super"   → "nemotron-3-super" (still matches nemotron)
+	modelName := upstreamModel
+	if lastSlash := strings.LastIndex(upstreamModel, "/"); lastSlash >= 0 {
+		modelName = upstreamModel[lastSlash+1:]
+	}
+	lower := strings.ToLower(modelName)
 	return strings.Contains(lower, "nemotron") ||
 		strings.Contains(lower, "-r1") ||
 		strings.Contains(lower, "reasoning") ||
