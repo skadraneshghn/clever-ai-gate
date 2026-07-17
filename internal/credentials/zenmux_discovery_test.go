@@ -29,11 +29,8 @@ func TestZenMuxModelCapabilities(t *testing.T) {
 		if caps.Reasoning != tt.wantReasoning {
 			t.Errorf("ClassifyModel(%q).Reasoning = %v, want %v", tt.pattern, caps.Reasoning, tt.wantReasoning)
 		}
-		if caps.Vision != tt.wantVis {
-			// wait, in the test loop struct we used wantVision but field is wantVis? No, it's wantVision
-			if caps.Vision != tt.wantVision {
-				t.Errorf("ClassifyModel(%q).Vision = %v, want %v", tt.pattern, caps.Vision, tt.wantVision)
-			}
+		if caps.Vision != tt.wantVision {
+			t.Errorf("ClassifyModel(%q).Vision = %v, want %v", tt.pattern, caps.Vision, tt.wantVision)
 		}
 		if caps.Code != tt.wantCode {
 			t.Errorf("ClassifyModel(%q).Code = %v, want %v", tt.pattern, caps.Code, tt.wantCode)
