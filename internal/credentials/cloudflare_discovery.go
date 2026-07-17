@@ -214,26 +214,50 @@ func DiscoverAndRegisterCloudflareModels(
 	return len(discoveredModels), discoveredModels, tx.Commit(ctx)
 }
 
-// fetchCloudflareModels calls the Cloudflare Workers AI model search endpoint
-// and returns the full model catalog for the given account.
+// fetchCloudflareModels calls the Cloudflare Workers AI model catalog endpoint
+// and returns the FULL model list for the given account by auto-paginating
+// through every page of results.
 //
-// Endpoint: GET /client/v4/accounts/{accountID}/ai/models/search?per_page=1000
-// Auth:     Authorization: Bearer {apiToken}
+// The SDK's ListAutoPaging iterator handles page cursors automatically,
+// ensuring no models are missed regardless of catalog size.
+//
+// Auth: Authorization: Bearer {apiToken}
 //
 // If Cloudflare returns 401/403, an explicit auth error is returned so
 // the admin panel can surface a clear rejection message.
 func fetchCloudflareModels(ctx context.Context, accountID, apiToken string) ([]cloudflareModel, error) {
-	// 1. Initialize client using the official cloudflare-go v7 SDK
+	// Initialize client using the official cloudflare-go v7 SDK
 	client := cloudflare.NewClient(option.WithAPIToken(apiToken))
 
-	// 2. Configure List Params with Account ID using cloudflare.F
-	params := ai.ModelListParams{
+	// Use ListAutoPaging to iterate through ALL pages of the model catalog.
+	// The default List() only returns the first page (~20-50 models),
+	// which is why many models (kimi-k3, gpt-5.6-*, claude-sonnet-5, etc.)
+	// were previously missing.
+	iter := client.AI.Models.ListAutoPaging(ctx, ai.ModelListParams{
 		AccountID: cloudflare.F(accountID),
+		PerPage:   cloudflare.F(int64(200)), // maximize items per page to reduce round-trips
+	})
+
+	var models []cloudflareModel
+
+	for iter.Next() {
+		item := iter.Current()
+
+		// Each item is interface{}, so marshal → unmarshal to our struct.
+		itemJSON, err := json.Marshal(item)
+		if err != nil {
+			continue
+		}
+
+		var m cloudflareModel
+		if err := json.Unmarshal(itemJSON, &m); err != nil {
+			continue
+		}
+
+		models = append(models, m)
 	}
 
-	// 3. Invoke List using the SDK client (which wraps validation and endpoint path)
-	res, err := client.AI.Models.List(ctx, params)
-	if err != nil {
+	if err := iter.Err(); err != nil {
 		tokenSnippet := ""
 		if len(apiToken) >= 6 {
 			tokenSnippet = apiToken[:6]
@@ -250,23 +274,13 @@ func fetchCloudflareModels(ctx context.Context, accountID, apiToken string) ([]c
 		return nil, fmt.Errorf("cloudflare Workers AI auto-discovery failed: %w", err)
 	}
 
-	if res == nil || len(res.Result) == 0 {
+	if len(models) == 0 {
 		return nil, fmt.Errorf(
 			"cloudflare returned an empty model catalog — " +
 				"verify your account has Workers AI access enabled",
 		)
 	}
 
-	// 4. Serialize list elements to JSON and unmarshal into cloudflareModel structs
-	jsonBytes, err := json.Marshal(res.Result)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize SDK result: %w", err)
-	}
-
-	var models []cloudflareModel
-	if err := json.Unmarshal(jsonBytes, &models); err != nil {
-		return nil, fmt.Errorf("failed to parse cloudflare model catalog: %w", err)
-	}
-
 	return models, nil
 }
+
