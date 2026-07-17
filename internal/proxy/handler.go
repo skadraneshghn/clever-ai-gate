@@ -1635,6 +1635,37 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 		}
 	}
 
+	// Handle Gemini slash-separated model names (e.g. "gemini/gemini-3.5-flash")
+	if strings.HasPrefix(model, "gemini/") {
+		// 1. Try to match the exact pattern pool first
+		if val, found := h.cache.Get(cache.PoolKey(model)); found {
+			return val, true
+		}
+		// 2. If not found, normalize the model name and try matching that pool
+		cleanModel := strings.TrimPrefix(model, "gemini/")
+		mappedClean := normalizeGeminiModel(cleanModel)
+		mappedPool := "gemini/" + mappedClean
+		if val, found := h.cache.Get(cache.PoolKey(mappedPool)); found {
+			h.logger.Debug("mapping unknown gemini model to fallback pool",
+				zap.String("requested", model),
+				zap.String("mapped", mappedPool),
+			)
+			return val, true
+		}
+		// 3. Progressive path matching fallback
+		slashParts := strings.Split(model, "/")
+		for i := len(slashParts) - 1; i >= 1; i-- {
+			prefix := strings.Join(slashParts[:i], "/")
+			if val, found := h.cache.Get(cache.PoolKey(prefix)); found {
+				return val, true
+			}
+		}
+		// 4. Fallback to generic gemini key namespace
+		if val, found := h.cache.Get(cache.PoolKey("gemini")); found {
+			return val, true
+		}
+	}
+
 	// Try progressively shorter dash-separated prefixes
 	parts := strings.Split(model, "-")
 	for i := len(parts) - 1; i >= 1; i-- {
@@ -1644,6 +1675,16 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 		}
 	}
 	// Try provider-specific patterns (e.g., "gemini-" prefix)
+	if strings.HasPrefix(model, "gemini-") {
+		mappedClean := normalizeGeminiModel(model)
+		if val, found := h.cache.Get(cache.PoolKey(mappedClean)); found {
+			h.logger.Debug("mapping unknown clean gemini model to fallback pool",
+				zap.String("requested", model),
+				zap.String("mapped", mappedClean),
+			)
+			return val, true
+		}
+	}
 	for _, prefix := range []string{"gpt-", "claude-", "gemini-", "deepseek-"} {
 		if strings.HasPrefix(model, prefix) {
 			baseModel := strings.TrimSuffix(prefix, "-")

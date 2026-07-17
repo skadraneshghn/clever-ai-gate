@@ -203,6 +203,7 @@ func anthropicPath(baseURL, requestPath, _ string) string {
 // replaces ":streamGenerateContent?alt=sse" with ":generateContent" for non-stream
 // requests before appending the API key.
 func geminiPath(baseURL, requestPath, model string) string {
+	model = normalizeGeminiModel(model)
 	if strings.Contains(requestPath, "/chat/completions") {
 		// Default to streaming — forwardRequest will switch to generateContent for non-stream.
 		return fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?alt=sse", baseURL, model)

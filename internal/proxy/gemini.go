@@ -399,6 +399,31 @@ func geminiReasoningBudget(effort string) int {
 	}
 }
 
+// normalizeGeminiModel maps unknown/unsupported Gemini model names to actual
+// existing Google AI Studio model IDs. This allows fictional or custom client-side
+// model aliases (like gemini-3.5-flash) to route and execute successfully.
+func normalizeGeminiModel(model string) string {
+	lower := strings.ToLower(model)
+
+	// If it is a known real Gemini model ID, pass it through as-is
+	switch lower {
+	case "gemini-2.5-pro", "gemini-2.5-flash", "gemini-1.5-pro", "gemini-1.5-flash",
+		"gemini-2.5-flash-lite", "gemini-2.0-flash-exp", "gemini-2.0-flash-thinking-exp-1219",
+		"gemini-2.0-pro-exp-02-05", "text-embedding-004", "embedding-001":
+		return model
+	}
+
+	// Dynamic fallback mapping for custom/fictional model aliases
+	if strings.Contains(lower, "pro") {
+		return "gemini-2.5-pro"
+	}
+	if strings.Contains(lower, "flash-lite") {
+		return "gemini-2.5-flash-lite"
+	}
+	return "gemini-2.5-flash"
+}
+
+
 // extractTextContent extracts plain text from an OpenAI message content field
 // that may be a plain string or an array of content parts.
 func extractTextContent(raw json.RawMessage) string {
