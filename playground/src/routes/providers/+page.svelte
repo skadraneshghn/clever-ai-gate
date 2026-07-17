@@ -964,7 +964,7 @@
         } else if (autoDiscoverForm.provider === 'puter') {
           autoDiscoverForm.base_url = 'https://api.puter.com/puterai/openai/v1';
         } else if (autoDiscoverForm.provider === 'zenmux') {
-          autoDiscoverForm.base_url = 'https://api.zenmux.ai/v1';
+          autoDiscoverForm.base_url = 'https://zenmux.ai/api/v1';
         } else {
           autoDiscoverForm.base_url = '';
         }

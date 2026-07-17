@@ -93,7 +93,7 @@ type DiscoverPuterRequest struct {
 }
 
 // DiscoverZenMuxRequest is the request body for POST /api/v1/admin/providers/zenmux.
-// ZenMux only needs an API key — the base URL is hardcoded to https://api.zenmux.ai/v1.
+// ZenMux only needs an API key — the base URL is hardcoded to https://zenmux.ai/api/v1.
 type DiscoverZenMuxRequest struct {
 	APIKey string `json:"api_key" binding:"required" example:"sk-..."`
 	Weight int    `json:"weight,omitempty" example:"1"`

@@ -12,7 +12,7 @@ import (
 )
 
 // ZenMuxBaseURL is the official API base URL for ZenMux.
-const ZenMuxBaseURL = "https://api.zenmux.ai/v1"
+const ZenMuxBaseURL = "https://zenmux.ai/api/v1"
 
 // DiscoverAndRegisterZenMuxModels connects to ZenMux API, validates the API key,
 // discovers all available models from its aggregation list, and registers them
