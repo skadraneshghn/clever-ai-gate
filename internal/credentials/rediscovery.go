@@ -261,6 +261,9 @@ func callProviderDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, 
 	case "puter":
 		return DiscoverAndRegisterPuterModels(ctx, db, vault, apiKey, weight)
 
+	case "zenmux":
+		return DiscoverAndRegisterZenMuxModels(ctx, db, vault, apiKey, weight)
+
 	default:
 		// Any OpenAI-compatible provider (openai, anthropic, deepseek, custom, …)
 		return DiscoverAndRegisterCustomModels(ctx, db, vault, apiKey, acc.BaseURL, acc.Provider, weight, acc.Prefix)

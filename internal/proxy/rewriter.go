@@ -75,6 +75,9 @@ func NewRewriter() *Rewriter {
 	// Puter.com: natively OpenAI-compatible
 	r.pathTransformers["puter"] = passthroughPath
 
+	// ZenMux: aggregation layer, natively OpenAI-compatible
+	r.pathTransformers["zenmux"] = passthroughPath
+
 	return r
 }
 
@@ -153,6 +156,9 @@ func (r *Rewriter) RewriteHeaders(req *http.Request, provider, apiKey string, so
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	case "puter":
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	case "zenmux":
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	default:

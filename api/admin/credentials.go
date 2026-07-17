@@ -758,6 +758,58 @@ func (h *CredentialHandler) RegisterPuterProvider(c *gin.Context) {
 	})
 }
 
+// RegisterZenMuxProvider auto-discovers all ZenMux AI models available under
+// an API key, creates model pools for each, and binds the credential
+// to all of them in one transaction.
+//
+// @Summary      Auto-discover ZenMux Models
+// @Description  Submits a ZenMux API key, fetches the model details, and registers all models automatically
+// @Tags         Credentials
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        body  body      dto.DiscoverZenMuxRequest  true  "ZenMux provider details (api_key required)"
+// @Success      200   {object}  dto.DiscoverProviderResponse
+// @Failure      400   {object}  dto.ErrorResponse
+// @Failure      500   {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/providers/zenmux [post]
+// func (h *CredentialHandler) RegisterZenMuxProvider(c *gin.Context) {
+func (h *CredentialHandler) RegisterZenMuxProvider(c *gin.Context) {
+	var req dto.DiscoverZenMuxRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
+		return
+	}
+
+	if req.APIKey == "" {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "api_key is required for ZenMux auto-discovery"})
+		return
+	}
+
+	if req.Weight <= 0 {
+		req.Weight = 1
+	}
+
+	count, models, err := credentials.DiscoverAndRegisterZenMuxModels(
+		c.Request.Context(),
+		h.db,
+		h.vault,
+		req.APIKey,
+		req.Weight,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "ZenMux auto-discovery failed", Details: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.DiscoverProviderResponse{
+		Message:       fmt.Sprintf("Successfully synchronized %d ZenMux models", count),
+		ModelsCount:   count,
+		DiscoveredIDs: models,
+	})
+}
+
+
 
 // RefreshAllProviders re-runs auto-discovery for every distinct provider key
 // already registered in the database. This is the "sync all" action: it reads
@@ -889,6 +941,10 @@ func (h *CredentialHandler) RefreshAllProviders(c *gin.Context) {
 
 		case "puter":
 			count, discovered, discErr = credentials.DiscoverAndRegisterPuterModels(
+				ctx, h.db, h.vault, apiKey, weight)
+
+		case "zenmux":
+			count, discovered, discErr = credentials.DiscoverAndRegisterZenMuxModels(
 				ctx, h.db, h.vault, apiKey, weight)
 
 		default:

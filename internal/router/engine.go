@@ -222,6 +222,7 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		adminGroup.POST("/providers/cloudflare", credHandler.RegisterCloudflareProvider)
 		adminGroup.POST("/providers/sarvam", credHandler.RegisterSarvamProvider)
 		adminGroup.POST("/providers/puter", credHandler.RegisterPuterProvider)
+		adminGroup.POST("/providers/zenmux", credHandler.RegisterZenMuxProvider)
 		adminGroup.POST("/providers/refresh", credHandler.RefreshAllProviders)
 		// Re-discovery: async scan of all provider endpoints for new models
 		adminGroup.POST("/providers/rediscover", credHandler.TriggerReDiscovery)

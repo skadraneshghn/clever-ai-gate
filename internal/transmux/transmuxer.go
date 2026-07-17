@@ -46,6 +46,8 @@ func NewTransmuxer(provider string) Transmuxer {
 	case "1minai":
 		// 1min.ai uses named SSE events (content/result/done/error).
 		return NewOneMinAITransmuxer()
+	case "zenmux":
+		return NewOpenAITransmuxer()
 	default:
 		// OpenAI-compatible providers (openai, deepseek, groq, together, etc.)
 		return NewOpenAITransmuxer()

@@ -250,6 +250,8 @@
       endpoint = '/api/v1/admin/providers/sarvam';
     } else if (autoDiscoverForm.provider === 'puter') {
       endpoint = '/api/v1/admin/providers/puter';
+    } else if (autoDiscoverForm.provider === 'zenmux') {
+      endpoint = '/api/v1/admin/providers/zenmux';
     } else {
       endpoint = '/api/v1/admin/providers/custom';
     }
@@ -286,6 +288,7 @@
           : autoDiscoverForm.provider === 'cloudflare' ? 'Cloudflare Workers AI'
           : autoDiscoverForm.provider === 'sarvam' ? 'Sarvam AI'
           : autoDiscoverForm.provider === 'puter' ? 'Puter.com'
+          : autoDiscoverForm.provider === 'zenmux' ? 'ZenMux'
           : autoDiscoverForm.provider.toUpperCase();
         appState.addToast('success', `Successfully synchronized ${data.models_count || 0} ${displayName} models`);
         showAddProviderModal = false;
@@ -422,6 +425,7 @@
       case 'cloudflare': return 'badge-cloudflare';
       case 'sarvam': return 'badge-sarvam';
       case 'puter': return 'badge-puter';
+      case 'zenmux': return 'badge-zenmux';
       case 'custom': return 'badge-custom';
       default: return 'badge-default';
     }
@@ -929,6 +933,7 @@
         <option value="cloudflare">Cloudflare Workers AI</option>
         <option value="sarvam">Sarvam AI</option>
         <option value="puter">Puter.com</option>
+        <option value="zenmux">ZenMux</option>
         <option value="google">Google</option>
         <option value="custom">Custom</option>
       </Input>
@@ -958,6 +963,8 @@
           autoDiscoverForm.base_url = 'https://api.sarvam.ai';
         } else if (autoDiscoverForm.provider === 'puter') {
           autoDiscoverForm.base_url = 'https://api.puter.com/puterai/openai/v1';
+        } else if (autoDiscoverForm.provider === 'zenmux') {
+          autoDiscoverForm.base_url = 'https://api.zenmux.ai/v1';
         } else {
           autoDiscoverForm.base_url = '';
         }
@@ -973,6 +980,7 @@
         <option value="cloudflare">Cloudflare Workers AI</option>
         <option value="sarvam">Sarvam AI</option>
         <option value="puter">Puter.com</option>
+        <option value="zenmux">ZenMux</option>
         <option value="custom">OpenAI-Compatible (Custom)</option>
       </Input>
 
@@ -1003,6 +1011,12 @@
       {#if autoDiscoverForm.provider === 'puter'}
         <div class="rounded-lg border border-blue-500/20 bg-blue-500/5 px-4 py-3 text-xs text-blue-400 leading-relaxed">
           🚀 <strong>Puter.com</strong> is a developer-friendly cloud with free AI access. Enter your API Token (Puter Auth Token) to auto-discover all models. Get your API Token at <a href="https://puter.com/dashboard" target="_blank" rel="noopener noreferrer" class="underline">puter.com/dashboard</a>.
+        </div>
+      {/if}
+
+      {#if autoDiscoverForm.provider === 'zenmux'}
+        <div class="rounded-lg border border-purple-500/20 bg-purple-500/5 px-4 py-3 text-xs text-purple-400 leading-relaxed">
+          🌐 <strong>ZenMux</strong> is an enterprise-grade AI model aggregator. Enter your API Key to auto-discover all aggregated models. Get your key at <a href="https://zenmux.ai" target="_blank" rel="noopener noreferrer" class="underline">zenmux.ai</a>.
         </div>
       {/if}
 
@@ -1038,12 +1052,13 @@
             autoDiscoverForm.provider === '1minai' ? '1min.ai API key...' :
             autoDiscoverForm.provider === 'sarvam' ? 'Sarvam API key (api-subscription-key)...' :
             autoDiscoverForm.provider === 'puter' ? 'Puter Auth Token...' :
+            autoDiscoverForm.provider === 'zenmux' ? 'ZenMux API Key...' :
             'Bearer API key...'
           } 
           bind:value={autoDiscoverForm.api_key} 
         />
         
-        {#if autoDiscoverForm.provider !== 'openrouter' && autoDiscoverForm.provider !== '1minai' && autoDiscoverForm.provider !== 'sarvam' && autoDiscoverForm.provider !== 'puter'}
+        {#if autoDiscoverForm.provider !== 'openrouter' && autoDiscoverForm.provider !== '1minai' && autoDiscoverForm.provider !== 'sarvam' && autoDiscoverForm.provider !== 'puter' && autoDiscoverForm.provider !== 'zenmux'}
           <Input type="text" label="Base URL" placeholder={autoDiscoverForm.provider === 'custom' ? 'https://api.together.xyz/v1' : ''} bind:value={autoDiscoverForm.base_url} />
         {/if}
       {/if}
@@ -1088,6 +1103,7 @@
       <option value="1minai">1min.ai</option>
       <option value="cloudflare">Cloudflare Workers AI</option>
       <option value="sarvam">Sarvam AI</option>
+      <option value="zenmux">ZenMux</option>
       <option value="google">Google</option>
       <option value="custom">Custom</option>
     </Input>
@@ -1267,6 +1283,13 @@
     background: rgba(59, 130, 246, 0.12);
     color: #60a5fa;
     border: 1px solid rgba(59, 130, 246, 0.25);
+  }
+
+  /* ZenMux brand badge — purple/violet tone */
+  :global(.badge-zenmux) {
+    background: rgba(167, 139, 250, 0.12);
+    color: #a78bfa;
+    border: 1px solid rgba(167, 139, 250, 0.25);
   }
 
   /* ─── Re-Discovery Button ─── */

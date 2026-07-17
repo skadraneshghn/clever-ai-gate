@@ -92,6 +92,13 @@ type DiscoverPuterRequest struct {
 	Weight int    `json:"weight,omitempty" example:"1"`
 }
 
+// DiscoverZenMuxRequest is the request body for POST /api/v1/admin/providers/zenmux.
+// ZenMux only needs an API key — the base URL is hardcoded to https://api.zenmux.ai/v1.
+type DiscoverZenMuxRequest struct {
+	APIKey string `json:"api_key" binding:"required" example:"sk-..."`
+	Weight int    `json:"weight,omitempty" example:"1"`
+}
+
 // BulkDeleteRequest represents a request containing multiple IDs to be deleted.
 type BulkDeleteRequest struct {
 	IDs []int `json:"ids" binding:"required,min=1" example:"[1,2,3]"`

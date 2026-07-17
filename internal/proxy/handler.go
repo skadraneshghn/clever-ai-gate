@@ -73,6 +73,7 @@ type proxyContext struct {
 	isCloudflare bool // True when model uses cloudflare/ prefix — triggers prefix stripping
 	isSarvam     bool // True when model uses sarvam/ prefix — triggers prefix stripping
 	isPuter      bool // True when model uses puter/ prefix — triggers prefix stripping
+	isZenMux     bool // True when model uses zenmux/ prefix — triggers prefix stripping
 	body         []byte
 	credential   *credentials.AcquireResult
 	pool         *credentials.BalancedChannelPool
@@ -245,6 +246,15 @@ func (h *Handler) Handle(c *gin.Context) {
 		)
 	}
 
+	// --- ZenMux Prefix Detection ---
+	isZenMux := false
+	if strings.HasPrefix(model, "zenmux/") {
+		isZenMux = true
+		h.logger.Debug("zenmux model detected",
+			zap.String("model", model),
+		)
+	}
+
 	// --- Access log: first thing we know enough to emit a useful Info entry ---
 	// This fires for EVERY request and is the primary tool for diagnosing
 	// Kilo Code instability: you can see exactly what model/tenant/path was
@@ -263,6 +273,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		zap.Bool("is_cloudflare", isCloudflare),
 		zap.Bool("is_sarvam", isSarvam),
 		zap.Bool("is_puter", isPuter),
+		zap.Bool("is_zenmux", isZenMux),
 		zap.Int("body_bytes", len(body)),
 		zap.String("client_ip", c.ClientIP()),
 	)
@@ -357,6 +368,12 @@ func (h *Handler) Handle(c *gin.Context) {
 		body = stripModelPrefixInPlace(body, model, "puter/")
 	}
 
+	// --- ZenMux Payload Sanitization ---
+	if isZenMux {
+		body = stripModelPrefixInPlace(body, model, "zenmux/")
+		model = strings.TrimPrefix(model, "zenmux/")
+	}
+
 	// Step 5-8: Attempt with automatic failover
 	// Note: The FULL body (not scanSlice) is forwarded to the upstream provider.
 	// Only the metadata extraction was bounded — the binary payload is piped as-is.
@@ -368,6 +385,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		isCloudflare: isCloudflare,
 		isSarvam:     isSarvam,
 		isPuter:      isPuter,
+		isZenMux:     isZenMux,
 		body:         body,
 		pool:         pool,
 	}
@@ -1449,6 +1467,21 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 		}
 		// Also try just the provider namespace key "puter"
 		if val, found := h.cache.Get(cache.PoolKey("puter")); found {
+			return val, true
+		}
+	}
+
+	// Handle ZenMux slash-separated model names (e.g. "zenmux/anthropic/claude-3-5-sonnet")
+	if strings.HasPrefix(model, "zenmux/") {
+		slashParts := strings.Split(model, "/")
+		for i := len(slashParts) - 1; i >= 1; i-- {
+			prefix := strings.Join(slashParts[:i], "/")
+			if val, found := h.cache.Get(cache.PoolKey(prefix)); found {
+				return val, true
+			}
+		}
+		// Also try just the provider namespace key "zenmux"
+		if val, found := h.cache.Get(cache.PoolKey("zenmux")); found {
 			return val, true
 		}
 	}
