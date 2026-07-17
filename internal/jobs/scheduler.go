@@ -323,6 +323,7 @@ func (s *Scheduler) makeTaskFunc(j Job) func() {
 		// Execute
 		executor, _ := s.registry.Get(j.JobType)
 		execCtx := &ExecutionContext{
+			Context: tCtx, // ← propagate timeout; executor MUST use this, not context.Background()
 			JobID:   j.ID,
 			RunID:   runID,
 			JobType: j.JobType,
@@ -465,7 +466,10 @@ func (s *Scheduler) makeTaskFuncWithRunID(j Job, runID string) func() {
 			return
 		}
 
-		execCtx := &ExecutionContext{JobID: j.ID, RunID: runID, JobType: j.JobType, Payload: j.Payload, Attempt: 1}
+		execCtx := &ExecutionContext{
+			Context: tCtx, // ← propagate timeout; executor MUST use this, not context.Background()
+			JobID: j.ID, RunID: runID, JobType: j.JobType, Payload: j.Payload, Attempt: 1,
+		}
 		timeout := time.Duration(j.TimeoutSeconds) * time.Second
 		if timeout <= 0 {
 			timeout = 5 * time.Minute

@@ -3,7 +3,10 @@
 // and async queuing, and PostgreSQL for persistent job definitions and run history.
 package jobs
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // JobStatus represents the lifecycle state of a job definition.
 type JobStatus string
@@ -154,7 +157,11 @@ type QueueMessage struct {
 type ExecutorFunc func(ctx *ExecutionContext) (output string, err error)
 
 // ExecutionContext carries all context a job executor needs at runtime.
+// Context is a timeout-aware context derived from the scheduler's tCtx —
+// executors MUST use this (not context.Background()) so that when the
+// scheduler timeout fires the underlying HTTP and DB operations cancel cleanly.
 type ExecutionContext struct {
+	Context context.Context // timeout-aware; cancelled when the job times out
 	JobID   string
 	RunID   string
 	JobType string

@@ -159,7 +159,9 @@ func fetchCloudflareDocModels(ctx context.Context) ([]docModel, error) {
 		return nil, fmt.Errorf("cloudflare docs manifest: unexpected status %d", resp.StatusCode)
 	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	// Limit response body to 2MB — the docs page is currently ~80KB.
+	// This prevents runaway memory if Cloudflare's page grows significantly.
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
 	if err != nil {
 		return nil, fmt.Errorf("cloudflare docs manifest: failed to read body: %w", err)
 	}
@@ -425,12 +427,11 @@ func DiscoverAndRegisterCloudflareModels(
 				return 0, nil, fmt.Errorf("failed to upsert model pool for %s: %w", modelPattern, err)
 			}
 
-			// Bind the Cloudflare credential to this pool (idempotent).
+			// Bind the Cloudflare credential to this pool (idempotent via alreadyBound guard).
 			if !alreadyBound[poolID] {
 				_, err = tx.Exec(ctx,
 					`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
-					 VALUES ($1, 'cloudflare', $2, $3, $4, true)
-					 ON CONFLICT DO NOTHING`,
+					 VALUES ($1, 'cloudflare', $2, $3, $4, true)`,
 					poolID, encryptedToken, storedBaseURL, weight,
 				)
 				if err != nil {

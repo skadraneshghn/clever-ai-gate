@@ -42,7 +42,13 @@ func RegisterBuiltinExecutors(reg *Registry, db *pgxpool.Pool, vault *credential
 
 func newProviderRediscoveryExecutor(db *pgxpool.Pool, vault *credentials.Vault, logger *zap.Logger) ExecutorFunc {
 	return func(execCtx *ExecutionContext) (string, error) {
-		ctx := context.Background()
+		// Use the scheduler's timeout-aware context, NOT context.Background().
+		// context.Background() would detach from the scheduler timeout, leaving
+		// goroutines running indefinitely after the job is marked as timed out.
+		ctx := execCtx.Context
+		if ctx == nil {
+			ctx = context.Background() // safe fallback for tests / manual calls
+		}
 
 		logger.Info("provider_rediscovery job started",
 			zap.String("run_id", execCtx.RunID),
