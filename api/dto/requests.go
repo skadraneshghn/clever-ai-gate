@@ -104,3 +104,9 @@ type BulkDeleteRequest struct {
 	IDs []int `json:"ids" binding:"required,min=1" example:"[1,2,3]"`
 }
 
+// BulkActivateRequest represents a request containing multiple pool IDs to activate.
+type BulkActivateRequest struct {
+	IDs []int `json:"ids" binding:"required,min=1" example:"[1,2,3]"`
+}
+
+

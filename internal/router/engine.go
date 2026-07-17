@@ -197,6 +197,7 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		// NOTE: static routes must be registered before Gin's parameterised :id patterns.
 		adminGroup.POST("/pools/bulk-test", poolHandler.BulkTest)
 		adminGroup.POST("/pools/bulk-delete", poolHandler.BulkDelete)
+		adminGroup.POST("/pools/bulk-activate", poolHandler.BulkActivate)
 		adminGroup.POST("/pools/purge-unhealthy", poolHandler.PurgeUnhealthyPools)
 		adminGroup.GET("/pools/:id", poolHandler.Get)
 		adminGroup.PUT("/pools/:id", poolHandler.Update)

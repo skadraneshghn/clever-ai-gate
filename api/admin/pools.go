@@ -678,3 +678,39 @@ func (h *PoolHandler) PurgeUnhealthyPools(c *gin.Context) {
 		"deleted": deleted,
 	})
 }
+
+// BulkActivate sets all credentials associated with the specified pools to healthy.
+// @Summary      Bulk activate credentials in pools
+// @Description  Activates all provider credentials (tokens) linked to the given pool IDs
+// @Tags         Pools
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        request   body      dto.BulkActivateRequest  true  "IDs of model pools to activate credentials in"
+// @Success      200       {object}  dto.SuccessResponse
+// @Failure      400       {object}  dto.ErrorResponse
+// @Failure      500       {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/pools/bulk-activate [post]
+func (h *PoolHandler) BulkActivate(c *gin.Context) {
+	var req dto.BulkActivateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
+		return
+	}
+
+	ctx := c.Request.Context()
+	activated, err := database.ActivateCredentialsBulk(ctx, h.db, req.IDs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to activate credentials in bulk", Details: err.Error()})
+		return
+	}
+
+	// Broadcast reload so all cluster nodes hot-swap their routing cache and load the newly activated credentials.
+	_, _ = h.db.Exec(ctx, "NOTIFY config_change, 'model_pools:reload'")
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":   fmt.Sprintf("Successfully activated %d credentials/tokens across %d pools.", activated, len(req.IDs)),
+		"activated": activated,
+	})
+}
+

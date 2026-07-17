@@ -132,6 +132,10 @@
   let showBulkDeletePoolsConfirm = $state(false);
   let bulkDeletePoolsLoading = $state(false);
 
+  // Bulk selection and activation state
+  let showBulkActivatePoolsConfirm = $state(false);
+  let bulkActivatePoolsLoading = $state(false);
+
   // Bulk health-check state
   let isBulkTesting = $state(false);
 
@@ -602,6 +606,40 @@
     }
   }
 
+  function confirmBulkActivatePools() {
+    showBulkActivatePoolsConfirm = true;
+  }
+
+  async function activatePoolsBulk() {
+    bulkActivatePoolsLoading = true;
+    appState.apiLoading = true;
+    try {
+      const res = await fetch('/api/v1/admin/pools/bulk-activate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...adminHeaders()
+        },
+        body: JSON.stringify({ ids: selectedPoolIds })
+      });
+      if (res.ok) {
+        const result = await res.json();
+        appState.addToast('success', result.message || `Activated all credentials across ${selectedPoolIds.length} pools successfully`);
+        showBulkActivatePoolsConfirm = false;
+        selectedPoolIds = [];
+        reloadPools();
+      } else {
+        const err = await res.json();
+        appState.addToast('error', err.details || err.error || 'Failed to activate credentials');
+      }
+    } catch (e) {
+      appState.addToast('error', `Network error: ${e.message}`);
+    } finally {
+      bulkActivatePoolsLoading = false;
+      appState.apiLoading = false;
+    }
+  }
+
   function connectAdminKey() {
     const key = appState.adminKey.trim();
     if (!key) return;
@@ -641,6 +679,10 @@
         </Button>
       {:else}
         {#if selectedPoolIds.length > 0}
+          <Button variant="success" size="sm" onclick={confirmBulkActivatePools} title="Activate all credentials/tokens in selected pools">
+            <Activity size={14} />
+            Activate Selected ({selectedPoolIds.length})
+          </Button>
           <Button variant="danger" size="sm" onclick={confirmBulkDeletePools} title="Delete selected pools">
             <Trash2 size={14} />
             Delete Selected ({selectedPoolIds.length})
@@ -1459,6 +1501,30 @@
           <span class="animate-spin">⟳</span>
         {:else}
           Delete ({selectedPoolIds.length})
+        {/if}
+      </Button>
+    </div>
+  {/snippet}
+</Modal>
+
+<!-- ─── BULK ACTIVATE POOLS CONFIRMATION DIALOG ─────────────────────────────────────────── -->
+<Modal bind:show={showBulkActivatePoolsConfirm} title="Activate Pool Credentials?">
+  <div class="flex flex-col items-center gap-4 text-center">
+    <Activity size={48} class="text-[#10b981] mb-2" />
+    <p class="text-sm text-secondary">
+      Are you sure you want to activate all provider credentials (tokens) across the {selectedPoolIds.length} selected model pools?
+    </p>
+    <p class="text-xs text-secondary leading-normal">This will set all keys in these pools to healthy, clear their error messages, and hot-reload the gateways.</p>
+  </div>
+
+  {#snippet footer()}
+    <div class="flex justify-center gap-3 w-full">
+      <Button variant="outline" onclick={() => { showBulkActivatePoolsConfirm = false; }}>Cancel</Button>
+      <Button variant="success" onclick={activatePoolsBulk} disabled={bulkActivatePoolsLoading}>
+        {#if bulkActivatePoolsLoading}
+          <span class="animate-spin">⟳</span>
+        {:else}
+          Activate ({selectedPoolIds.length})
         {/if}
       </Button>
     </div>

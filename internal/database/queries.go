@@ -903,4 +903,23 @@ func GenerateEmbedding(text string) []float32 {
 	return vec
 }
 
+// ActivateCredentialsBulk updates the status of all credentials associated with the specified model pools.
+// It sets is_healthy to true and resets last_error to NULL.
+// Returns the count of affected credentials.
+func ActivateCredentialsBulk(ctx context.Context, pool *pgxpool.Pool, poolIDs []int) (int64, error) {
+	if len(poolIDs) == 0 {
+		return 0, nil
+	}
+	result, err := pool.Exec(ctx, `
+		UPDATE credentials 
+		SET is_healthy = TRUE, last_error = NULL 
+		WHERE pool_id = ANY($1)
+	`, poolIDs)
+	if err != nil {
+		return 0, fmt.Errorf("failed to bulk activate credentials: %w", err)
+	}
+	return result.RowsAffected(), nil
+}
+
+
 
