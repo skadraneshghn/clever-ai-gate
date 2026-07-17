@@ -39,7 +39,7 @@ func NewStreamProxy(client *http.Client, logger *zap.Logger) *StreamProxy {
 
 // ProxyStream pipes SSE chunks from upstream to client with format translation,
 // and returns the fully accumulated response text along with estimated completion tokens.
-func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, provider string) (responseText string, completionTokens int) {
+func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, provider string, requestedModel string) (responseText string, completionTokens int) {
 	// Acquire pooled scanner buffer
 	scanBuf := sp.scannerPool.Get().([]byte)
 
@@ -123,6 +123,14 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 			}
 
 			if len(translated) > 0 {
+				if requestedModel != "" {
+					if _, err := jsonparser.GetString(translated, "model"); err == nil {
+						if updated, err := jsonparser.Set(translated, []byte(`"`+requestedModel+`"`), "model"); err == nil {
+							translated = updated
+						}
+					}
+				}
+
 				// Capture both content and reasoning_content deltas so the
 				// accumulated response text and token estimate include the
 				// model's thinking process, not just the final answer. A

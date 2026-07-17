@@ -66,18 +66,19 @@ func NewHandler(client *http.Client, cacheStore *cache.Store, logger *zap.Logger
 
 // proxyContext carries extracted fields through the hot-path without allocations.
 type proxyContext struct {
-	model        string
-	isStream     bool
-	isNvidia     bool // True when model uses nvidia/ prefix — triggers reasoning injection
-	isOneMinAI   bool // True when model uses 1min/ prefix — triggers body/response translation
-	isCloudflare bool // True when model uses cloudflare/ prefix — triggers prefix stripping
-	isSarvam     bool // True when model uses sarvam/ prefix — triggers prefix stripping
-	isPuter      bool // True when model uses puter/ prefix — triggers prefix stripping
-	isZenMux     bool // True when model uses zenmux/ prefix — triggers prefix stripping
-	body         []byte
-	credential   *credentials.AcquireResult
-	pool         *credentials.BalancedChannelPool
-	tenantID     string
+	model          string
+	isStream       bool
+	isNvidia       bool // True when model uses nvidia/ prefix — triggers reasoning injection
+	isOneMinAI     bool // True when model uses 1min/ prefix — triggers body/response translation
+	isCloudflare   bool // True when model uses cloudflare/ prefix — triggers prefix stripping
+	isSarvam       bool // True when model uses sarvam/ prefix — triggers prefix stripping
+	isPuter        bool // True when model uses puter/ prefix — triggers prefix stripping
+	isZenMux       bool // True when model uses zenmux/ prefix — triggers prefix stripping
+	requestedModel string // The original model requested by the client before prefix stripping
+	body           []byte
+	credential     *credentials.AcquireResult
+	pool           *credentials.BalancedChannelPool
+	tenantID       string
 }
 
 // Handle processes incoming AI requests on the hot-path.
@@ -172,6 +173,8 @@ func (h *Handler) Handle(c *gin.Context) {
 		// Step 3: Detect streaming mode (also bounded to metadata segment)
 		isStream, _ = jsonparser.GetBoolean(scanSlice, "stream")
 	}
+
+	requestedModel := model
 
 	// --- NVIDIA Prefix Detection ---
 	// Models prefixed with "nvidia/" are routed through the NVIDIA NIM pipeline.
@@ -378,16 +381,17 @@ func (h *Handler) Handle(c *gin.Context) {
 	// Note: The FULL body (not scanSlice) is forwarded to the upstream provider.
 	// Only the metadata extraction was bounded — the binary payload is piped as-is.
 	pctx := &proxyContext{
-		model:        model,
-		isStream:     isStream,
-		isNvidia:     isNvidia,
-		isOneMinAI:   isOneMinAI,
-		isCloudflare: isCloudflare,
-		isSarvam:     isSarvam,
-		isPuter:      isPuter,
-		isZenMux:     isZenMux,
-		body:         body,
-		pool:         pool,
+		model:          model,
+		isStream:       isStream,
+		isNvidia:       isNvidia,
+		isOneMinAI:     isOneMinAI,
+		isCloudflare:   isCloudflare,
+		isSarvam:       isSarvam,
+		isPuter:        isPuter,
+		isZenMux:       isZenMux,
+		requestedModel: requestedModel,
+		body:           body,
+		pool:           pool,
 	}
 
 	// Retrieve tenant ID from context (set by auth middleware)
@@ -1000,7 +1004,7 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	if pctx.isStream && resp.StatusCode == http.StatusOK {
 		c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
 		c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
-		responseText, completionTokens := h.stream.ProxyStream(c, resp, cred.Provider)
+		responseText, completionTokens := h.stream.ProxyStream(c, resp, cred.Provider, pctx.requestedModel)
 
 		// Pack completion tokens and responseText into a temporary json to pass back to the retry worker
 		type streamResult struct {
@@ -1026,6 +1030,7 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		if translated, ok := translateOllamaResponse(respBody); ok {
 			respBody = translated
 			respBody = h.normalizeNonStreamingReasoning(respBody)
+			respBody = h.rewriteResponseModel(respBody, pctx.requestedModel)
 			for key, vals := range resp.Header {
 				for _, val := range vals {
 					c.Writer.Header().Add(key, val)
@@ -1081,6 +1086,7 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		translated, contentType, trErr := translateOneMinAIResponse(pctx.model, respBody)
 		if trErr == nil && translated != nil {
 			translated = h.normalizeNonStreamingReasoning(translated)
+			translated = h.rewriteResponseModel(translated, pctx.requestedModel)
 			c.Writer.Header().Set("Content-Type", contentType)
 			c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
 			c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
@@ -1190,6 +1196,7 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		// Normalize inline <think> tags into structured reasoning_content so
 		// front-ends render a thinking panel instead of raw reasoning text.
 		respBody = h.normalizeNonStreamingReasoning(respBody)
+		respBody = h.rewriteResponseModel(respBody, pctx.requestedModel)
 	}
 
 	for key, vals := range resp.Header {
@@ -1953,4 +1960,17 @@ func generateRandomIP() string {
 		rand.Intn(256),
 		rand.Intn(256),
 	)
+}
+
+// rewriteResponseModel modifies the "model" field in a JSON response body to match the user's originally requested model name.
+func (h *Handler) rewriteResponseModel(respBody []byte, requestedModel string) []byte {
+	if len(respBody) == 0 || requestedModel == "" {
+		return respBody
+	}
+	if _, err := jsonparser.GetString(respBody, "model"); err == nil {
+		if updated, err := jsonparser.Set(respBody, []byte(`"`+requestedModel+`"`), "model"); err == nil {
+			return updated
+		}
+	}
+	return respBody
 }
