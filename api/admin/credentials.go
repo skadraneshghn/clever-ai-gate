@@ -945,17 +945,28 @@ func (h *CredentialHandler) TriggerReDiscovery(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	jobID := "sys-provider-rediscovery"
 
-	// Ensure the job definition exists in the database (idempotent upsert).
-	// This registers it as a manual-trigger-only singleton job.
-	var exists bool
-	_ = h.db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM jobs WHERE id = $1)", jobID).Scan(&exists)
-	if !exists {
-		_, _ = h.db.Exec(ctx, `
-			INSERT INTO jobs (id, name, description, job_type, schedule_type, payload, timezone, max_retries, timeout_seconds, is_enabled, is_singleton)
-			VALUES ($1, 'Provider Re-Discovery', 'Scans all registered provider endpoints for new AI models and auto-registers them', 'provider_rediscovery', 'manual', '{}'::jsonb, 'UTC', 0, 600, true, true)
-		`, jobID)
+	// Look up the re-discovery job by its job_type. If it doesn't exist yet,
+	// auto-create it as a manual-trigger-only singleton job with a proper UUID.
+	var jobID string
+	err := h.db.QueryRow(ctx,
+		`SELECT id FROM jobs WHERE job_type = 'provider_rediscovery' LIMIT 1`,
+	).Scan(&jobID)
+
+	if err != nil {
+		// Job definition doesn't exist yet — create it with a generated UUID.
+		err = h.db.QueryRow(ctx, `
+			INSERT INTO jobs (name, description, job_type, schedule_type, payload, timezone, max_retries, timeout_seconds, is_enabled, is_singleton)
+			VALUES ('Provider Re-Discovery', 'Scans all registered provider endpoints for new AI models and auto-registers them', 'provider_rediscovery', 'manual', '{}'::jsonb, 'UTC', 0, 600, true, true)
+			RETURNING id
+		`).Scan(&jobID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.ErrorResponse{
+				Error:   "Failed to create re-discovery job definition",
+				Details: err.Error(),
+			})
+			return
+		}
 	}
 
 	// Check if a run is already in progress (singleton guard)
@@ -1007,12 +1018,14 @@ func (h *CredentialHandler) GetReDiscoveryStatus(c *gin.Context) {
 	var startedAt *string
 	var finishedAt *string
 
+	// Join through the jobs table to find runs by job_type (avoids hardcoded UUID)
 	err := h.db.QueryRow(c.Request.Context(), `
-		SELECT id, status, output, error_message, duration_ms,
-		       started_at::text, finished_at::text
-		FROM job_runs
-		WHERE job_id = 'sys-provider-rediscovery'
-		ORDER BY created_at DESC LIMIT 1
+		SELECT jr.id, jr.status, jr.output, jr.error_message, jr.duration_ms,
+		       jr.started_at::text, jr.finished_at::text
+		FROM job_runs jr
+		JOIN jobs j ON j.id = jr.job_id
+		WHERE j.job_type = 'provider_rediscovery'
+		ORDER BY jr.created_at DESC LIMIT 1
 	`).Scan(&runID, &status, &result, &errorMsg, &durationMs, &startedAt, &finishedAt)
 
 	if err != nil {
