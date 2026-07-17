@@ -1,4 +1,4 @@
-﻿package credentials
+package credentials
 
 import (
 	"context"
@@ -157,10 +157,11 @@ func DiscoverAndRegisterGeminiModels(ctx context.Context, db *pgxpool.Pool, vaul
 		return 0, nil, fmt.Errorf("vault encryption failed: %w", err)
 	}
 
-	// 3. Find which pools already have this exact API key bound (dedup guard)
+	// 3. Find which pools already have this exact API key bound AND healthy (dedup guard).
+	// We intentionally exclude unhealthy credentials so re-discovery can reset them to healthy.
 	alreadyBound := make(map[int]bool)
 	rows, err := db.Query(ctx,
-		`SELECT pool_id, encrypted_key FROM credentials WHERE provider = $1 AND base_url = $2`,
+		`SELECT pool_id, encrypted_key FROM credentials WHERE provider = $1 AND base_url = $2 AND is_healthy = true`,
 		"gemini", geminiBaseURL,
 	)
 	if err == nil {
@@ -240,16 +241,29 @@ func DiscoverAndRegisterGeminiModels(ctx context.Context, db *pgxpool.Pool, vaul
 			}
 
 			if !alreadyBound[poolID] {
-				_, err = tx.Exec(ctx,
-					`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
-					 VALUES ($1, 'gemini', $2, $3, $4, true)
-					 ON CONFLICT DO NOTHING`,
-					poolID, encryptedKey, geminiBaseURL, weight,
+				// First: reset any existing credential for this pool (even if unhealthy)
+				// back to healthy, so a bad health-check probe doesn't permanently block the pool.
+				tag, updateErr := tx.Exec(ctx,
+					`UPDATE credentials SET is_healthy = true, last_error = NULL
+					 WHERE pool_id = $1 AND provider = 'gemini' AND base_url = $2`,
+					poolID, geminiBaseURL,
 				)
-				if err != nil {
-					return 0, nil, fmt.Errorf("failed to bind gemini credential to pool %s: %w", pattern, err)
+				if updateErr == nil && tag.RowsAffected() > 0 {
+					// Credential existed and was reset to healthy — no need to insert.
+					alreadyBound[poolID] = true
+				} else {
+					// No existing credential — insert a fresh one.
+					_, err = tx.Exec(ctx,
+						`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
+						 VALUES ($1, 'gemini', $2, $3, $4, true)
+						 ON CONFLICT DO NOTHING`,
+						poolID, encryptedKey, geminiBaseURL, weight,
+					)
+					if err != nil {
+						return 0, nil, fmt.Errorf("failed to bind gemini credential to pool %s: %w", pattern, err)
+					}
+					alreadyBound[poolID] = true
 				}
-				alreadyBound[poolID] = true
 			}
 
 			discoveredModels = append(discoveredModels, pattern)

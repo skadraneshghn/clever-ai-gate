@@ -390,7 +390,8 @@ func (h *PoolHandler) TestCredential(c *gin.Context) {
 		testModel := pool.ModelPattern
 		testModel = strings.TrimPrefix(testModel, "gemini/")
 		if testModel == "" || strings.Contains(testModel, "*") {
-			testModel = "gemini-2.5-flash"
+			// Default to a real, non-deprecated model available on all accounts
+			testModel = "gemini-3.5-flash"
 		}
 
 		url := fmt.Sprintf("%s/v1beta/models/%s:generateContent?key=%s",
