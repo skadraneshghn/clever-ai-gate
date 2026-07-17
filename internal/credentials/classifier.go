@@ -22,7 +22,7 @@ type ModelCapabilities struct {
 // The algorithm performs a single lowercase pass and checks substring membership.
 // It allocates no heap objects other than the returned struct.
 //
-// Rule sets (applied to lowercase model ID):
+// Rule y sets (applied to lowercase model ID):
 //
 //	reasoning:        o1-, o3-, o4-, -r1, thinking, reasoning, nemotron, qwq, deepthink
 //	vision:           vision, llava, pixtral, gpt-4o, claude-3, gemini, qvq, -vl, vl-, bakllava
@@ -80,117 +80,117 @@ func (c ModelCapabilities) ToMap() map[string]bool {
 
 func hasReasoning(lower string) bool {
 	return containsAny(lower,
-		"o1-", "o3-", "o4-",   // OpenAI o-series
-		"-r1", "r1-",          // DeepSeek-R1 and variants
-		"thinking",            // QwQ-32B-Preview, etc.
-		"reasoning",           // explicit reasoning models
-		"nemotron",            // NVIDIA reasoning
-		"qwq",                 // Qwen reasoning
-		"deepthink",           // DeepThink variants
-		"reflection",          // Reflection-70B
+		"o1-", "o3-", "o4-", // OpenAI o-series
+		"-r1", "r1-", // DeepSeek-R1 and variants
+		"thinking",   // QwQ-32B-Preview, etc.
+		"reasoning",  // explicit reasoning models
+		"nemotron",   // NVIDIA reasoning
+		"qwq",        // Qwen reasoning
+		"deepthink",  // DeepThink variants
+		"reflection", // Reflection-70B
 	)
 }
 
 func hasVision(lower string) bool {
 	return containsAny(lower,
-		"vision",              // generic vision suffix
-		"llava",               // LLaVA family
-		"pixtral",             // Mistral vision
-		"gpt-4o",              // GPT-4o is multimodal
-		"claude-3",            // Claude 3 family supports vision
-		"gemini",              // Gemini is multimodal
-		"qvq",                 // Qwen VQA
-		"-vl",                 // InternVL, Qwen-VL style
-		"vl-",                 // VL prefix
-		"bakllava",            // BakLLaVA
-		"cogvlm",              // CogVLM
-		"moondream",           // Moondream
-		"idefics",             // IDEFICS
-		"minicpm-v",           // MiniCPM-V
-		"phi-3-vision",        // Phi-3 Vision
-		"internvl",            // InternVL
+		"vision",       // generic vision suffix
+		"llava",        // LLaVA family
+		"pixtral",      // Mistral vision
+		"gpt-4o",       // GPT-4o is multimodal
+		"claude-3",     // Claude 3 family supports vision
+		"gemini",       // Gemini is multimodal
+		"qvq",          // Qwen VQA
+		"-vl",          // InternVL, Qwen-VL style
+		"vl-",          // VL prefix
+		"bakllava",     // BakLLaVA
+		"cogvlm",       // CogVLM
+		"moondream",    // Moondream
+		"idefics",      // IDEFICS
+		"minicpm-v",    // MiniCPM-V
+		"phi-3-vision", // Phi-3 Vision
+		"internvl",     // InternVL
 	)
 }
 
 func hasImageGeneration(lower string) bool {
 	return containsAny(lower,
-		"dall-e",              // OpenAI DALL-E
-		"stable-diffusion",   // Stability AI
-		"flux",                // Black Forest Labs FLUX
-		"midjourney",          // MidJourney
-		"imagen",              // Google Imagen
-		"sdxl",                // SDXL variants
-		"wanx",                // Alibaba Wanx
-		"kolors",              // Kolors
-		"playground",          // Playground AI
-		"dreamshaper",         // DreamShaper
-		"sd-",                 // SD-prefix models
-		"ideogram",            // Ideogram
-		"recraft",             // Recraft
-		"sd-3.5",              // Stable Diffusion 3.5
-		"stable-image",        // Stability AI stable-image
+		"dall-e",           // OpenAI DALL-E
+		"stable-diffusion", // Stability AI
+		"flux",             // Black Forest Labs FLUX
+		"midjourney",       // MidJourney
+		"imagen",           // Google Imagen
+		"sdxl",             // SDXL variants
+		"wanx",             // Alibaba Wanx
+		"kolors",           // Kolors
+		"playground",       // Playground AI
+		"dreamshaper",      // DreamShaper
+		"sd-",              // SD-prefix models
+		"ideogram",         // Ideogram
+		"recraft",          // Recraft
+		"sd-3.5",           // Stable Diffusion 3.5
+		"stable-image",     // Stability AI stable-image
 	)
 }
 
 func hasAudio(lower string) bool {
 	return containsAny(lower,
-		"whisper",             // OpenAI Whisper transcription
-		"tts",                 // Text-to-speech
-		"audio",               // Generic audio
-		"speech",              // Speech processing
-		"voix",                // Voix TTS
-		"eleven",              // ElevenLabs style
-		"bark",                // Bark TTS
-		"coqui",               // Coqui TTS
+		"whisper", // OpenAI Whisper transcription
+		"tts",     // Text-to-speech
+		"audio",   // Generic audio
+		"speech",  // Speech processing
+		"voix",    // Voix TTS
+		"eleven",  // ElevenLabs style
+		"bark",    // Bark TTS
+		"coqui",   // Coqui TTS
 	)
 }
 
 func hasVideo(lower string) bool {
 	return containsAny(lower,
-		"kling",               // Kling video
-		"hunyuan",             // Hunyuan video
-		"veo3",                // Google Veo3
-		"sora",                // OpenAI Sora
-		"hailuo",              // Hailuo video
-		"pika",                // Pika video
-		"luma",                // Luma video
-		"tongyi",              // Tongyi video
-		"wanx",                // Alibaba Wanx (can be image or video)
-		"animatediff",         // AnimateDiff
-		"text-to-video",       // Generic text-to-video
+		"kling",         // Kling video
+		"hunyuan",       // Hunyuan video
+		"veo3",          // Google Veo3
+		"sora",          // OpenAI Sora
+		"hailuo",        // Hailuo video
+		"pika",          // Pika video
+		"luma",          // Luma video
+		"tongyi",        // Tongyi video
+		"wanx",          // Alibaba Wanx (can be image or video)
+		"animatediff",   // AnimateDiff
+		"text-to-video", // Generic text-to-video
 	)
 }
 
 func hasCode(lower string) bool {
 	return containsAny(lower,
-		"codex",               // OpenAI Codex
-		"deepseek-coder",      // DeepSeek Coder
-		"qwen-coder",          // Qwen Coder
-		"starcoder",           // StarCoder family
-		"magicoder",           // MagicCoder
-		"codellama",           // Code Llama
-		"codegemma",           // CodeGemma
-		"phind-codellama",     // Phind CodeLlama
-		"wizardcoder",         // WizardCoder
-		"code-",               // Generic code prefix (code-davinci, etc.)
-		"-coder",              // Generic coder suffix
-		"santacoder",          // SantaCoder
+		"codex",           // OpenAI Codex
+		"deepseek-coder",  // DeepSeek Coder
+		"qwen-coder",      // Qwen Coder
+		"starcoder",       // StarCoder family
+		"magicoder",       // MagicCoder
+		"codellama",       // Code Llama
+		"codegemma",       // CodeGemma
+		"phind-codellama", // Phind CodeLlama
+		"wizardcoder",     // WizardCoder
+		"code-",           // Generic code prefix (code-davinci, etc.)
+		"-coder",          // Generic coder suffix
+		"santacoder",      // SantaCoder
 	)
 }
 
 func hasEmbedding(lower string) bool {
 	return containsAny(lower,
-		"embed",               // Generic embed
-		"embedding",           // Generic embedding
-		"text-embedding",      // OpenAI text-embedding-*
-		"e5-",                 // E5 embedding family
-		"bge-",                // BGE embedding family
-		"gte-",                // GTE embedding family
-		"nomic-embed",         // Nomic Embed
-		"instructor",          // Instructor embeddings
-		"sentence",            // Sentence transformers
-		"all-minilm",          // MiniLM embeddings
-		"jina-embed",          // Jina embeddings
+		"embed",          // Generic embed
+		"embedding",      // Generic embedding
+		"text-embedding", // OpenAI text-embedding-*
+		"e5-",            // E5 embedding family
+		"bge-",           // BGE embedding family
+		"gte-",           // GTE embedding family
+		"nomic-embed",    // Nomic Embed
+		"instructor",     // Instructor embeddings
+		"sentence",       // Sentence transformers
+		"all-minilm",     // MiniLM embeddings
+		"jina-embed",     // Jina embeddings
 	)
 }
 
