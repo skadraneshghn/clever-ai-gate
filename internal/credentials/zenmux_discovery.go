@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -30,7 +31,21 @@ func DiscoverAndRegisterZenMuxModels(ctx context.Context, db *pgxpool.Pool, vaul
 	}
 
 	// 1. Validate the API key and fetch the models list
-	client := &http.Client{Timeout: 15 * time.Second}
+	dialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return DialContextResilient(ctx, dialer, network, addr)
+		},
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   15 * time.Second,
+	}
 	req, err := http.NewRequestWithContext(ctx, "GET", ZenMuxBaseURL+"/models", nil)
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to build ZenMux model discovery request: %w", err)

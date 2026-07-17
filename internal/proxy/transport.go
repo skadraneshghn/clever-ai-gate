@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/skadraneshghn/clever-ai-gate/internal/config"
+	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
 	"go.uber.org/zap"
 )
 
@@ -44,11 +45,14 @@ func BuildOptimizedTransport(cfg *config.Config, logger *zap.Logger) (*http.Tran
 
 		// DialContext handles plain TCP (non-TLS) connections, e.g. local
 		// Ollama instances. No IP interception — local hosts don't need it.
-		DialContext: (&net.Dialer{
-			Timeout:   cfg.DialTimeout,
-			KeepAlive: cfg.KeepAlive,
-			Control:   applySockopts,
-		}).DialContext,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dialer := &net.Dialer{
+				Timeout:   cfg.DialTimeout,
+				KeepAlive: cfg.KeepAlive,
+				Control:   applySockopts,
+			}
+			return credentials.DialContextResilient(ctx, dialer, network, addr)
+		},
 
 		// DialTLSContext handles all HTTPS connections. This is where we
 		// intercept the address to route through the probed fastest edge IP
@@ -107,7 +111,7 @@ func dialTLS(
 		Control:   control,
 	}
 
-	rawConn, err := dialer.DialContext(ctx, network, addr)
+	rawConn, err := credentials.DialContextResilient(ctx, dialer, network, addr)
 	if err != nil {
 		return nil, err
 	}
