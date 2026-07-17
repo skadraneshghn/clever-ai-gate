@@ -1,6 +1,7 @@
 package credentials
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -34,9 +35,9 @@ func TestIsNoisyPath(t *testing.T) {
 		{"function-calling", true},
 		{"reasoning", true},
 		{"vision", true},
-		{"openai", true},           // single segment — not provider/model
-		{"gpt-5", true},            // single segment — no provider prefix
-		{"models/index", true},     // navigation
+		{"openai", true},       // single segment — not provider/model
+		{"gpt-5", true},        // single segment — no provider prefix
+		{"models/index", true}, // navigation
 	}
 
 	for _, tt := range tests {
@@ -50,11 +51,11 @@ func TestIsNoisyPath(t *testing.T) {
 // TestInferCapabilitiesFromTask verifies capability inference from docs task labels.
 func TestInferCapabilitiesFromTask(t *testing.T) {
 	tests := []struct {
-		task     string
-		wantImg  bool
-		wantEmb  bool
-		wantAud  bool
-		wantVis  bool
+		task    string
+		wantImg bool
+		wantEmb bool
+		wantAud bool
+		wantVis bool
 	}{
 		{"Text Generation", false, false, false, false},
 		{"Text-to-Image", true, false, false, false},
@@ -89,13 +90,12 @@ func TestInferCapabilitiesFromTask(t *testing.T) {
 func TestCfDocsModelRegex(t *testing.T) {
 	// Simulate the kind of content that appears in the docs manifest
 	sampleContent := `
-[...text...](https://developers.cloudflare.com/ai/models/@cf/meta/llama-3.1-8b-instruct/)
-[...text...](https://developers.cloudflare.com/ai/models/openai/gpt-5/)
-[...text...](https://developers.cloudflare.com/ai/models/@cf/moonshotai/kimi-k2.7-code/)
-[...text...](https://developers.cloudflare.com/ai/models/krea/krea-2-large/)
-[...text...](https://developers.cloudflare.com/ai/models/anthropic/claude-sonnet-5/)
-[...text...](https://developers.cloudflare.com/ai/models/google/gemini-2.5-pro/)
-[skip navigation link](https://developers.cloudflare.com/ai/models/)
+[text](https://developers.cloudflare.com/ai/models/@cf/meta/llama-3.1-8b-instruct/)
+[text](https://developers.cloudflare.com/ai/models/openai/gpt-5/)
+[text](https://developers.cloudflare.com/ai/models/@cf/moonshotai/kimi-k2.7-code/)
+[text](https://developers.cloudflare.com/ai/models/krea/krea-2-large/)
+[text](https://developers.cloudflare.com/ai/models/anthropic/claude-sonnet-5/)
+[text](https://developers.cloudflare.com/ai/models/google/gemini-2.5-pro/)
 `
 
 	matches := cfDocsModelRegex.FindAllStringSubmatch(sampleContent, -1)
@@ -164,22 +164,15 @@ func TestCloudflareTaskCapabilities(t *testing.T) {
 // real Cloudflare docs manifest and verifies at least 50 models are returned
 // including some well-known ones.
 //
-// This test is skipped in CI by convention — it requires internet access.
+// Skipped by default — requires internet access.
 // Run manually with: go test -v -run TestFetchCloudflareDocModels_LiveSmoke
 func TestFetchCloudflareDocModels_LiveSmoke(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping live network test in short mode")
 	}
 
-	ctx := t
-	_ = ctx // silence unused warning — use context.Background() below
-
-	import_ctx := "context"
-	_ = import_ctx
-
-	// Use a real HTTP call to the live manifest
-	// This validates the regex against the actual current content
-	models, err := fetchCloudflareDocModels(nil)
+	ctx := context.Background()
+	models, err := fetchCloudflareDocModels(ctx)
 	if err != nil {
 		t.Fatalf("fetchCloudflareDocModels failed: %v", err)
 	}
@@ -203,15 +196,14 @@ func TestFetchCloudflareDocModels_LiveSmoke(t *testing.T) {
 
 	for _, id := range mustHave {
 		if !found[id] {
-			// Print all discovered for debugging
 			var ids []string
 			for _, m := range models {
 				ids = append(ids, m.ID)
 			}
-			t.Errorf("expected model %q not found in results.\nAll discovered: %s",
+			t.Errorf("expected model %q not found in discovered results.\nAll discovered: %s",
 				id, strings.Join(ids, ", "))
 		}
 	}
 
-	t.Logf("discovered %d models from Cloudflare docs manifest", len(models))
+	t.Logf("✅ discovered %d models from Cloudflare docs manifest", len(models))
 }
