@@ -310,7 +310,7 @@ func newBulkPoolHealthCheckExecutor(db *pgxpool.Pool, rdb *redis.Client, vault *
 				// Apply active cooldown inside Redis if rate-limited or transient-failing
 				if cooldownInRedis && rdb != nil {
 					cooldownKey := fmt.Sprintf("gate:key:%d:cooldown", c.ID)
-					rdb.Set(ctx, cooldownKey, "rate_limited_backoff", 5*time.Minute)
+					rdb.Set(ctx, cooldownKey, "rate_limited_backoff", 30*time.Second)
 				}
 
 				// Clear active cooldown if fully healthy

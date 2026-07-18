@@ -690,7 +690,7 @@ func (h *Handler) geminiSDKStream(
 		)
 
 		// Cooldown the failed key locally
-		cooldownDuration := 5 * time.Minute
+		cooldownDuration := 30 * time.Second
 		pctx.pool.PenalizeToken(pctx.credential.Index, cooldownDuration)
 		h.broadcaster.PublishPenalize(pctx.pool.ModelPattern, pctx.credential.Credential.ID, pctx.credential.Index, time.Now().Add(cooldownDuration))
 
