@@ -471,17 +471,25 @@ func normalizeGeminiModel(model string) string {
 // sanitizeGeminiToolSchema strips JSON-Schema draft keywords that Google AI
 // Studio's strict OpenAPI 3.0 schema validator rejects.
 //
-// Google's functionDeclarations[].parameters and responseSchema fields accept
-// only the OpenAPI 3.0 subset of JSON Schema. JSON-Schema-only keywords such as
-// "$schema" (the draft version marker emitted by default by coding agents like
-// Kilo Code and Cline) cause a 400 "Invalid value at
-// 'functionDeclarations[i].parameters' (... does not match the expected
-// schema)". Removing "$schema" is always safe: it is version metadata, not a
-// structural constraint, so its removal cannot change the meaning of a schema.
+// Google's functionDeclarations[].parameters and responseSchema fields are
+// parsed as a fixed-field OpenAPI 3.0 Schema object. Any JSON Schema draft
+// keyword that is not a member of that object is rejected wholesale with
+// HTTP 400:
 //
-// The function recurses through nested objects and arrays so "$schema" keys at
-// any depth (e.g. inside properties.*.items) are removed. Non-object input
-// (booleans, primitives, invalid JSON) is returned unchanged.
+//	Invalid JSON payload received. Unknown name "<keyword>" at
+//	'tools[0].function_declarations[i].parameters...': Cannot find field.
+//
+// Coding agents (Kilo Code, Cline, ...) emit strict OpenAI-compliant schemas
+// that freely use these draft keywords — most notably "exclusiveMinimum" and
+// "exclusiveMaximum", but also "$schema", "$ref", "const", "patternProperties",
+// "if/then/else", "examples", etc. sanitizeGeminiToolSchema deletes them
+// recursively before the payload is forwarded. Removing them is safe: Google
+// cannot enforce them anyway, and the OpenAPI 3.0 keywords that DO carry
+// validation semantics (type, format, properties, items, required, enum,
+// minimum, maximum, minLength, maxLength, pattern, additionalProperties,
+// anyOf/oneOf/allOf, ...) are intentionally preserved.
+//
+// Non-object input (booleans, primitives, invalid JSON) is returned unchanged.
 func sanitizeGeminiToolSchema(raw json.RawMessage) json.RawMessage {
 	if len(raw) == 0 || string(raw) == "null" {
 		return raw
@@ -500,15 +508,45 @@ func sanitizeGeminiToolSchema(raw json.RawMessage) json.RawMessage {
 	return b
 }
 
-// stripSchemaKeywords recursively deletes the "$schema" key from any map node
-// reachable from n. It reports whether any modification was made.
+// geminiUnsupportedSchemaKeywords is the set of JSON Schema draft keywords that
+// Google AI Studio's functionDeclarations/responseSchema parser does not model.
+// These are stripped recursively (see stripSchemaKeywords) to avoid the 400
+// "Unknown name ... Cannot find field" rejection. OpenAPI 3.0 Schema keywords
+// are deliberately excluded so real validation constraints survive.
+var geminiUnsupportedSchemaKeywords = map[string]bool{
+	// Draft version / reference machinery
+	"$schema": true, "$id": true, "$ref": true, "$defs": true,
+	"definitions": true, "$comment": true, "$anchor": true,
+	"$dynamicRef": true, "$dynamicAnchor": true,
+	// Numeric bounds expressed as separate draft keywords (OAS 3.0 uses
+	// minimum/maximum only; Google rejects the exclusive* variants).
+	"exclusiveMinimum": true, "exclusiveMaximum": true,
+	// Draft-only constraint / conditional keywords
+	"const": true, "contains": true, "minContains": true, "maxContains": true,
+	"propertyNames": true, "patternProperties": true,
+	"dependencies": true, "dependentRequired": true, "dependentSchemas": true,
+	"if": true, "then": true, "else": true,
+	"unevaluatedProperties": true, "unevaluatedItems": true,
+	// Content annotation (OAS 3.0 has no content*; Google rejects them)
+	"contentEncoding": true, "contentMediaType": true, "contentSchema": true,
+	// JSON Schema uses "examples" (plural); OAS 3.0 uses "example" (singular).
+	"examples": true,
+}
+
+// stripSchemaKeywords recursively deletes every key listed in
+// geminiUnsupportedSchemaKeywords from any map reachable from n, descending
+// through nested objects and arrays so unsupported keywords at any depth (e.g.
+// inside properties.*.items or anyOf[] entries) are removed. It reports
+// whether any modification was made.
 func stripSchemaKeywords(n *any) bool {
 	switch v := (*n).(type) {
 	case map[string]any:
 		changed := false
-		if _, ok := v["$schema"]; ok {
-			delete(v, "$schema")
-			changed = true
+		for k := range v {
+			if geminiUnsupportedSchemaKeywords[k] {
+				delete(v, k)
+				changed = true
+			}
 		}
 		for k, val := range v {
 			vv := val
