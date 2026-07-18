@@ -157,22 +157,24 @@ func DiscoverAndRegisterGeminiModels(ctx context.Context, db *pgxpool.Pool, vaul
 		return 0, nil, fmt.Errorf("vault encryption failed: %w", err)
 	}
 
-	// 3. Find which pools already have this exact API key bound AND healthy (dedup guard).
-	// We intentionally exclude unhealthy credentials so re-discovery can reset them to healthy.
-	alreadyBound := make(map[int]bool)
+	// 3. Find which pools already have THIS exact API key bound (healthy OR unhealthy),
+	// tracking the credential row id per pool. A pool that already holds a DIFFERENT key
+	// is intentionally NOT marked here, so the new key gets appended (round-robin) instead
+	// of overwriting the existing one — this is what allows many keys to coexist per pool.
+	thisKeyCredIDByPool := make(map[int]int)
 	rows, err := db.Query(ctx,
-		`SELECT pool_id, encrypted_key FROM credentials WHERE provider = $1 AND base_url = $2 AND is_healthy = true`,
+		`SELECT id, pool_id, encrypted_key FROM credentials WHERE provider = $1 AND base_url = $2`,
 		"gemini", geminiBaseURL,
 	)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
-			var poolID int
+			var credID, poolID int
 			var encKey string
-			if err := rows.Scan(&poolID, &encKey); err == nil {
+			if err := rows.Scan(&credID, &poolID, &encKey); err == nil {
 				decrypted, decErr := vault.Decrypt(encKey)
 				if decErr == nil && decrypted == apiKey {
-					alreadyBound[poolID] = true
+					thisKeyCredIDByPool[poolID] = credID
 				}
 			}
 		}
@@ -240,29 +242,26 @@ func DiscoverAndRegisterGeminiModels(ctx context.Context, db *pgxpool.Pool, vaul
 				return 0, nil, fmt.Errorf("failed to upsert model pool for %s: %w", pattern, err)
 			}
 
-			if !alreadyBound[poolID] {
-				// First: reset any existing credential for this pool (even if unhealthy)
-				// back to healthy, so a bad health-check probe doesn't permanently block the pool.
-				tag, updateErr := tx.Exec(ctx,
-					`UPDATE credentials SET is_healthy = true, last_error = NULL
-					 WHERE pool_id = $1 AND provider = 'gemini' AND base_url = $2`,
-					poolID, geminiBaseURL,
+			if credID, already := thisKeyCredIDByPool[poolID]; already {
+				// This exact key is already bound to this pool. Heal its own row in place so a
+				// prior failed health-check probe doesn't permanently block the pool. Scoped to
+				// THIS row only — never touch other keys' rows, never insert a duplicate.
+				if _, err = tx.Exec(ctx,
+					`UPDATE credentials SET is_healthy = true, last_error = NULL WHERE id = $1`,
+					credID,
+				); err != nil {
+					return 0, nil, fmt.Errorf("failed to heal gemini credential for pool %s: %w", pattern, err)
+				}
+			} else {
+				// This key is not yet in this pool — append a new credential so multiple distinct
+				// Google AI Studio keys coexist and load-balance together in the same pool.
+				_, err = tx.Exec(ctx,
+					`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
+				 VALUES ($1, 'gemini', $2, $3, $4, true)`,
+					poolID, encryptedKey, geminiBaseURL, weight,
 				)
-				if updateErr == nil && tag.RowsAffected() > 0 {
-					// Credential existed and was reset to healthy — no need to insert.
-					alreadyBound[poolID] = true
-				} else {
-					// No existing credential — insert a fresh one.
-					_, err = tx.Exec(ctx,
-						`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
-						 VALUES ($1, 'gemini', $2, $3, $4, true)
-						 ON CONFLICT DO NOTHING`,
-						poolID, encryptedKey, geminiBaseURL, weight,
-					)
-					if err != nil {
-						return 0, nil, fmt.Errorf("failed to bind gemini credential to pool %s: %w", pattern, err)
-					}
-					alreadyBound[poolID] = true
+				if err != nil {
+					return 0, nil, fmt.Errorf("failed to bind gemini credential to pool %s: %w", pattern, err)
 				}
 			}
 
