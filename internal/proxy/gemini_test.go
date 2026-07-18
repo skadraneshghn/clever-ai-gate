@@ -207,3 +207,92 @@ func TestCoerceToJSONObject(t *testing.T) {
 		}
 	}
 }
+
+func TestIsGemini3Model(t *testing.T) {
+	cases := []struct{ model string; want bool }{
+		{"gemini-3.5-flash", true},
+		{"gemini-3-pro-preview", true},
+		{"gemini-3.1-flash-lite", true},
+		{"gemini-3-flash-preview", true},
+		{"Gemini-3.5-Flash", true}, // case-insensitive
+		{"gemini-2.5-flash", false},
+		{"gemini-2.5-pro", false},
+		{"gemini-1.5-pro", false},
+		{"gemini-2.0-flash", false},
+		{"gpt-4o", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isGemini3Model(c.model); got != c.want {
+			t.Errorf("isGemini3Model(%q) = %v, want %v", c.model, got, c.want)
+		}
+	}
+}
+
+func TestTranspileOpenAIToGemini_Gemini3InjectsThoughtSignatureBypass(t *testing.T) {
+	// Gemini 3 attaches an opaque thought_signature to each functionCall it
+	// emits. OpenAI-only clients (Kilo Code, Cline) drop it and cannot replay
+	// it, causing Gemini 3 to 400 the next turn. The gateway must inject the
+	// bypass sentinel on historical assistant functionCall parts.
+	body := []byte(`{"model":"gemini-3.5-flash","messages":[` +
+		`{"role":"user","content":"list files"},` +
+		`{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_files","arguments":"{\"path\":\"/src\"}"}}]},` +
+		`{"role":"tool","tool_call_id":"call_1","content":"[\"a.go\",\"b.go\"]"}` +
+		`]}`)
+	out, err := transpileOpenAIToGemini(body)
+	if err != nil {
+		t.Fatalf("transpile failed: %v", err)
+	}
+	// The sentinel must be present at the Part level (sibling of functionCall),
+	// not nested inside the functionCall object.
+	if !bytes.Contains(out, []byte(`"thoughtSignature":"skip_thought_signature_validator"`)) {
+		t.Errorf("expected thoughtSignature sentinel on Gemini 3 functionCall part, got %s", out)
+	}
+	// The sentinel is a Part-level field; it must NOT appear inside functionCall.
+	if bytes.Contains(out, []byte(`"functionCall":{"name":"list_files","args":{"path":"/src"},"thoughtSignature"`)) {
+		t.Errorf("thoughtSignature must be at Part level, not inside functionCall, got %s", out)
+	}
+	// functionResponse parts must NOT carry the sentinel (they never had one).
+	if bytes.Contains(out, []byte(`"functionResponse":{"name":"list_files","response":{"output":["a.go","b.go"]},"thoughtSignature"`)) {
+		t.Errorf("thoughtSignature must not leak into functionResponse, got %s", out)
+	}
+}
+
+func TestTranspileOpenAIToGemini_Gemini25OmitsThoughtSignatureBypass(t *testing.T) {
+	// Pre-Gemini-3 models do not enforce thought_signature validation, so the
+	// sentinel must NOT be injected to keep the payload minimal.
+	body := []byte(`{"model":"gemini-2.5-flash","messages":[` +
+		`{"role":"user","content":"list files"},` +
+		`{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_files","arguments":"{}"}}]},` +
+		`{"role":"tool","tool_call_id":"call_1","content":"ok"}` +
+		`]}`)
+	out, err := transpileOpenAIToGemini(body)
+	if err != nil {
+		t.Fatalf("transpile failed: %v", err)
+	}
+	if bytes.Contains(out, []byte("thoughtSignature")) {
+		t.Errorf("expected no thoughtSignature for Gemini 2.5, got %s", out)
+	}
+}
+
+func TestTranspileOpenAIToGemini_Gemini3ThoughtSignatureOnEveryFunctionCall(t *testing.T) {
+	// Multiple historical assistant turns with tool_calls must each receive the
+	// sentinel, not just the most recent one.
+	body := []byte(`{"model":"gemini-3.5-flash","messages":[` +
+		`{"role":"user","content":"go"},` +
+		`{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"fn_a","arguments":"{}"}}]},` +
+		`{"role":"tool","tool_call_id":"c1","content":"1"},` +
+		`{"role":"assistant","content":null,"tool_calls":[{"id":"c2","type":"function","function":{"name":"fn_b","arguments":"{}"}}]},` +
+		`{"role":"tool","tool_call_id":"c2","content":"2"}` +
+		`]}`)
+	out, err := transpileOpenAIToGemini(body)
+	if err != nil {
+		t.Fatalf("transpile failed: %v", err)
+	}
+	// Count sentinel occurrences — should match the number of functionCall
+	// parts (2 here: fn_a and fn_b).
+	got := bytes.Count(out, []byte(`"thoughtSignature":"skip_thought_signature_validator"`))
+	if got != 2 {
+		t.Errorf("expected 2 thoughtSignature sentinels (one per historical functionCall), got %d: %s", got, out)
+	}
+}

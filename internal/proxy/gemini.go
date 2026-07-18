@@ -34,6 +34,16 @@ type geminiPart struct {
 	FileData         *geminiFileData         `json:"fileData,omitempty"`
 	FunctionCall     *geminiFunctionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *geminiFunctionResponse `json:"functionResponse,omitempty"`
+	// ThoughtSignature carries Google's opaque reasoning-trail token.
+	// Gemini 3 models attach a thought_signature to every functionCall part
+	// they emit so the model can validate its internal reasoning state across
+	// turns. OpenAI's tool_calls schema has no slot for it, so OpenAI-only
+	// clients (Kilo Code, Cline, …) discard it on receipt and cannot replay it
+	// on the next turn. Gemini 3 then rejects the history with HTTP 400
+	// INVALID_ARGUMENT. For Gemini 3 models we inject the official bypass
+	// sentinel (geminiThoughtSignatureBypass) so the validator is satisfied
+	// without the gateway needing to cache authentic signatures.
+	ThoughtSignature string `json:"thoughtSignature,omitempty"`
 }
 
 type geminiInlineData struct {
@@ -104,6 +114,22 @@ var defaultGeminiSafetySettings = []geminiSafety{
 	{Category: "HARM_CATEGORY_DANGEROUS_CONTENT", Threshold: "BLOCK_ONLY_HIGH"},
 	{Category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", Threshold: "BLOCK_ONLY_HIGH"},
 	{Category: "HARM_CATEGORY_HARASSMENT", Threshold: "BLOCK_ONLY_HIGH"},
+}
+
+// geminiThoughtSignatureBypass is Google's official sentinel value that tells
+// a Gemini 3 model to skip thought_signature validation for a part. It is
+// injected on historical functionCall parts (which OpenAI-only clients cannot
+// round-trip) so the validator is satisfied without the gateway caching
+// authentic per-turn signatures.
+const geminiThoughtSignatureBypass = "skip_thought_signature_validator"
+
+// isGemini3Model reports whether model is a Gemini 3.x family member. Gemini 3
+// is the first generation that strictly validates thought_signature presence on
+// replayed functionCall parts; earlier generations (1.5, 2.5) accept the field
+// but do not enforce it, so the sentinel is only injected for 3.x to keep the
+// payload minimal for older models.
+func isGemini3Model(model string) bool {
+	return strings.HasPrefix(strings.ToLower(model), "gemini-3")
 }
 
 // ─── OpenAI Request Structures (for parsing incoming body) ───────────────────
@@ -200,6 +226,11 @@ func transpileOpenAIToGemini(openAIBody []byte) ([]byte, error) {
 	}
 
 	// ── Conversation messages → contents ─────────────────────────────────────
+	// Gemini 3.x strictly validates thought_signature presence on replayed
+	// functionCall parts. OpenAI-only clients cannot round-trip the signature,
+	// so for Gemini 3 models we inject the bypass sentinel on every historical
+	// assistant functionCall (see buildGeminiAssistantParts).
+	injectThoughtSig := isGemini3Model(req.Model)
 	var prevRole string
 	// toolCallNames maps tool_call_id → function name, populated from
 	// assistant tool_calls so that later "tool" result messages can resolve the
@@ -237,7 +268,7 @@ func transpileOpenAIToGemini(openAIBody []byte) ([]byte, error) {
 					toolCallNames[tc.ID] = tc.Function.Name
 				}
 			}
-			parts, err := buildGeminiAssistantParts(msg)
+			parts, err := buildGeminiAssistantParts(msg, injectThoughtSig)
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse assistant message: %w", err)
 			}
@@ -674,7 +705,14 @@ func convertImageURL(url string) (geminiPart, error) {
 
 // buildGeminiAssistantParts converts an OpenAI assistant message (text content
 // and/or tool_calls) into Gemini parts.
-func buildGeminiAssistantParts(msg openAIMessage) ([]geminiPart, error) {
+//
+// When injectThoughtSig is true (Gemini 3 models), every functionCall part
+// receives the thought_signature bypass sentinel. Gemini 3 attaches an opaque
+// reasoning signature to each functionCall it emits and rejects history
+// replays that omit it with HTTP 400. OpenAI's tool_calls schema has no field
+// for it, so OpenAI-only clients (Kilo Code, Cline, …) drop it and cannot
+// echo it back. The sentinel satisfies the validator statelessly.
+func buildGeminiAssistantParts(msg openAIMessage, injectThoughtSig bool) ([]geminiPart, error) {
 	var parts []geminiPart
 	text := extractTextContent(msg.Content)
 	if text != "" {
@@ -688,12 +726,16 @@ func buildGeminiAssistantParts(msg openAIMessage) ([]geminiPart, error) {
 		// always emit object arguments, but coerce defensively so a stray
 		// array/string argument cannot 400 the whole request.
 		argsRaw := coerceToJSONObject(json.RawMessage(tc.Function.Arguments))
-		parts = append(parts, geminiPart{
+		part := geminiPart{
 			FunctionCall: &geminiFunctionCall{
 				Name: tc.Function.Name,
 				Args: argsRaw,
 			},
-		})
+		}
+		if injectThoughtSig {
+			part.ThoughtSignature = geminiThoughtSignatureBypass
+		}
+		parts = append(parts, part)
 	}
 	return parts, nil
 }
