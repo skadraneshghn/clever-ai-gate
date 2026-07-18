@@ -1004,13 +1004,32 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		bodyBytes = sanitizeNvidiaRequest(bodyBytes)
 	}
 
-	// --- Gemini AI Studio Request Body Transpilation ---
+	// --- Gemini AI Studio: SDK-native path ---
+	// Replaces the raw HTTP proxy path for Gemini. The official google.golang.org/genai
+	// SDK handles auth, URL construction, serialization, chunked stream framing, and
+	// thought_signature bypass for Gemini 3+ models. executeGeminiWithSDK writes
+	// the response directly to c.Writer and returns a telemetry blob as errBody.
+	// The early return naturally bypasses URL construction, h.client.Do, and the old
+	// Gemini response translation below — those blocks remain as dead code for rollback.
+	if cred.Provider == "gemini" {
+		sdkStatus, sdkBody, sdkErr := h.executeGeminiWithSDK(c, pctx, cred.APIKey, bodyBytes)
+		if sdkErr != nil {
+			h.logger.Error("gemini sdk executor error",
+				zap.String("model", pctx.model),
+				zap.Error(sdkErr),
+			)
+			return http.StatusInternalServerError, "sdk://gemini", nil, nil
+		}
+		return sdkStatus, "sdk://gemini", sdkBody, nil
+	}
+
+	// --- Gemini AI Studio Request Body Transpilation (LEGACY — unreachable via SDK path) ---
 	// Google AI Studio uses a fundamentally different request format from OpenAI.
 	// The transpiler converts the entire body — messages, tools, generation config,
 	// thinking budget, and safety settings — into Gemini's native generateContent
 	// format. This runs for BOTH the prefixed ("gemini/...") and clean ("gemini-2.5-pro")
 	// routing forms since it is gated on the resolved credential's provider.
-	if cred.Provider == "gemini" {
+	if cred.Provider == "gemini_legacy_disabled" {
 		geminiBody, trErr := transpileOpenAIToGemini(bodyBytes)
 		if trErr != nil {
 			h.logger.Error("gemini request transpilation failed",

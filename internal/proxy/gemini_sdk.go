@@ -1,0 +1,717 @@
+package proxy
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/buger/jsonparser"
+	"github.com/gin-gonic/gin"
+	"github.com/skadraneshghn/clever-ai-gate/internal/transmux"
+	"go.uber.org/zap"
+	"google.golang.org/genai"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// ─── Client Factory ───────────────────────────────────────────────────────────
+
+// newGeminiSDKClient creates a transient genai.Client for a single API key.
+// NewClient performs no network I/O, so calling it inside executeWithRetry is safe.
+func newGeminiSDKClient(ctx context.Context, apiKey string) (*genai.Client, error) {
+	return genai.NewClient(ctx, &genai.ClientConfig{
+		APIKey:  apiKey,
+		Backend: genai.BackendGeminiAPI,
+	})
+}
+
+// ─── Entry Point ──────────────────────────────────────────────────────────────
+
+// executeGeminiWithSDK replaces the raw HTTP transport for cred.Provider == "gemini".
+// It re-parses the original OpenAI body, builds SDK-typed Content structs, calls the
+// SDK, and translates the response back to OpenAI format.
+//
+// Returns (statusCode, errBody, err) to match forwardRequest's conventions:
+//   - statusCode: HTTP status to report to the retry loop
+//   - errBody:    response bytes (OpenAI JSON); for 2xx stream requests this is
+//     a telemetry summary blob, not the actual HTTP body (already written to c.Writer)
+//   - err:        non-nil only for panics; transport errors are encoded in statusCode
+func (h *Handler) executeGeminiWithSDK(
+	c *gin.Context,
+	pctx *proxyContext,
+	apiKey string,
+	openAIBody []byte,
+) (statusCode int, errBody []byte, err error) {
+	ctx := c.Request.Context()
+
+	client, clientErr := newGeminiSDKClient(ctx, apiKey)
+	if clientErr != nil {
+		return http.StatusInternalServerError, nil,
+			fmt.Errorf("gemini sdk client init: %w", clientErr)
+	}
+
+	// Re-parse the original OpenAI body to build typed SDK Content objects.
+	// pctx.body holds the body after Handle() stripped the "gemini/" prefix from the
+	// model field; the message content is unmodified.
+	var req openAIRequest
+	if jsonErr := json.Unmarshal(openAIBody, &req); jsonErr != nil {
+		return http.StatusBadRequest, nil,
+			fmt.Errorf("failed to parse openai body for sdk: %w", jsonErr)
+	}
+
+	contents, sysInstruction, config, buildErr := buildSDKRequest(req, pctx.model)
+	if buildErr != nil {
+		return http.StatusBadRequest, nil, buildErr
+	}
+	if sysInstruction != nil {
+		config.SystemInstruction = sysInstruction
+	}
+
+	if pctx.isStream {
+		return h.geminiSDKStream(c, client, pctx.model, contents, config, pctx)
+	}
+	return h.geminiSDKNonStream(c, client, pctx.model, contents, config, pctx)
+}
+
+// ─── Request Builder ──────────────────────────────────────────────────────────
+
+// buildSDKRequest maps an openAIRequest to SDK-typed Content slices and a
+// GenerateContentConfig, re-using the same helper functions that
+// transpileOpenAIToGemini uses (extractTextContent, coerceToJSONObject, etc.).
+func buildSDKRequest(req openAIRequest, model string) (
+	contents []*genai.Content,
+	systemInstruction *genai.Content,
+	config *genai.GenerateContentConfig,
+	err error,
+) {
+	injectThoughtSig := isGemini3Model(model)
+	// Maps tool_call_id → function name for resolving tool result names.
+	toolCallNames := make(map[string]string)
+
+	// ── System instruction ────────────────────────────────────────────────────
+	var sysParts []*genai.Part
+	for _, msg := range req.Messages {
+		if msg.Role == "system" || msg.Role == "developer" {
+			if text := extractTextContent(msg.Content); text != "" {
+				sysParts = append(sysParts, &genai.Part{Text: text})
+			}
+		}
+	}
+	if len(sysParts) > 0 {
+		systemInstruction = &genai.Content{Parts: sysParts}
+	}
+
+	// ── Conversation turns ────────────────────────────────────────────────────
+	var prevRole string
+	for _, msg := range req.Messages {
+		switch msg.Role {
+		case "system", "developer":
+			continue // already handled above
+
+		case "user":
+			parts, pErr := buildSDKPartsFromContent(msg.Content)
+			if pErr != nil {
+				return nil, nil, nil, pErr
+			}
+			// Merge consecutive user turns (Gemini rejects same-role adjacency)
+			if prevRole == "user" && len(contents) > 0 {
+				contents[len(contents)-1].Parts = append(contents[len(contents)-1].Parts, parts...)
+			} else {
+				contents = append(contents, &genai.Content{Role: genai.RoleUser, Parts: parts})
+			}
+			prevRole = "user"
+
+		case "assistant":
+			for _, tc := range msg.ToolCalls {
+				if tc.ID != "" && tc.Function.Name != "" {
+					toolCallNames[tc.ID] = tc.Function.Name
+				}
+			}
+			parts, pErr := buildSDKAssistantParts(msg, injectThoughtSig)
+			if pErr != nil {
+				return nil, nil, nil, pErr
+			}
+			if len(parts) > 0 {
+				contents = append(contents, &genai.Content{Role: genai.RoleModel, Parts: parts})
+				prevRole = "model"
+			}
+
+		case "tool":
+			funcName := msg.Name
+			if funcName == "" {
+				if name, ok := toolCallNames[msg.ToolCallID]; ok {
+					funcName = name
+				} else {
+					funcName = "function_result"
+				}
+			}
+			// Gemini requires functionResponse.response to be a JSON object.
+			resultJSON := coerceToJSONObject(msg.Content)
+			var responseMap map[string]any
+			if unmarshalErr := json.Unmarshal(resultJSON, &responseMap); unmarshalErr != nil || responseMap == nil {
+				responseMap = map[string]any{"output": string(resultJSON)}
+			}
+			part := &genai.Part{
+				FunctionResponse: &genai.FunctionResponse{
+					Name:     funcName,
+					Response: responseMap,
+				},
+			}
+			// Group consecutive tool results into a single user turn.
+			if prevRole == "tool" && len(contents) > 0 {
+				contents[len(contents)-1].Parts = append(contents[len(contents)-1].Parts, part)
+			} else {
+				contents = append(contents, &genai.Content{
+					Role:  genai.RoleUser,
+					Parts: []*genai.Part{part},
+				})
+			}
+			prevRole = "tool"
+		}
+	}
+
+	// ── GenerateContentConfig ─────────────────────────────────────────────────
+	config = &genai.GenerateContentConfig{
+		SafetySettings: sdkDefaultSafetySettings(),
+	}
+
+	if req.Temperature != nil {
+		v := float32(*req.Temperature)
+		config.Temperature = &v
+	}
+	if req.TopP != nil {
+		v := float32(*req.TopP)
+		config.TopP = &v
+	}
+	// max_completion_tokens takes precedence (newer OpenAI spec)
+	if req.MaxCompletionTokens != nil {
+		config.MaxOutputTokens = int32(*req.MaxCompletionTokens)
+	} else if req.MaxTokens != nil {
+		config.MaxOutputTokens = int32(*req.MaxTokens)
+	}
+
+	// Stop sequences (string or array)
+	if len(req.Stop) > 0 && string(req.Stop) != "null" {
+		var stopStr string
+		var stopArr []string
+		if jsonErr := json.Unmarshal(req.Stop, &stopStr); jsonErr == nil {
+			config.StopSequences = []string{stopStr}
+		} else if jsonErr2 := json.Unmarshal(req.Stop, &stopArr); jsonErr2 == nil {
+			config.StopSequences = stopArr
+		}
+	}
+
+	// JSON mode / structured outputs
+	if req.ResponseFormat != nil {
+		switch req.ResponseFormat.Type {
+		case "json_object":
+			config.ResponseMIMEType = "application/json"
+		case "json_schema":
+			config.ResponseMIMEType = "application/json"
+			if schemaRaw, _, _, sErr := jsonparser.Get(req.ResponseFormat.JSONSchema, "schema"); sErr == nil && len(schemaRaw) > 0 {
+				config.ResponseJsonSchema = sanitizeGeminiToolSchema(schemaRaw)
+			} else {
+				config.ResponseJsonSchema = sanitizeGeminiToolSchema(req.ResponseFormat.JSONSchema)
+			}
+		}
+	}
+
+	// Tools — convert to SDK FunctionDeclarations
+	if len(req.Tools) > 0 {
+		var decls []*genai.FunctionDeclaration
+		for _, t := range req.Tools {
+			if t.Type != "function" {
+				continue
+			}
+			decl := &genai.FunctionDeclaration{
+				Name:        t.Function.Name,
+				Description: t.Function.Description,
+			}
+			if len(t.Function.Parameters) > 0 {
+				// Use ParametersJsonSchema — accepts raw JSON and avoids
+				// genai.Schema struct mapping complexity.
+				decl.ParametersJsonSchema = sanitizeGeminiToolSchema(t.Function.Parameters)
+			}
+			decls = append(decls, decl)
+		}
+		if len(decls) > 0 {
+			config.Tools = []*genai.Tool{{FunctionDeclarations: decls}}
+		}
+		// tool_choice → ToolConfig
+		if len(req.ToolChoice) > 0 {
+			choiceStr := strings.Trim(string(req.ToolChoice), `"`)
+			var mode genai.FunctionCallingConfigMode
+			var allowedFns []string
+			switch choiceStr {
+			case "none":
+				mode = genai.FunctionCallingConfigModeNone
+			case "required", "any":
+				mode = genai.FunctionCallingConfigModeAny
+			case "auto":
+				mode = genai.FunctionCallingConfigModeAuto
+			default:
+				if name, fnErr := jsonparser.GetString(req.ToolChoice, "function", "name"); fnErr == nil && name != "" {
+					mode = genai.FunctionCallingConfigModeAny
+					allowedFns = []string{name}
+				} else {
+					mode = genai.FunctionCallingConfigModeAuto
+				}
+			}
+			config.ToolConfig = &genai.ToolConfig{
+				FunctionCallingConfig: &genai.FunctionCallingConfig{
+					Mode:                 mode,
+					AllowedFunctionNames: allowedFns,
+				},
+			}
+		}
+	}
+
+	// Thinking / reasoning budget
+	if req.ThinkingBudget > 0 {
+		budget := int32(req.ThinkingBudget)
+		config.ThinkingConfig = &genai.ThinkingConfig{
+			ThinkingBudget:  &budget,
+			IncludeThoughts: true,
+		}
+	} else if req.ReasoningEffort != "" {
+		budgetInt := geminiReasoningBudget(req.ReasoningEffort)
+		if budgetInt != 0 {
+			budget := int32(budgetInt)
+			config.ThinkingConfig = &genai.ThinkingConfig{
+				ThinkingBudget:  &budget,
+				IncludeThoughts: true,
+			}
+		}
+	}
+
+	return contents, systemInstruction, config, nil
+}
+
+// buildSDKPartsFromContent converts an OpenAI message content (string or []contentPart)
+// into a slice of *genai.Part, handling text and image_url parts.
+func buildSDKPartsFromContent(raw json.RawMessage) ([]*genai.Part, error) {
+	if len(raw) == 0 {
+		return []*genai.Part{{Text: ""}}, nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return []*genai.Part{{Text: s}}, nil
+	}
+	var parts []openAIContentPart
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return []*genai.Part{{Text: string(raw)}}, nil
+	}
+	var gemParts []*genai.Part
+	for _, p := range parts {
+		switch p.Type {
+		case "text":
+			gemParts = append(gemParts, &genai.Part{Text: p.Text})
+		case "image_url":
+			if p.ImageURL == nil {
+				continue
+			}
+			gp, err := convertImageURLToSDK(p.ImageURL.URL)
+			if err != nil {
+				return nil, err
+			}
+			gemParts = append(gemParts, gp)
+		}
+	}
+	if len(gemParts) == 0 {
+		gemParts = []*genai.Part{{Text: ""}}
+	}
+	return gemParts, nil
+}
+
+// convertImageURLToSDK converts an OpenAI image_url value into a *genai.Part.
+// data: URIs → InlineData (base64). https:// URLs → FileData.
+func convertImageURLToSDK(url string) (*genai.Part, error) {
+	if strings.HasPrefix(url, "data:") {
+		rest := strings.TrimPrefix(url, "data:")
+		semicolonIdx := strings.Index(rest, ";")
+		if semicolonIdx < 0 {
+			return nil, fmt.Errorf("malformed data URI: missing semicolon")
+		}
+		mimeType := rest[:semicolonIdx]
+		afterSemicolon := rest[semicolonIdx+1:]
+		commaIdx := strings.Index(afterSemicolon, ",")
+		if commaIdx < 0 {
+			return nil, fmt.Errorf("malformed data URI: missing comma after encoding")
+		}
+		b64data := afterSemicolon[commaIdx+1:]
+		return &genai.Part{
+			InlineData: &genai.Blob{
+				MIMEType: mimeType,
+				Data:     []byte(b64data),
+			},
+		}, nil
+	}
+	// HTTPS URL → FileData
+	return &genai.Part{
+		FileData: &genai.FileData{FileURI: url},
+	}, nil
+}
+
+// buildSDKAssistantParts converts an OpenAI assistant message (text content and/or
+// tool_calls) into a slice of *genai.Part.
+//
+// When injectThoughtSig is true (Gemini 3 models), every FunctionCall part receives
+// the thought_signature bypass sentinel. ThoughtSignature lives on the Part itself
+// as []byte, so we convert the sentinel string to bytes.
+func buildSDKAssistantParts(msg openAIMessage, injectThoughtSig bool) ([]*genai.Part, error) {
+	var parts []*genai.Part
+	text := extractTextContent(msg.Content)
+	if text != "" {
+		parts = append(parts, &genai.Part{Text: text})
+	}
+	for _, tc := range msg.ToolCalls {
+		if tc.Type != "function" {
+			continue
+		}
+		// Gemini requires functionCall.args to be a JSON object.
+		argsRaw := coerceToJSONObject(json.RawMessage(tc.Function.Arguments))
+		var argsMap map[string]any
+		if jsonErr := json.Unmarshal(argsRaw, &argsMap); jsonErr != nil || argsMap == nil {
+			argsMap = map[string]any{}
+		}
+		part := &genai.Part{
+			FunctionCall: &genai.FunctionCall{
+				Name: tc.Function.Name,
+				Args: argsMap,
+			},
+		}
+		// Inject the bypass sentinel on the Part for Gemini 3.
+		// ThoughtSignature is []byte on genai.Part (field added in SDK for Gemini 3+).
+		if injectThoughtSig {
+			part.ThoughtSignature = []byte(geminiThoughtSignatureBypass)
+		}
+		parts = append(parts, part)
+	}
+	return parts, nil
+}
+
+// sdkDefaultSafetySettings returns the SDK equivalent of defaultGeminiSafetySettings.
+func sdkDefaultSafetySettings() []*genai.SafetySetting {
+	return []*genai.SafetySetting{
+		{Category: genai.HarmCategoryHateSpeech, Threshold: genai.HarmBlockThresholdBlockOnlyHigh},
+		{Category: genai.HarmCategoryDangerousContent, Threshold: genai.HarmBlockThresholdBlockOnlyHigh},
+		{Category: genai.HarmCategorySexuallyExplicit, Threshold: genai.HarmBlockThresholdBlockOnlyHigh},
+		{Category: genai.HarmCategoryHarassment, Threshold: genai.HarmBlockThresholdBlockOnlyHigh},
+	}
+}
+
+// ─── Non-Streaming Response ───────────────────────────────────────────────────
+
+func (h *Handler) geminiSDKNonStream(
+	c *gin.Context,
+	client *genai.Client,
+	model string,
+	contents []*genai.Content,
+	config *genai.GenerateContentConfig,
+	pctx *proxyContext,
+) (int, []byte, error) {
+	resp, err := client.Models.GenerateContent(c.Request.Context(), model, contents, config)
+	if err != nil {
+		status, body, _ := mapSDKError(err)
+		return status, body, nil
+	}
+
+	translated, trErr := translateSDKResponse(resp, pctx.requestedModel)
+	if trErr != nil {
+		h.logger.Warn("gemini sdk non-stream response translation failed",
+			zap.String("model", pctx.model),
+			zap.Error(trErr),
+		)
+		return http.StatusInternalServerError, nil, trErr
+	}
+
+	translated = h.normalizeNonStreamingReasoning(translated)
+	translated = h.rewriteResponseModel(translated, pctx.requestedModel)
+
+	c.Writer.Header().Set("Content-Type", "application/json")
+	c.Writer.Header().Set("X-Gateway-Provider", "gemini")
+	c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+	c.Writer.WriteHeader(http.StatusOK)
+	c.Writer.Write(translated) //nolint:errcheck
+	return http.StatusOK, translated, nil
+}
+
+// translateSDKResponse converts a *genai.GenerateContentResponse into an OpenAI
+// chat completion JSON body. It is the SDK-typed equivalent of translateGeminiResponse
+// in gemini.go, but reads from strongly-typed struct fields.
+func translateSDKResponse(resp *genai.GenerateContentResponse, requestedModel string) ([]byte, error) {
+	if resp == nil || len(resp.Candidates) == 0 {
+		return nil, fmt.Errorf("empty gemini sdk response")
+	}
+	cand := resp.Candidates[0]
+	finishReason := mapGeminiFinishReasonNS(string(cand.FinishReason))
+
+	var textContent strings.Builder
+	var reasoningContent strings.Builder
+	var toolCalls []openAIToolCallResp
+
+	if cand.Content != nil {
+		for _, part := range cand.Content.Parts {
+			if part.FunctionCall != nil {
+				argsJSON, _ := json.Marshal(part.FunctionCall.Args)
+				toolCalls = append(toolCalls, openAIToolCallResp{
+					ID:   fmt.Sprintf("call_%d", len(toolCalls)),
+					Type: "function",
+					Function: openAIFuncCallResp{
+						Name:      part.FunctionCall.Name,
+						Arguments: string(argsJSON),
+					},
+				})
+				continue
+			}
+			if part.Text != "" {
+				if part.Thought {
+					reasoningContent.WriteString(part.Text)
+				} else {
+					textContent.WriteString(part.Text)
+				}
+			}
+		}
+	}
+
+	// Token usage
+	var promptTokens, candidateTokens, thoughtsTokens int64
+	if resp.UsageMetadata != nil {
+		promptTokens = int64(resp.UsageMetadata.PromptTokenCount)
+		candidateTokens = int64(resp.UsageMetadata.CandidatesTokenCount)
+		thoughtsTokens = int64(resp.UsageMetadata.ThoughtsTokenCount)
+	}
+	totalTokens := promptTokens + candidateTokens + thoughtsTokens
+
+	type oaMessage struct {
+		Role             string               `json:"role"`
+		Content          string               `json:"content"`
+		ReasoningContent string               `json:"reasoning_content,omitempty"`
+		ToolCalls        []openAIToolCallResp `json:"tool_calls,omitempty"`
+	}
+	type oaChoice struct {
+		Index        int       `json:"index"`
+		Message      oaMessage `json:"message"`
+		FinishReason string    `json:"finish_reason"`
+	}
+	type oaUsage struct {
+		PromptTokens     int64 `json:"prompt_tokens"`
+		CompletionTokens int64 `json:"completion_tokens"`
+		TotalTokens      int64 `json:"total_tokens"`
+	}
+	type oaCompletion struct {
+		ID      string     `json:"id"`
+		Object  string     `json:"object"`
+		Created int64      `json:"created"`
+		Model   string     `json:"model"`
+		Choices []oaChoice `json:"choices"`
+		Usage   oaUsage    `json:"usage"`
+	}
+
+	msg := oaMessage{
+		Role:    "assistant",
+		Content: textContent.String(),
+	}
+	if reasoningContent.Len() > 0 {
+		msg.ReasoningContent = reasoningContent.String()
+	}
+	if len(toolCalls) > 0 {
+		msg.ToolCalls = toolCalls
+		if finishReason == "stop" {
+			finishReason = "tool_calls"
+		}
+	}
+
+	result := oaCompletion{
+		ID:      "chatcmpl-gate",
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   requestedModel,
+		Choices: []oaChoice{{Index: 0, Message: msg, FinishReason: finishReason}},
+		Usage: oaUsage{
+			PromptTokens:     promptTokens,
+			CompletionTokens: candidateTokens + thoughtsTokens,
+			TotalTokens:      totalTokens,
+		},
+	}
+	return json.Marshal(result)
+}
+
+// ─── Streaming Response ───────────────────────────────────────────────────────
+
+func (h *Handler) geminiSDKStream(
+	c *gin.Context,
+	client *genai.Client,
+	model string,
+	contents []*genai.Content,
+	config *genai.GenerateContentConfig,
+	pctx *proxyContext,
+) (int, []byte, error) {
+	// Write SSE headers before the first byte
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("Transfer-Encoding", "chunked")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.Header().Set("X-Gateway-Provider", "gemini")
+	c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+	c.Writer.WriteHeader(http.StatusOK)
+
+	flusher, hasFlusher := c.Writer.(http.Flusher)
+
+	stream := client.Models.GenerateContentStream(c.Request.Context(), model, contents, config)
+
+	var responseBuilder strings.Builder
+	var tokenEstimate int
+	// Re-use the existing GeminiTransmuxer to translate SDK chunks to SSE format.
+	// Serializing each SDK chunk to Gemini REST JSON and then passing through
+	// TranslateChunk reuses all existing multi-part/tool-call/reasoning logic.
+	tmx := transmux.NewGeminiTransmuxer()
+	defer tmx.Close()
+
+	for chunk, err := range stream {
+		if err != nil {
+			h.logger.Error("gemini sdk stream error",
+				zap.String("model", pctx.model),
+				zap.Error(err),
+			)
+			// Cannot change status once headers are sent; break and emit [DONE].
+			break
+		}
+
+		chunkJSON, marshalErr := json.Marshal(chunk)
+		if marshalErr != nil {
+			h.logger.Debug("gemini sdk chunk marshal error", zap.Error(marshalErr))
+			continue
+		}
+
+		translated, tmxErr := tmx.TranslateChunk(chunkJSON)
+		if tmxErr != nil || len(translated) == 0 {
+			continue
+		}
+
+		// Rewrite the model field to match the requested model name.
+		if pctx.requestedModel != "" {
+			if _, mErr := jsonparser.GetString(translated, "model"); mErr == nil {
+				if updated, sErr := jsonparser.Set(translated, []byte(`"`+pctx.requestedModel+`"`), "model"); sErr == nil {
+					translated = updated
+				}
+			}
+		}
+
+		// Accumulate content for telemetry.
+		if content, cErr := jsonparser.GetString(translated, "choices", "[0]", "delta", "content"); cErr == nil {
+			responseBuilder.WriteString(content)
+			tokenEstimate++
+		} else if reasoning, rErr := jsonparser.GetString(translated, "choices", "[0]", "delta", "reasoning_content"); rErr == nil {
+			responseBuilder.WriteString(reasoning)
+			tokenEstimate++
+		}
+
+		c.Writer.Write([]byte("data: "))  //nolint:errcheck
+		c.Writer.Write(translated)        //nolint:errcheck
+		c.Writer.Write([]byte("\n\n"))    //nolint:errcheck
+		if hasFlusher {
+			flusher.Flush()
+		}
+	}
+
+	c.Writer.Write([]byte("data: [DONE]\n\n")) //nolint:errcheck
+	if hasFlusher {
+		flusher.Flush()
+	}
+
+	type streamResult struct {
+		Text   string `json:"text"`
+		Tokens int    `json:"tokens"`
+	}
+	resJSON, _ := json.Marshal(streamResult{Text: responseBuilder.String(), Tokens: tokenEstimate})
+	return http.StatusOK, resJSON, nil
+}
+
+// ─── Error Mapping ────────────────────────────────────────────────────────────
+
+// mapSDKError translates a genai SDK error into (httpStatus, OpenAI error body, nil).
+// The SDK wraps gRPC status strings in the error message. The mapping mirrors
+// normalizeGeminiError in gemini.go so the retry loop sees consistent status codes.
+func mapSDKError(err error) (int, []byte, error) {
+	if err == nil {
+		return http.StatusOK, nil, nil
+	}
+
+	var httpStatus int
+	var oaType, oaCode string
+
+	s, ok := status.FromError(err)
+	if ok {
+		switch s.Code() {
+		case codes.Unauthenticated:
+			httpStatus, oaType, oaCode = http.StatusUnauthorized, "authentication_error", "invalid_api_key"
+		case codes.PermissionDenied:
+			httpStatus, oaType, oaCode = http.StatusForbidden, "permission_error", "permission_denied"
+		case codes.NotFound:
+			httpStatus, oaType, oaCode = http.StatusNotFound, "invalid_request_error", "model_not_found"
+		case codes.ResourceExhausted:
+			msg := s.Message()
+			if strings.Contains(strings.ToLower(msg), "quota") {
+				oaCode = "quota_exceeded"
+			} else {
+				oaCode = "rate_limit_exceeded"
+			}
+			httpStatus, oaType = http.StatusTooManyRequests, "rate_limit_error"
+		case codes.InvalidArgument:
+			httpStatus, oaType, oaCode = http.StatusBadRequest, "invalid_request_error", "invalid_request"
+		case codes.Unavailable:
+			httpStatus, oaType, oaCode = http.StatusServiceUnavailable, "api_error", "service_unavailable"
+		case codes.DeadlineExceeded:
+			httpStatus, oaType, oaCode = http.StatusGatewayTimeout, "api_error", "timeout"
+		case codes.Internal:
+			httpStatus, oaType, oaCode = http.StatusBadGateway, "api_error", "internal_error"
+		default:
+			httpStatus, oaType, oaCode = http.StatusBadGateway, "api_error", "upstream_error"
+		}
+	} else {
+		// Fallback to substring matching on raw error message (handles errors.New / tests)
+		msg := err.Error()
+		upperMsg := strings.ToUpper(msg)
+		switch {
+		case strings.Contains(upperMsg, "UNAUTHENTICATED") || strings.Contains(upperMsg, "401"):
+			httpStatus, oaType, oaCode = http.StatusUnauthorized, "authentication_error", "invalid_api_key"
+		case strings.Contains(upperMsg, "PERMISSION") || strings.Contains(upperMsg, "403"):
+			httpStatus, oaType, oaCode = http.StatusForbidden, "permission_error", "permission_denied"
+		case strings.Contains(upperMsg, "NOT_FOUND") || strings.Contains(upperMsg, "NOTFOUND") || strings.Contains(upperMsg, "404"):
+			httpStatus, oaType, oaCode = http.StatusNotFound, "invalid_request_error", "model_not_found"
+		case strings.Contains(upperMsg, "EXHAUSTED") || strings.Contains(upperMsg, "429") || strings.Contains(upperMsg, "LIMIT"):
+			if strings.Contains(strings.ToLower(msg), "quota") {
+				oaCode = "quota_exceeded"
+			} else {
+				oaCode = "rate_limit_exceeded"
+			}
+			httpStatus, oaType = http.StatusTooManyRequests, "rate_limit_error"
+		case strings.Contains(upperMsg, "INVALID") || strings.Contains(upperMsg, "400"):
+			httpStatus, oaType, oaCode = http.StatusBadRequest, "invalid_request_error", "invalid_request"
+		case strings.Contains(upperMsg, "UNAVAILABLE") || strings.Contains(upperMsg, "503"):
+			httpStatus, oaType, oaCode = http.StatusServiceUnavailable, "api_error", "service_unavailable"
+		case strings.Contains(upperMsg, "TIMEOUT") || strings.Contains(upperMsg, "DEADLINE"):
+			httpStatus, oaType, oaCode = http.StatusGatewayTimeout, "api_error", "timeout"
+		case strings.Contains(upperMsg, "INTERNAL") || strings.Contains(upperMsg, "500"):
+			httpStatus, oaType, oaCode = http.StatusBadGateway, "api_error", "internal_error"
+		default:
+			httpStatus, oaType, oaCode = http.StatusBadGateway, "api_error", "upstream_error"
+		}
+	}
+
+	type oaErr struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    string `json:"code,omitempty"`
+	}
+	type oaEnvelope struct {
+		Error oaErr `json:"error"`
+	}
+	body, _ := json.Marshal(oaEnvelope{Error: oaErr{Message: err.Error(), Type: oaType, Code: oaCode}})
+	return httpStatus, body, nil
+}
