@@ -257,3 +257,34 @@ func TestMapSDKError_Translations(t *testing.T) {
 		}
 	}
 }
+
+func TestStreamSanitizer_Basic(t *testing.T) {
+	// 1. Inactive sanitizer passes everything through immediately
+	sInactive := NewStreamSanitizer(false)
+	if out := sInactive.Sanitize("```go\npackage main"); out != "```go\npackage main" {
+		t.Errorf("expected inactive sanitizer to pass through, got %q", out)
+	}
+
+	// 2. Active sanitizer buffers and strips leading code block fence
+	sActive1 := NewStreamSanitizer(true)
+	// First chunk is small, should buffer (return empty)
+	if out := sActive1.Sanitize("```g"); out != "" {
+		t.Errorf("expected buffering to return empty, got %q", out)
+	}
+	// Second chunk completes the fence and has a newline, should flush and strip
+	if out := sActive1.Sanitize("o\npackage main\n"); out != "package main\n" {
+		t.Errorf("expected leading fence stripped, got %q", out)
+	}
+	// Subsequent chunks should pass through untouched
+	if out := sActive1.Sanitize("func main() {\n"); out != "func main() {\n" {
+		t.Errorf("expected passthrough after header check, got %q", out)
+	}
+
+	// 3. Active sanitizer with no markdown fence should release buffer untouched
+	sActive2 := NewStreamSanitizer(true)
+	if out := sActive2.Sanitize("package main\n"); out == "" {
+		t.Errorf("expected content released immediately with newline, got %q", out)
+	} else if out != "package main\n" {
+		t.Errorf("expected clean content untouched, got %q", out)
+	}
+}

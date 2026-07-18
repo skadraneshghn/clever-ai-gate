@@ -580,19 +580,29 @@ func (h *Handler) geminiSDKStream(
 	for attempt < maxFailoverAttempts {
 		attempt++
 
-		// Prepare contents for this run. If we emitted text in a previous attempt,
-		// we append it as a model turn prefix to resume generation right where it left off.
+		// Prepare contents for this run. Gemini requires the prompt history to alternate
+		// and strictly end on a USER turn. We append the partial generated output as a MODEL turn,
+		// followed by a USER turn steering continuation.
 		var runContents []*genai.Content
 		if emittedText != "" {
 			runContents = make([]*genai.Content, len(contents))
 			copy(runContents, contents)
+			// 1. Append the partial context generated so far
 			runContents = append(runContents, &genai.Content{
 				Role:  genai.RoleModel,
 				Parts: []*genai.Part{{Text: emittedText}},
 			})
+			// 2. Append steering instruction turn as a user message
+			runContents = append(runContents, &genai.Content{
+				Role:  genai.RoleUser,
+				Parts: []*genai.Part{{Text: "[SYSTEM CONTEXT: Your previous output was cut off mid-sentence. Continue generating the response precisely from the last character above. Do NOT output any introductory text, do NOT repeat any code, and do NOT wrap the code in markdown code blocks or code fences. Resume the stream directly.]"}},
+			})
 		} else {
 			runContents = contents
 		}
+
+		// Initialize lookahead sanitizer only for failover retry attempts
+		sanitizer := NewStreamSanitizer(emittedText != "")
 
 		stream := currentClient.Models.GenerateContentStream(c.Request.Context(), model, runContents, config)
 
@@ -623,15 +633,39 @@ func (h *Handler) geminiSDKStream(
 				}
 			}
 
-			// Accumulate content for telemetry and failover context resumption
+			// Accumulate content and apply leading formatting cleanup if sanitization is active
+			var cleanText string
 			if content, cErr := jsonparser.GetString(translated, "choices", "[0]", "delta", "content"); cErr == nil {
-				responseBuilder.WriteString(content)
-				emittedText += content
-				tokenEstimate++
+				cleanText = sanitizer.Sanitize(content)
+				if cleanText != content {
+					if updated, sErr := jsonparser.Set(translated, []byte(`"`+cleanText+`"`), "choices", "[0]", "delta", "content"); sErr == nil {
+						translated = updated
+					}
+				}
+				if cleanText != "" {
+					responseBuilder.WriteString(cleanText)
+					emittedText += cleanText
+					tokenEstimate++
+				}
 			} else if reasoning, rErr := jsonparser.GetString(translated, "choices", "[0]", "delta", "reasoning_content"); rErr == nil {
-				responseBuilder.WriteString(reasoning)
-				emittedText += reasoning
-				tokenEstimate++
+				cleanText = sanitizer.Sanitize(reasoning)
+				if cleanText != reasoning {
+					if updated, sErr := jsonparser.Set(translated, []byte(`"`+cleanText+`"`), "choices", "[0]", "delta", "reasoning_content"); sErr == nil {
+						translated = updated
+					}
+				}
+				if cleanText != "" {
+					responseBuilder.WriteString(cleanText)
+					emittedText += cleanText
+					tokenEstimate++
+				}
+			} else {
+				cleanText = "PASSTHROUGH" // Non-text deltas (metadata, tool calls) bypass buffering
+			}
+
+			// If sanitizer is still buffering leading characters to look for markdown blocks, skip outputting
+			if cleanText == "" {
+				continue
 			}
 
 			c.Writer.Write([]byte("data: "))  //nolint:errcheck
@@ -851,4 +885,53 @@ func (h *Handler) incrementRedisRPM(ctx context.Context, cred *credentials.Runti
 	pipe.Expire(ctx, rpmKey, 90*time.Second)
 	_, _ = pipe.Exec(ctx)
 }
+
+// StreamSanitizer filters out markdown formatting blocks introduced by model restarts.
+type StreamSanitizer struct {
+	isActive       bool
+	checkedLeading bool
+	buffer         string
+}
+
+// NewStreamSanitizer creates a new StreamSanitizer instance.
+func NewStreamSanitizer(isActive bool) *StreamSanitizer {
+	return &StreamSanitizer{
+		isActive: isActive,
+	}
+}
+
+// Sanitize checks for leading markdown code block fences and strips them
+// to keep the output stream clean during failover resumption.
+func (s *StreamSanitizer) Sanitize(text string) string {
+	if !s.isActive {
+		return text
+	}
+	if s.checkedLeading {
+		return text
+	}
+
+	s.buffer += text
+
+	// Wait until we have enough characters to evaluate formatting blocks safely
+	if len(s.buffer) < 15 && !strings.Contains(s.buffer, "\n") {
+		return ""
+	}
+
+	s.checkedLeading = true
+	cleanText := s.buffer
+
+	// Strip common leading whitespace or line breaks
+	trimmed := strings.TrimSpace(cleanText)
+	if strings.HasPrefix(trimmed, "```") {
+		// Find where the markdown code block fence ends
+		if idx := strings.Index(cleanText, "\n"); idx != -1 {
+			cleanText = cleanText[idx+1:]
+		} else if idx := strings.Index(cleanText, " "); idx != -1 {
+			cleanText = cleanText[idx+1:]
+		}
+	}
+
+	return cleanText
+}
+
 
