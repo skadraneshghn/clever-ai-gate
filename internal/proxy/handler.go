@@ -75,6 +75,7 @@ type proxyContext struct {
 	isPuter        bool // True when model uses puter/ prefix — triggers prefix stripping
 	isZenMux       bool // True when model uses zenmux/ prefix — triggers prefix stripping
 	isGemini       bool // True when model routes to the Gemini AI Studio pipeline (gemini/ prefix or standalone gemini-* family) — triggers full body transpilation
+	studioProvider string // Resolved routing label (ProviderGeminiStudio) for gemini requests; "" otherwise. Diagnostic only — the transpiler gate is cred.Provider == ProviderGemini
 	requestedModel string // The original model requested by the client before prefix stripping
 	body           []byte
 	credential     *credentials.AcquireResult
@@ -447,6 +448,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		isPuter:        isPuter,
 		isZenMux:       isZenMux,
 		isGemini:       isGemini,
+		studioProvider: studioProvider,
 		requestedModel: requestedModel,
 		body:           body,
 		pool:           pool,
@@ -572,6 +574,7 @@ retryLoop:
 			zap.String("request_id", fmt.Sprintf("%v", requestID)),
 			zap.String("model", pctx.model),
 			zap.String("provider", result.Credential.Provider),
+			zap.String("studio_provider", pctx.studioProvider),
 			zap.Int("credential_id", result.Credential.ID),
 			zap.Int("attempt", triedCount),
 			zap.Int("max_attempts", maxAttempts),

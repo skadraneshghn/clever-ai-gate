@@ -274,6 +274,14 @@ func transpileOpenAIToGemini(openAIBody []byte) ([]byte, error) {
 	}
 
 	// ── Tools → functionDeclarations ─────────────────────────────────────────
+	// Blank-tool safeguard: coding agents (Kilo Code, Cline, …) may send
+	// "tools": [] (an empty array) on initial validation sweeps. We emit
+	// functionDeclarations ONLY when real function tools are present; otherwise
+	// gemReq.Tools stays nil and is omitted from the payload via the `omitempty`
+	// tag. Google AI Studio's schema parser rejects an empty tools array and an
+	// empty functionDeclarations list, so both length checks below are load-
+	// bearing. Tool parameter schemas are also sanitized (see
+	// sanitizeGeminiToolSchema) to strip JSON-Schema draft keywords Google rejects.
 	if len(req.Tools) > 0 {
 		var decls []geminiFuncDecl
 		for _, t := range req.Tools {
@@ -283,11 +291,15 @@ func transpileOpenAIToGemini(openAIBody []byte) ([]byte, error) {
 			decls = append(decls, geminiFuncDecl{
 				Name:        t.Function.Name,
 				Description: t.Function.Description,
-				Parameters:  t.Function.Parameters,
+				Parameters:  sanitizeGeminiToolSchema(t.Function.Parameters),
 			})
 		}
 		if len(decls) > 0 {
 			gemReq.Tools = []geminiTool{{FunctionDeclarations: decls}}
+		} else {
+			// Only non-function tools were present — emit nothing rather than an
+			// empty functionDeclarations list, which Google rejects.
+			gemReq.Tools = nil
 		}
 
 		// tool_choice → functionCallingConfig
@@ -353,9 +365,9 @@ func transpileOpenAIToGemini(openAIBody []byte) ([]byte, error) {
 		case "json_schema":
 			cfg.ResponseMimeType = "application/json"
 			if schemaRaw, _, _, sErr := jsonparser.Get(req.ResponseFormat.JSONSchema, "schema"); sErr == nil && len(schemaRaw) > 0 {
-				cfg.ResponseSchema = schemaRaw
+				cfg.ResponseSchema = sanitizeGeminiToolSchema(schemaRaw)
 			} else {
-				cfg.ResponseSchema = req.ResponseFormat.JSONSchema
+				cfg.ResponseSchema = sanitizeGeminiToolSchema(req.ResponseFormat.JSONSchema)
 			}
 		}
 	}
@@ -454,6 +466,68 @@ func normalizeGeminiModel(model string) string {
 	}
 	// Default to gemini-3.5-flash as it is the most capable generally available model
 	return "gemini-3.5-flash"
+}
+
+// sanitizeGeminiToolSchema strips JSON-Schema draft keywords that Google AI
+// Studio's strict OpenAPI 3.0 schema validator rejects.
+//
+// Google's functionDeclarations[].parameters and responseSchema fields accept
+// only the OpenAPI 3.0 subset of JSON Schema. JSON-Schema-only keywords such as
+// "$schema" (the draft version marker emitted by default by coding agents like
+// Kilo Code and Cline) cause a 400 "Invalid value at
+// 'functionDeclarations[i].parameters' (... does not match the expected
+// schema)". Removing "$schema" is always safe: it is version metadata, not a
+// structural constraint, so its removal cannot change the meaning of a schema.
+//
+// The function recurses through nested objects and arrays so "$schema" keys at
+// any depth (e.g. inside properties.*.items) are removed. Non-object input
+// (booleans, primitives, invalid JSON) is returned unchanged.
+func sanitizeGeminiToolSchema(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return raw
+	}
+	var node any
+	if err := json.Unmarshal(raw, &node); err != nil {
+		return raw
+	}
+	if !stripSchemaKeywords(&node) {
+		return raw
+	}
+	b, err := json.Marshal(node)
+	if err != nil {
+		return raw
+	}
+	return b
+}
+
+// stripSchemaKeywords recursively deletes the "$schema" key from any map node
+// reachable from n. It reports whether any modification was made.
+func stripSchemaKeywords(n *any) bool {
+	switch v := (*n).(type) {
+	case map[string]any:
+		changed := false
+		if _, ok := v["$schema"]; ok {
+			delete(v, "$schema")
+			changed = true
+		}
+		for k, val := range v {
+			vv := val
+			if stripSchemaKeywords(&vv) {
+				v[k] = vv
+				changed = true
+			}
+		}
+		return changed
+	case []any:
+		changed := false
+		for i := range v {
+			if stripSchemaKeywords(&v[i]) {
+				changed = true
+			}
+		}
+		return changed
+	}
+	return false
 }
 
 
