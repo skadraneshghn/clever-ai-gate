@@ -398,10 +398,10 @@ func buildSDKAssistantParts(msg openAIMessage, injectThoughtSig bool) ([]*genai.
 // sdkDefaultSafetySettings returns the SDK equivalent of defaultGeminiSafetySettings.
 func sdkDefaultSafetySettings() []*genai.SafetySetting {
 	return []*genai.SafetySetting{
-		{Category: genai.HarmCategoryHateSpeech, Threshold: genai.HarmBlockThresholdBlockOnlyHigh},
-		{Category: genai.HarmCategoryDangerousContent, Threshold: genai.HarmBlockThresholdBlockOnlyHigh},
-		{Category: genai.HarmCategorySexuallyExplicit, Threshold: genai.HarmBlockThresholdBlockOnlyHigh},
-		{Category: genai.HarmCategoryHarassment, Threshold: genai.HarmBlockThresholdBlockOnlyHigh},
+		{Category: genai.HarmCategoryHateSpeech, Threshold: genai.HarmBlockThresholdBlockNone},
+		{Category: genai.HarmCategoryDangerousContent, Threshold: genai.HarmBlockThresholdBlockNone},
+		{Category: genai.HarmCategorySexuallyExplicit, Threshold: genai.HarmBlockThresholdBlockNone},
+		{Category: genai.HarmCategoryHarassment, Threshold: genai.HarmBlockThresholdBlockNone},
 	}
 }
 
@@ -678,6 +678,24 @@ func (h *Handler) geminiSDKStream(
 
 		if streamErr == nil {
 			// Stream completed successfully!
+			// Flush any remaining buffered text from the sanitizer (e.g. short streams)
+			if flushedText := sanitizer.Flush(); flushedText != "" {
+				responseBuilder.WriteString(flushedText)
+				emittedText += flushedText
+				tokenEstimate++
+
+				modelName := pctx.requestedModel
+				if modelName == "" {
+					modelName = pctx.model
+				}
+				fakeChunk := fmt.Sprintf(`{"id":"chatcmpl-gate","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":%q}}],"model":%q}`, flushedText, modelName)
+				c.Writer.Write([]byte("data: "))            //nolint:errcheck
+				c.Writer.Write([]byte(fakeChunk))           //nolint:errcheck
+				c.Writer.Write([]byte("\n\n"))               //nolint:errcheck
+				if hasFlusher {
+					flusher.Flush()
+				}
+			}
 			break
 		}
 
@@ -918,20 +936,52 @@ func (s *StreamSanitizer) Sanitize(text string) string {
 	}
 
 	s.checkedLeading = true
-	cleanText := s.buffer
+	return stripLeadingFence(s.buffer)
+}
 
-	// Strip common leading whitespace or line breaks
+// Flush releases any remaining buffered text when the stream completes.
+func (s *StreamSanitizer) Flush() string {
+	if s.checkedLeading {
+		return ""
+	}
+	s.checkedLeading = true
+	return stripLeadingFence(s.buffer)
+}
+
+// stripLeadingFence strips any leading markdown code block fence from the text.
+func stripLeadingFence(cleanText string) string {
 	trimmed := strings.TrimSpace(cleanText)
-	if strings.HasPrefix(trimmed, "```") {
-		// Find where the markdown code block fence ends
-		if idx := strings.Index(cleanText, "\n"); idx != -1 {
-			cleanText = cleanText[idx+1:]
-		} else if idx := strings.Index(cleanText, " "); idx != -1 {
-			cleanText = cleanText[idx+1:]
-		}
+	if !strings.HasPrefix(trimmed, "```") {
+		return cleanText
 	}
 
-	return cleanText
+	if idx := strings.Index(cleanText, "\n"); idx != -1 {
+		return cleanText[idx+1:]
+	}
+	if idx := strings.Index(cleanText, " "); idx != -1 {
+		return cleanText[idx+1:]
+	}
+
+	// Fallback for cases without newlines/spaces (e.g. short/completed streams)
+	runes := []rune(cleanText)
+	startIdx := 3
+	for startIdx < len(runes) {
+		r := runes[startIdx]
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			startIdx++
+		} else {
+			break
+		}
+	}
+	if startIdx < len(runes) {
+		r := runes[startIdx]
+		if r == '\n' || r == '\r' || r == ' ' || r == '_' || r == '-' {
+			startIdx++
+		}
+	}
+	return string(runes[startIdx:])
 }
+
+
 
 

@@ -287,4 +287,33 @@ func TestStreamSanitizer_Basic(t *testing.T) {
 	} else if out != "package main\n" {
 		t.Errorf("expected clean content untouched, got %q", out)
 	}
+
+	// 4. Test Flush() on active sanitizer that has not yet checked leading (no newline / small)
+	sActive3 := NewStreamSanitizer(true)
+	if out := sActive3.Sanitize("```go"); out != "" {
+		t.Errorf("expected buffered return, got %q", out)
+	}
+	if out := sActive3.Flush(); out != "" {
+		t.Errorf("expected empty flushed text, got %q", out)
+	}
+	// Calling Flush again should return empty
+	if out := sActive3.Flush(); out != "" {
+		t.Errorf("expected empty on secondary flush, got %q", out)
+	}
+
+	sActive4 := NewStreamSanitizer(true)
+	if out := sActive4.Sanitize("```go_short"); out != "" {
+		t.Errorf("expected buffered return, got %q", out)
+	}
+	if out := sActive4.Flush(); out != "short" {
+		t.Errorf("expected flushed text without code block fence, got %q", out)
+	}
+
+	sActive5 := NewStreamSanitizer(true)
+	if out := sActive5.Sanitize("clean_short"); out != "" {
+		t.Errorf("expected buffered return, got %q", out)
+	}
+	if out := sActive5.Flush(); out != "clean_short" {
+		t.Errorf("expected flushed clean text untouched, got %q", out)
+	}
 }
