@@ -156,3 +156,54 @@ func TestTranspileOpenAIToGemini_NonFunctionToolsOmitted(t *testing.T) {
 		t.Errorf("expected no functionDeclarations for non-function tool, got %s", out)
 	}
 }
+
+func TestTranspileOpenAIToGemini_ToolResultCoercedToObject(t *testing.T) {
+	// Reproduces the agentic round-trip 400: after the model calls a tool, the
+	// client sends back a "tool" message whose content is a JSON array (e.g. a
+	// directory listing) and omits the optional "name" field (only tool_call_id).
+	// Gemini rejects non-object functionResponse.response with 400 and requires
+	// functionResponse.name to match the functionCall.name.
+	body := []byte(`{"model":"gemini-3.5-flash","messages":[` +
+		`{"role":"user","content":"list files"},` +
+		`{"role":"assistant","content":null,"tool_calls":[{"id":"call_42","type":"function","function":{"name":"list_files","arguments":"{\"path\":\"/src\"}"}}]},` +
+		`{"role":"tool","tool_call_id":"call_42","content":"[\"a.go\",\"b.go\"]"}` +
+		`],"tools":[{"type":"function","function":{"name":"list_files","description":"list","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}}]}`)
+	out, err := transpileOpenAIToGemini(body)
+	if err != nil {
+		t.Fatalf("transpile failed: %v", err)
+	}
+
+	// functionResponse.name must match the functionCall name, resolved via
+	// tool_call_id since the client omitted "name".
+	if !bytes.Contains(out, []byte(`"name":"list_files"`)) {
+		t.Errorf("expected functionResponse name resolved to list_files, got %s", out)
+	}
+
+	// The response must be a JSON object wrapping the array; the bare array
+	// must NOT appear as the top-level response value.
+	if bytes.Contains(out, []byte(`"response":["a.go","b.go"]`)) {
+		t.Errorf("expected array tool result wrapped in an object, got %s", out)
+	}
+	if !bytes.Contains(out, []byte(`"response":{"output":`)) {
+		t.Errorf("expected functionResponse.response wrapped as {\"output\":...}, got %s", out)
+	}
+}
+
+func TestCoerceToJSONObject(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`{"a":1}`, `{"a":1}`},
+		{`["a","b"]`, `{"output":["a","b"]}`},
+		{`"plain string"`, `{"output":"plain string"}`},
+		{`42`, `{"output":42}`},
+		{`true`, `{"output":true}`},
+		{`null`, `{}`},
+		{``, `{}`},
+		{`not json`, `{"output":"not json"}`},
+	}
+	for _, c := range cases {
+		got := string(coerceToJSONObject(json.RawMessage(c.in)))
+		if got != c.want {
+			t.Errorf("coerceToJSONObject(%q) = %s, want %s", c.in, got, c.want)
+		}
+	}
+}

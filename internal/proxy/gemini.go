@@ -201,6 +201,11 @@ func transpileOpenAIToGemini(openAIBody []byte) ([]byte, error) {
 
 	// ── Conversation messages → contents ─────────────────────────────────────
 	var prevRole string
+	// toolCallNames maps tool_call_id → function name, populated from
+	// assistant tool_calls so that later "tool" result messages can resolve the
+	// matching functionCall name even when the client omits the optional "name"
+	// field (Gemini requires functionResponse.name to match functionCall.name).
+	toolCallNames := make(map[string]string)
 	for _, msg := range req.Messages {
 		switch msg.Role {
 		case "system", "developer":
@@ -224,6 +229,14 @@ func transpileOpenAIToGemini(openAIBody []byte) ([]byte, error) {
 			prevRole = "user"
 
 		case "assistant":
+			// Register tool_call_id → function name so later tool-result
+			// messages can resolve the matching functionCall name even when
+			// the client omits the optional "name" field.
+			for _, tc := range msg.ToolCalls {
+				if tc.ID != "" && tc.Function.Name != "" {
+					toolCallNames[tc.ID] = tc.Function.Name
+				}
+			}
 			parts, err := buildGeminiAssistantParts(msg)
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse assistant message: %w", err)
@@ -240,20 +253,22 @@ func transpileOpenAIToGemini(openAIBody []byte) ([]byte, error) {
 			// Tool results → user turn with functionResponse parts.
 			funcName := msg.Name
 			if funcName == "" {
-				funcName = "function_result"
+				if name, ok := toolCallNames[msg.ToolCallID]; ok {
+					funcName = name
+				} else {
+					funcName = "function_result"
+				}
 			}
 			resultRaw := msg.Content
 			if len(resultRaw) == 0 {
 				resultRaw = json.RawMessage(`""`)
 			}
-			// Ensure the result is valid JSON; wrap plain strings if needed.
-			var resultJSON json.RawMessage
-			if json.Valid(resultRaw) {
-				resultJSON = resultRaw
-			} else {
-				wrapped, _ := json.Marshal(map[string]string{"output": string(resultRaw)})
-				resultJSON = wrapped
-			}
+			// Gemini requires functionResponse.response to be a JSON object
+			// (google.protobuf.Struct). Coding-agent tool results are
+			// frequently plain strings (file contents), JSON arrays (directory
+			// listings), or numbers, so coerce anything that is not already a
+			// JSON object into {"output": <value>}. See coerceToJSONObject.
+			resultJSON := coerceToJSONObject(resultRaw)
 
 			fnResp := &geminiFunctionResponse{
 				Name:     funcName,
@@ -669,12 +684,10 @@ func buildGeminiAssistantParts(msg openAIMessage) ([]geminiPart, error) {
 		if tc.Type != "function" {
 			continue
 		}
-		var argsRaw json.RawMessage
-		if tc.Function.Arguments != "" && json.Valid([]byte(tc.Function.Arguments)) {
-			argsRaw = json.RawMessage(tc.Function.Arguments)
-		} else {
-			argsRaw = json.RawMessage(`{}`)
-		}
+		// Gemini requires functionCall.args to be a JSON object. Kilo/Cline
+		// always emit object arguments, but coerce defensively so a stray
+		// array/string argument cannot 400 the whole request.
+		argsRaw := coerceToJSONObject(json.RawMessage(tc.Function.Arguments))
 		parts = append(parts, geminiPart{
 			FunctionCall: &geminiFunctionCall{
 				Name: tc.Function.Name,
@@ -683,6 +696,34 @@ func buildGeminiAssistantParts(msg openAIMessage) ([]geminiPart, error) {
 		})
 	}
 	return parts, nil
+}
+
+// coerceToJSONObject ensures raw is a JSON object, as required by the Gemini
+// API for functionCall.args and functionResponse.response (both are parsed as
+// google.protobuf.Struct). Gemini rejects arrays, strings, numbers, booleans,
+// and null at those locations with HTTP 400:
+//
+//	Invalid value at 'contents[...].parts[...].functionResponse.response': ...
+//
+// Coding agents (Kilo Code, Cline, …) routinely return tool results that are
+// plain strings (file contents), JSON arrays (directory listings), or numbers.
+// coerceToJSONObject passes objects through unchanged and wraps every other
+// shape as {"output": <value>}. Non-JSON strings are wrapped as a quoted
+// string. An empty/null input becomes "{}".
+func coerceToJSONObject(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return json.RawMessage(`{}`)
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && trimmed[0] == '{' && json.Valid(raw) {
+		return raw
+	}
+	if json.Valid(raw) {
+		wrapped, _ := json.Marshal(map[string]json.RawMessage{"output": raw})
+		return wrapped
+	}
+	wrapped, _ := json.Marshal(map[string]string{"output": string(raw)})
+	return wrapped
 }
 
 // ─── Non-Streaming Response Translation ──────────────────────────────────────
