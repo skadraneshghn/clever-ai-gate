@@ -127,7 +127,7 @@ func (s *Scheduler) Config() SchedulerSettings {
 // Start initializes all scheduled jobs from the database and begins scheduling.
 func (s *Scheduler) Start(ctx context.Context) error {
 	// Register built-in executors (vault forwarded for bulk health check)
-	RegisterBuiltinExecutors(s.registry, s.db, s.vault, s.logger)
+	RegisterBuiltinExecutors(s.registry, s.db, s.rdb, s.vault, s.logger)
 
 	// Load jobs from DB and register them
 	if err := s.loadJobsFromDB(ctx); err != nil {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
 	"github.com/skadraneshghn/clever-ai-gate/internal/database"
 	"go.uber.org/zap"
@@ -20,14 +21,14 @@ import (
 
 // RegisterBuiltinExecutors registers all built-in job types into the registry.
 // Call this once at startup before calling Scheduler.Start().
-func RegisterBuiltinExecutors(reg *Registry, db *pgxpool.Pool, vault *credentials.Vault, logger *zap.Logger) {
+func RegisterBuiltinExecutors(reg *Registry, db *pgxpool.Pool, rdb *redis.Client, vault *credentials.Vault, logger *zap.Logger) {
 	reg.Register("telemetry_cleanup", newTelemetryCleanupExecutor(db, logger))
 	reg.Register("credential_health_check", newCredentialHealthCheckExecutor(db, logger))
 	reg.Register("log_rotation", newLogRotationExecutor(logger))
 	reg.Register("cache_warmup", newCacheWarmupExecutor(db, logger))
 	reg.Register("job_log_cleanup", newJobLogCleanupExecutor(db, logger))
 	reg.Register("noop", newNoopExecutor(logger))
-	reg.Register("bulk_pool_health_check", newBulkPoolHealthCheckExecutor(db, vault, logger))
+	reg.Register("bulk_pool_health_check", newBulkPoolHealthCheckExecutor(db, rdb, vault, logger))
 	reg.Register("provider_rediscovery", newProviderRediscoveryExecutor(db, vault, logger))
 
 	logger.Info("built-in job executors registered",
@@ -221,12 +222,24 @@ func newNoopExecutor(logger *zap.Logger) ExecutorFunc {
 	}
 }
 
+// isPermanentError checks if the error returned during health check indicates the API key is invalid/revoked/permanently blocked.
+func isPermanentError(errStr string) bool {
+	upper := strings.ToUpper(errStr)
+	return strings.Contains(upper, "API_KEY_INVALID") ||
+		strings.Contains(upper, "INVALID_API_KEY") ||
+		strings.Contains(upper, "PERMISSION_DENIED") ||
+		strings.Contains(upper, "FORBIDDEN") ||
+		strings.Contains(upper, "HTTP 401") ||
+		strings.Contains(upper, "HTTP 403") ||
+		strings.Contains(upper, "DELETED")
+}
+
 // --- Built-in Executor: bulk_pool_health_check ---
 // Iterates all credentials across every pool, executes a lightweight live
 // HTTP probe per credential (bounded by a semaphore of 20 workers),
 // persists the health result, and broadcasts a NOTIFY reload signal.
 
-func newBulkPoolHealthCheckExecutor(db *pgxpool.Pool, vault *credentials.Vault, logger *zap.Logger) ExecutorFunc {
+func newBulkPoolHealthCheckExecutor(db *pgxpool.Pool, rdb *redis.Client, vault *credentials.Vault, logger *zap.Logger) ExecutorFunc {
 	return func(execCtx *ExecutionContext) (string, error) {
 		ctx := context.Background()
 
@@ -275,13 +288,38 @@ func newBulkPoolHealthCheckExecutor(db *pgxpool.Pool, vault *credentials.Vault, 
 
 				isHealthy, errStr := probeCredential(ctx, client, c, apiKey)
 
-				updateErr := database.UpdateCredentialHealthState(ctx, db, c.ID, isHealthy, errStr)
+				persistHealthy := isHealthy
+				var cooldownInRedis bool
+
+				if !isHealthy && errStr != nil {
+					if isPermanentError(*errStr) {
+						persistHealthy = false
+					} else {
+						// Rate limits, timeouts, or temporary network issues: keep healthy in DB, cool down in Redis
+						persistHealthy = true
+						cooldownInRedis = true
+					}
+				}
+
+				updateErr := database.UpdateCredentialHealthState(ctx, db, c.ID, persistHealthy, errStr)
 				if updateErr != nil {
 					logger.Warn("bulk health: failed to persist health state",
 						zap.Int("cred_id", c.ID), zap.Error(updateErr))
 				}
 
-				if isHealthy {
+				// Apply active cooldown inside Redis if rate-limited or transient-failing
+				if cooldownInRedis && rdb != nil {
+					cooldownKey := fmt.Sprintf("gate:key:%d:cooldown", c.ID)
+					rdb.Set(ctx, cooldownKey, "rate_limited_backoff", 5*time.Minute)
+				}
+
+				// Clear active cooldown if fully healthy
+				if isHealthy && rdb != nil {
+					cooldownKey := fmt.Sprintf("gate:key:%d:cooldown", c.ID)
+					rdb.Del(ctx, cooldownKey)
+				}
+
+				if persistHealthy {
 					successCount.Add(1)
 				} else {
 					failureCount.Add(1)

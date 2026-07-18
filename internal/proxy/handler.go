@@ -562,6 +562,15 @@ retryLoop:
 			}
 		}
 
+		// Check if the credential is rate-limited in Redis before scheduling request (Gemini only)
+		if result.Credential.Provider == "gemini" {
+			if h.isKeyRateLimitedInRedis(c.Request.Context(), result.Credential) {
+				// Local 5-second cooldown to let other concurrent requests cycle to other keys
+				result.FromPool.PenalizeToken(result.Index, 5*time.Second)
+				continue
+			}
+		}
+
 		// Skip credentials we've already tried in this request
 		if triedIndices[result.Index] {
 			continue
@@ -569,6 +578,11 @@ retryLoop:
 		triedIndices[result.Index] = true
 		triedCount++
 		pctx.credential = result
+
+		// Increment Redis RPM count if it's Gemini
+		if result.Credential.Provider == "gemini" {
+			h.incrementRedisRPM(c.Request.Context(), result.Credential)
+		}
 
 		h.logger.Info("attempting request with credential",
 			zap.String("request_id", fmt.Sprintf("%v", requestID)),

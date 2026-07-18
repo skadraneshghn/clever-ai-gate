@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/buger/jsonparser"
 	"github.com/gin-gonic/gin"
+	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
 	"github.com/skadraneshghn/clever-ai-gate/internal/transmux"
 	"go.uber.org/zap"
 	"google.golang.org/genai"
@@ -562,8 +564,6 @@ func (h *Handler) geminiSDKStream(
 
 	flusher, hasFlusher := c.Writer.(http.Flusher)
 
-	stream := client.Models.GenerateContentStream(c.Request.Context(), model, contents, config)
-
 	var responseBuilder strings.Builder
 	var tokenEstimate int
 	// Re-use the existing GeminiTransmuxer to translate SDK chunks to SSE format.
@@ -572,51 +572,136 @@ func (h *Handler) geminiSDKStream(
 	tmx := transmux.NewGeminiTransmuxer()
 	defer tmx.Close()
 
-	for chunk, err := range stream {
-		if err != nil {
-			h.logger.Error("gemini sdk stream error",
-				zap.String("model", pctx.model),
-				zap.Error(err),
-			)
-			// Cannot change status once headers are sent; break and emit [DONE].
-			break
+	maxFailoverAttempts := 5
+	attempt := 0
+	emittedText := ""
+	currentClient := client
+
+	for attempt < maxFailoverAttempts {
+		attempt++
+
+		// Prepare contents for this run. If we emitted text in a previous attempt,
+		// we append it as a model turn prefix to resume generation right where it left off.
+		var runContents []*genai.Content
+		if emittedText != "" {
+			runContents = make([]*genai.Content, len(contents))
+			copy(runContents, contents)
+			runContents = append(runContents, &genai.Content{
+				Role:  genai.RoleModel,
+				Parts: []*genai.Part{{Text: emittedText}},
+			})
+		} else {
+			runContents = contents
 		}
 
-		chunkJSON, marshalErr := json.Marshal(chunk)
-		if marshalErr != nil {
-			h.logger.Debug("gemini sdk chunk marshal error", zap.Error(marshalErr))
-			continue
-		}
+		stream := currentClient.Models.GenerateContentStream(c.Request.Context(), model, runContents, config)
 
-		translated, tmxErr := tmx.TranslateChunk(chunkJSON)
-		if tmxErr != nil || len(translated) == 0 {
-			continue
-		}
+		var streamErr error
+		for chunk, err := range stream {
+			if err != nil {
+				streamErr = err
+				break
+			}
 
-		// Rewrite the model field to match the requested model name.
-		if pctx.requestedModel != "" {
-			if _, mErr := jsonparser.GetString(translated, "model"); mErr == nil {
-				if updated, sErr := jsonparser.Set(translated, []byte(`"`+pctx.requestedModel+`"`), "model"); sErr == nil {
-					translated = updated
+			chunkJSON, marshalErr := json.Marshal(chunk)
+			if marshalErr != nil {
+				h.logger.Debug("gemini sdk chunk marshal error", zap.Error(marshalErr))
+				continue
+			}
+
+			translated, tmxErr := tmx.TranslateChunk(chunkJSON)
+			if tmxErr != nil || len(translated) == 0 {
+				continue
+			}
+
+			// Rewrite the model field to match the requested model name.
+			if pctx.requestedModel != "" {
+				if _, mErr := jsonparser.GetString(translated, "model"); mErr == nil {
+					if updated, sErr := jsonparser.Set(translated, []byte(`"`+pctx.requestedModel+`"`), "model"); sErr == nil {
+						translated = updated
+					}
 				}
+			}
+
+			// Accumulate content for telemetry and failover context resumption
+			if content, cErr := jsonparser.GetString(translated, "choices", "[0]", "delta", "content"); cErr == nil {
+				responseBuilder.WriteString(content)
+				emittedText += content
+				tokenEstimate++
+			} else if reasoning, rErr := jsonparser.GetString(translated, "choices", "[0]", "delta", "reasoning_content"); rErr == nil {
+				responseBuilder.WriteString(reasoning)
+				emittedText += reasoning
+				tokenEstimate++
+			}
+
+			c.Writer.Write([]byte("data: "))  //nolint:errcheck
+			c.Writer.Write(translated)        //nolint:errcheck
+			c.Writer.Write([]byte("\n\n"))    //nolint:errcheck
+			if hasFlusher {
+				flusher.Flush()
 			}
 		}
 
-		// Accumulate content for telemetry.
-		if content, cErr := jsonparser.GetString(translated, "choices", "[0]", "delta", "content"); cErr == nil {
-			responseBuilder.WriteString(content)
-			tokenEstimate++
-		} else if reasoning, rErr := jsonparser.GetString(translated, "choices", "[0]", "delta", "reasoning_content"); rErr == nil {
-			responseBuilder.WriteString(reasoning)
-			tokenEstimate++
+		if streamErr == nil {
+			// Stream completed successfully!
+			break
 		}
 
-		c.Writer.Write([]byte("data: "))  //nolint:errcheck
-		c.Writer.Write(translated)        //nolint:errcheck
-		c.Writer.Write([]byte("\n\n"))    //nolint:errcheck
-		if hasFlusher {
-			flusher.Flush()
+		// Mid-stream error encountered (e.g. 429 TPM/RPM limit exceeded, connection close)
+		h.logger.Warn("mid-stream failure caught, initiating key failover protocol",
+			zap.String("model", pctx.model),
+			zap.Int("credential_id", pctx.credential.Credential.ID),
+			zap.Int("emitted_len", len(emittedText)),
+			zap.Error(streamErr),
+		)
+
+		// Cooldown the failed key locally
+		cooldownDuration := 5 * time.Minute
+		pctx.pool.PenalizeToken(pctx.credential.Index, cooldownDuration)
+		h.broadcaster.PublishPenalize(pctx.pool.ModelPattern, pctx.credential.Credential.ID, pctx.credential.Index, time.Now().Add(cooldownDuration))
+
+		// Isolate the token in Redis to notify other cluster nodes
+		rdb := h.broadcaster.RDB()
+		if rdb != nil {
+			cooldownKey := fmt.Sprintf("gate:key:%d:cooldown", pctx.credential.Credential.ID)
+			rdb.Set(c.Request.Context(), cooldownKey, "rate_limited_backoff", cooldownDuration)
 		}
+
+		// Acquire next available token from pool, skipping those that are rate limited in Redis
+		var nextCred *credentials.AcquireResult
+		for i := 0; i < int(pctx.pool.TotalCount); i++ {
+			cand := pctx.pool.AcquireActiveToken()
+			if cand == nil {
+				cand = pctx.pool.AcquireLeastPenalizedToken()
+			}
+			if cand == nil {
+				break
+			}
+			if h.isKeyRateLimitedInRedis(c.Request.Context(), cand.Credential) {
+				pctx.pool.PenalizeToken(cand.Index, 5*time.Second)
+				continue
+			}
+			nextCred = cand
+			break
+		}
+
+		if nextCred == nil {
+			h.logger.Error("failover failed: all pool tokens exhausted", zap.String("model", pctx.model))
+			break
+		}
+
+		pctx.credential = nextCred
+
+		// Setup new SDK client with target key
+		newClient, clientErr := newGeminiSDKClient(c.Request.Context(), nextCred.Credential.APIKey)
+		if clientErr != nil {
+			h.logger.Error("failover client init failed", zap.Error(clientErr))
+			break
+		}
+		currentClient = newClient
+
+		// Small delay to allow connections to settle before resuming
+		time.Sleep(200 * time.Millisecond)
 	}
 
 	c.Writer.Write([]byte("data: [DONE]\n\n")) //nolint:errcheck
@@ -715,3 +800,55 @@ func mapSDKError(err error) (int, []byte, error) {
 	body, _ := json.Marshal(oaEnvelope{Error: oaErr{Message: err.Error(), Type: oaType, Code: oaCode}})
 	return httpStatus, body, nil
 }
+
+// isKeyRateLimitedInRedis checks both:
+// 1. If the key has an active Redis cooldown key ("gate:key:<id>:cooldown")
+// 2. If the request count in the current minute window exceeds 15 RPM
+func (h *Handler) isKeyRateLimitedInRedis(ctx context.Context, cred *credentials.RuntimeCredential) bool {
+	if h.broadcaster == nil {
+		return false // Redis not configured — fail open
+	}
+	rdb := h.broadcaster.RDB()
+	if rdb == nil {
+		return false // Redis not configured — fail open
+	}
+
+	// 1. Check active cooldown
+	cooldownKey := fmt.Sprintf("gate:key:%d:cooldown", cred.ID)
+	exists, err := rdb.Exists(ctx, cooldownKey).Result()
+	if err == nil && exists > 0 {
+		return true // Key is cooling down
+	}
+
+	// 2. Check RPM limit (15 requests per minute)
+	now := time.Now().Unix()
+	rpmKey := fmt.Sprintf("gate:key:%d:rpm:%d", cred.ID, now/60)
+	countStr, err := rdb.Get(ctx, rpmKey).Result()
+	if err == nil {
+		if count, cErr := strconv.Atoi(countStr); cErr == nil && count >= 15 {
+			return true // Throttled
+		}
+	}
+
+	return false
+}
+
+// incrementRedisRPM increments the request counter in the current minute sliding window.
+func (h *Handler) incrementRedisRPM(ctx context.Context, cred *credentials.RuntimeCredential) {
+	if h.broadcaster == nil {
+		return
+	}
+	rdb := h.broadcaster.RDB()
+	if rdb == nil {
+		return
+	}
+
+	now := time.Now().Unix()
+	rpmKey := fmt.Sprintf("gate:key:%d:rpm:%d", cred.ID, now/60)
+
+	pipe := rdb.Pipeline()
+	pipe.Incr(ctx, rpmKey)
+	pipe.Expire(ctx, rpmKey, 90*time.Second)
+	_, _ = pipe.Exec(ctx)
+}
+
