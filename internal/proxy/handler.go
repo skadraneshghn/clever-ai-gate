@@ -74,7 +74,7 @@ type proxyContext struct {
 	isSarvam       bool // True when model uses sarvam/ prefix — triggers prefix stripping
 	isPuter        bool // True when model uses puter/ prefix — triggers prefix stripping
 	isZenMux       bool // True when model uses zenmux/ prefix — triggers prefix stripping
-	isGemini       bool // True when model uses gemini/ prefix — triggers full body transpilation
+	isGemini       bool // True when model routes to the Gemini AI Studio pipeline (gemini/ prefix or standalone gemini-* family) — triggers full body transpilation
 	requestedModel string // The original model requested by the client before prefix stripping
 	body           []byte
 	credential     *credentials.AcquireResult
@@ -259,17 +259,45 @@ func (h *Handler) Handle(c *gin.Context) {
 		)
 	}
 
-	// --- Google AI Studio (Gemini) Prefix Detection ---
-	// Models prefixed with "gemini/" are routed to Google AI Studio. The prefix is
-	// stripped and the full request body is transpiled from OpenAI format into Gemini's
-	// native generateContent format by transpileOpenAIToGemini() in forwardRequest.
-	// The credential's Provider="gemini" field also activates the transpilation pipeline
-	// for clean model names (without the prefix) registered during discovery.
+	// --- Request Remapping Engine: Google AI Studio (Gemini) ---
+	// Normalize both routing forms to the optimized gemini_studio pipeline so
+	// Kilo Code agents and standard chat clients bind to the same credential pool:
+	//
+	//   Phase A — Slash-prefixed routes (Kilo Code agent style):
+	//     "gemini/gemini-3.5-flash"  → prefix token "gemini" matches the legacy
+	//     namespace; the prefix is stripped later (see Gemini Payload Preparation)
+	//     and the clean model is forwarded to Google AI Studio.
+	//
+	//   Phase B — Standalone routes (standard chat clients):
+	//     "gemini-3.5-flash"        → bound by model-name family. No prefix to
+	//     strip; the credential's Provider="gemini" field (resolved from the pool)
+	//     activates the transpilation pipeline in forwardRequest.
+	//
+	// Both forms resolve to the ProviderGeminiStudio routing label. The actual
+	// transpilation gate remains cred.Provider == ProviderGemini, which is the
+	// identity stored on every AI Studio key — so gemini_studio is the logical
+	// routing target and gemini is the credential identity.
+	//
+	// Other namespace prefixes (nvidia/, ollama/, cloudflare/, sarvam/, puter/,
+	// zenmux/, 1min/) are intentionally NOT touched here: each has its own dedicated
+	// detection + sanitization block below with prefix-specific invariants
+	// (e.g. nvidia keeps its prefix for pool lookup). A generic slash-split would
+	// break those handlers, so this interceptor is scoped to the gemini family.
 	isGemini := false
-	if strings.HasPrefix(model, "gemini/") {
+	studioProvider := ""
+	if strings.HasPrefix(model, credentials.ProviderGeminiLegacy+"/") {
 		isGemini = true
-		h.logger.Debug("google ai studio (gemini) model detected",
+		studioProvider = credentials.ProviderGeminiStudio
+		h.logger.Debug("gemini studio model detected (slash-prefixed)",
 			zap.String("model", model),
+			zap.String("studio_provider", studioProvider),
+		)
+	} else if strings.HasPrefix(model, "gemini-") {
+		isGemini = true
+		studioProvider = credentials.ProviderGeminiStudio
+		h.logger.Debug("gemini studio model detected (standalone)",
+			zap.String("model", model),
+			zap.String("studio_provider", studioProvider),
 		)
 	}
 
@@ -293,6 +321,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		zap.Bool("is_puter", isPuter),
 		zap.Bool("is_zenmux", isZenMux),
 		zap.Bool("is_gemini", isGemini),
+		zap.String("studio_provider", studioProvider),
 		zap.Int("body_bytes", len(body)),
 		zap.String("client_ip", c.ClientIP()),
 	)
@@ -394,13 +423,15 @@ func (h *Handler) Handle(c *gin.Context) {
 	}
 
 	// --- Gemini Payload Preparation ---
-	// For Gemini-prefixed models we strip the routing prefix from the model name
-	// and the JSON body. The actual body transpilation (OpenAI → Gemini format)
-	// is deferred to forwardRequest where we have access to the credential and
-	// can handle errors cleanly within the retry loop.
+	// For Gemini-routed models the routing prefix (if present) is stripped from
+	// both the model name and the JSON body. The actual body transpilation
+	// (OpenAI → Gemini format) is deferred to forwardRequest where we have access
+	// to the credential and can handle errors cleanly within the retry loop.
+	// stripModelPrefixInPlace is a no-op when the model carries no prefix, so the
+	// standalone form ("gemini-3.5-flash") passes through here unchanged.
 	if isGemini {
-		body = stripModelPrefixInPlace(body, model, "gemini/")
-		model = strings.TrimPrefix(model, "gemini/")
+		body = stripModelPrefixInPlace(body, model, credentials.ProviderGeminiLegacy+"/")
+		model = strings.TrimPrefix(model, credentials.ProviderGeminiLegacy+"/")
 	}
 
 	// Step 5-8: Attempt with automatic failover
@@ -1684,6 +1715,17 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 			)
 			return val, true
 		}
+		// Fall back to the generic gemini studio pool namespace so a standalone
+		// "gemini-<unknown>" request still binds to an AI Studio credential pool
+		// rather than failing with "no routing pool configured". Mirrors the
+		// slash-prefixed branch above so both routing forms share one fallback.
+		if val, found := h.cache.Get(cache.PoolKey(credentials.ProviderGemini)); found {
+			h.logger.Debug("mapping unknown clean gemini model to studio namespace pool",
+				zap.String("requested", model),
+				zap.String("namespace", credentials.ProviderGemini),
+			)
+			return val, true
+		}
 	}
 	for _, prefix := range []string{"gpt-", "claude-", "gemini-", "deepseek-"} {
 		if strings.HasPrefix(model, prefix) {
@@ -1817,7 +1859,16 @@ func (h *Handler) ListModels(c *gin.Context) {
 //   - body has enough capacity (always true when shrinking)
 //   - the model string (fullModel) is an independent copy, NOT an unsafe
 //     view into body — the in-place modification would corrupt such a view.
+//
+// If fullModel does not actually carry prefixToStrip, the body is returned
+// unchanged. This guard makes the function safe to call for routing forms that
+// have no prefix to strip (e.g. a standalone "gemini-3.5-flash" routed through
+// the isGemini path), where the unguarded slice expression below would otherwise
+// compute a bogus upstream model and silently corrupt the request body.
 func stripModelPrefixInPlace(body []byte, fullModel, prefixToStrip string) []byte {
+	if !strings.HasPrefix(fullModel, prefixToStrip) {
+		return body
+	}
 	oldToken := []byte(`"` + fullModel + `"`)
 	upstreamModel := fullModel[len(prefixToStrip):]
 	newToken := []byte(`"` + upstreamModel + `"`)

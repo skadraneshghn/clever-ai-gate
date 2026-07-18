@@ -164,7 +164,7 @@ func DiscoverAndRegisterGeminiModels(ctx context.Context, db *pgxpool.Pool, vaul
 	thisKeyCredIDByPool := make(map[int]int)
 	rows, err := db.Query(ctx,
 		`SELECT id, pool_id, encrypted_key FROM credentials WHERE provider = $1 AND base_url = $2`,
-		"gemini", geminiBaseURL,
+		ProviderGemini, geminiBaseURL,
 	)
 	if err == nil {
 		defer rows.Close()
@@ -253,16 +253,16 @@ func DiscoverAndRegisterGeminiModels(ctx context.Context, db *pgxpool.Pool, vaul
 					return 0, nil, fmt.Errorf("failed to heal gemini credential for pool %s: %w", pattern, err)
 				}
 			} else {
-				// This key is not yet in this pool — append a new credential so multiple distinct
-				// Google AI Studio keys coexist and load-balance together in the same pool.
-				_, err = tx.Exec(ctx,
-					`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
-				 VALUES ($1, 'gemini', $2, $3, $4, true)`,
-					poolID, encryptedKey, geminiBaseURL, weight,
-				)
-				if err != nil {
-					return 0, nil, fmt.Errorf("failed to bind gemini credential to pool %s: %w", pattern, err)
-				}
+			// This key is not yet in this pool — append a new credential so multiple distinct
+			// Google AI Studio keys coexist and load-balance together in the same pool.
+			_, err = tx.Exec(ctx,
+				`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy)
+				 VALUES ($1, $2, $3, $4, $5, true)`,
+				poolID, ProviderGemini, encryptedKey, geminiBaseURL, weight,
+			)
+			if err != nil {
+				return 0, nil, fmt.Errorf("failed to bind gemini credential to pool %s: %w", pattern, err)
+			}
 			}
 
 			discoveredModels = append(discoveredModels, pattern)
