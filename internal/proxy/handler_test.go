@@ -71,7 +71,7 @@ func TestForwardRequest_PrefixStripping(t *testing.T) {
 		},
 	}
 
-	h := NewHandler(mockClient, cacheStore, logger, nil, nil)
+	h := NewHandler(mockClient, cacheStore, logger, nil, nil, nil)
 
 	requestBody := `{"model": "exampleprefix/claude-fable", "messages": [{"role": "user", "content": "hi"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(requestBody))
@@ -405,7 +405,7 @@ func TestHandle_CloudflareImageStripsPrefixFromURL(t *testing.T) {
 		},
 	}
 
-	h := NewHandler(mockClient, cacheStore, logger, nil, nil)
+	h := NewHandler(mockClient, cacheStore, logger, nil, nil, nil)
 
 	requestBody := `{"model":"cloudflare/@cf/runwayml/stable-diffusion-v1-5-inpainting","prompt":"a cat"}`
 	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(requestBody))

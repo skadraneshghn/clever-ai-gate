@@ -34,19 +34,20 @@ const metadataScanLimit = 256 * 1024 // 256KB
 // It sits on the hot-path and is designed for zero heap allocations
 // under normal operation using sync.Pool for buffer reuse.
 type Handler struct {
-	client      *http.Client
-	cache       *cache.Store
-	pipeline    *telemetry.Pipeline
-	broadcaster *cluster.Broadcaster // nil when Redis not configured; safe no-op
-	logger      *zap.Logger
-	bufPool     sync.Pool
-	rewriter    *Rewriter
-	stream      *StreamProxy
+	client       *http.Client
+	cache        *cache.Store
+	pipeline     *telemetry.Pipeline
+	broadcaster  *cluster.Broadcaster // nil when Redis not configured; safe no-op
+	logger       *zap.Logger
+	bufPool      sync.Pool
+	rewriter     *Rewriter
+	stream       *StreamProxy
+	AlertManager *telemetry.AlertManager
 }
 
 // NewHandler creates the proxy handler with all its dependencies.
 // broadcaster may be nil — all Broadcaster methods are nil-safe no-ops.
-func NewHandler(client *http.Client, cacheStore *cache.Store, logger *zap.Logger, pipeline *telemetry.Pipeline, broadcaster *cluster.Broadcaster) *Handler {
+func NewHandler(client *http.Client, cacheStore *cache.Store, logger *zap.Logger, pipeline *telemetry.Pipeline, broadcaster *cluster.Broadcaster, alertManager *telemetry.AlertManager) *Handler {
 	h := &Handler{
 		client:      client,
 		cache:       cacheStore,
@@ -58,7 +59,8 @@ func NewHandler(client *http.Client, cacheStore *cache.Store, logger *zap.Logger
 				return bytes.NewBuffer(make([]byte, 0, 32*1024)) // 32KB initial scratch
 			},
 		},
-		rewriter: NewRewriter(),
+		rewriter:     NewRewriter(),
+		AlertManager: alertManager,
 	}
 	h.stream = NewStreamProxy(client, logger)
 	return h
@@ -673,6 +675,21 @@ retryLoop:
 
 		// Increment consecutive failures atomically
 		failures := atomic.AddUint32(&result.Credential.ConsecutiveFailures, 1)
+
+		// Record rotation telemetry
+		if h.AlertManager != nil {
+			errStr := "request failed"
+			if err != nil {
+				errStr = err.Error()
+			} else if len(errBody) > 0 {
+				if len(errBody) > 100 {
+					errStr = string(errBody[:100]) + "..."
+				} else {
+					errStr = string(errBody)
+				}
+			}
+			_ = h.AlertManager.TrackFailover(c.Request.Context(), result.Credential.ID, pctx.model, errStr)
+		}
 
 		cooldownDuration := cooldownForStatus(recStatus)
 		if result.Credential.Provider == "puter" {

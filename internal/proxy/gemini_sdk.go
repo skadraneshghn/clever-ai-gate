@@ -614,15 +614,46 @@ func (h *Handler) geminiSDKStream(
 		if emittedText != "" {
 			runContents = make([]*genai.Content, len(contents))
 			copy(runContents, contents)
-			// 1. Append the partial context generated so far
-			runContents = append(runContents, &genai.Content{
-				Role:  genai.RoleModel,
-				Parts: []*genai.Part{{Text: emittedText}},
-			})
-			// 2. Append steering instruction turn as a user message
+
+			// Edge Case Protection: If the last message is already a model turn, merge the text
+			if len(runContents) > 0 && (runContents[len(runContents)-1].Role == genai.RoleModel || runContents[len(runContents)-1].Role == "model") {
+				originalLast := runContents[len(runContents)-1]
+				clonedLast := &genai.Content{
+					Role: originalLast.Role,
+				}
+				if len(originalLast.Parts) > 0 {
+					clonedLast.Parts = make([]*genai.Part, len(originalLast.Parts))
+					copy(clonedLast.Parts, originalLast.Parts)
+					// Merge emittedText into the last part
+					lastPartIdx := len(clonedLast.Parts) - 1
+					origPart := clonedLast.Parts[lastPartIdx]
+					clonedLast.Parts[lastPartIdx] = &genai.Part{
+						Text:             origPart.Text + emittedText,
+						InlineData:       origPart.InlineData,
+						FunctionCall:     origPart.FunctionCall,
+						FunctionResponse: origPart.FunctionResponse,
+						FileData:         origPart.FileData,
+					}
+				} else {
+					clonedLast.Parts = []*genai.Part{{Text: emittedText}}
+				}
+				runContents[len(runContents)-1] = clonedLast
+			} else {
+				// Otherwise, append a clean model turn
+				runContents = append(runContents, &genai.Content{
+					Role:  genai.RoleModel,
+					Parts: []*genai.Part{{Text: emittedText}},
+				})
+			}
+
+			// Append the required user instruction turn to force continuation
 			runContents = append(runContents, &genai.Content{
 				Role:  genai.RoleUser,
-				Parts: []*genai.Part{{Text: "[SYSTEM CONTEXT: Your previous output was cut off mid-sentence. Continue generating the response precisely from the last character above. Do NOT output any introductory text, do NOT repeat any code, and do NOT wrap the code in markdown code blocks or code fences. Resume the stream directly.]"}},
+				Parts: []*genai.Part{
+					{
+						Text: "[SYSTEM CONTEXT: Your previous output was cut off mid-generation due to a network dropout. Continue generating the response precisely from the last character above. Do NOT output any introductory remarks, do NOT repeat any code, and do NOT wrap code inside markdown blocks. Resume the code output directly.]",
+					},
+				},
 			})
 		} else {
 			runContents = contents
@@ -638,6 +669,17 @@ func (h *Handler) geminiSDKStream(
 			if err != nil {
 				streamErr = err
 				break
+			}
+
+			// Pre-emptive safety/filter block check using stringified FinishReason from SDK
+			if len(chunk.Candidates) > 0 {
+				reasonRaw := strings.ToUpper(string(chunk.Candidates[0].FinishReason))
+				if reasonRaw != "" && reasonRaw != "STOP" && reasonRaw != "MAX_TOKENS" && reasonRaw != "STOP_SEQUENCE" {
+					if !hasEmittedValidData {
+						streamErr = fmt.Errorf("upstream generation dropped early by content filter: %s", reasonRaw)
+						break
+					}
+				}
 			}
 
 			chunkJSON, marshalErr := json.Marshal(chunk)
@@ -763,6 +805,11 @@ func (h *Handler) geminiSDKStream(
 			zap.Int("emitted_len", len(emittedText)),
 			zap.Error(streamErr),
 		)
+
+		// Track cluster-wide failover spike
+		if h.AlertManager != nil {
+			_ = h.AlertManager.TrackFailover(c.Request.Context(), pctx.credential.Credential.ID, pctx.model, streamErr.Error())
+		}
 
 		// Cooldown the failed key locally
 		cooldownDuration := 30 * time.Second

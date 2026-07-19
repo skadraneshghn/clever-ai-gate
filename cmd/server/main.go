@@ -166,10 +166,24 @@ func main() {
 	}
 	defer telemetryPipeline.Stop()
 
+	// --- Step 7.5: Initialize key failover telemetry AlertManager ---
+	var alertSupervisor *telemetry.AlertManager
+	if rawRedis != nil {
+		webhookURL := os.Getenv("TELEMETRY_ALERT_WEBHOOK")
+		alertSupervisor = telemetry.NewAlertManager(
+			rawRedis,
+			10,              // Threshold: 10 failovers
+			2*time.Minute,   // Rolling Window: 2 minutes
+			15*time.Minute,  // Cooldown / lock window: 15 minutes
+			webhookURL,
+		)
+		logger.Info("failover alert manager initialized", zap.String("webhook", webhookURL))
+	}
+
 	// --- Step 8: Build HTTP transport and proxy handler ---
 	transport, edgeProber := proxy.BuildOptimizedTransport(cfg, logger)
 	httpClient := proxy.BuildHTTPClient(transport)
-	proxyHandler := proxy.NewHandler(httpClient, cacheStore, logger, telemetryPipeline, broadcaster)
+	proxyHandler := proxy.NewHandler(httpClient, cacheStore, logger, telemetryPipeline, broadcaster, alertSupervisor)
 
 	// Start edge IP probing and connection pre-warming
 	edgeProber.Start()
