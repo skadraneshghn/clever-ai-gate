@@ -421,6 +421,25 @@ func (h *Handler) geminiSDKNonStream(
 		return status, body, nil
 	}
 
+	// In-Flight Content Validation: Reject responses with empty candidates, nil text, and no function calls
+	hasContent := false
+	if resp != nil && len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
+		for _, part := range resp.Candidates[0].Content.Parts {
+			if part.Text != "" || part.FunctionCall != nil {
+				hasContent = true
+				break
+			}
+		}
+	}
+	if !hasContent {
+		h.logger.Warn("gemini sdk non-stream empty content response caught, triggering failover",
+			zap.String("model", pctx.model),
+			zap.Int("credential_id", pctx.credential.Credential.ID),
+		)
+		// Return 502 Bad Gateway to let executeWithRetry rotate keys
+		return http.StatusBadGateway, []byte(`{"error":{"message":"empty or filtered response from upstream","type":"api_error"}}`), nil
+	}
+
 	translated, trErr := translateSDKResponse(resp, pctx.requestedModel)
 	if trErr != nil {
 		h.logger.Warn("gemini sdk non-stream response translation failed",
@@ -552,16 +571,6 @@ func (h *Handler) geminiSDKStream(
 	config *genai.GenerateContentConfig,
 	pctx *proxyContext,
 ) (int, []byte, error) {
-	// Write SSE headers before the first byte
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("Transfer-Encoding", "chunked")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
-	c.Writer.Header().Set("X-Gateway-Provider", "gemini")
-	c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
-	c.Writer.WriteHeader(http.StatusOK)
-
 	flusher, hasFlusher := c.Writer.(http.Flusher)
 
 	var responseBuilder strings.Builder
@@ -576,6 +585,24 @@ func (h *Handler) geminiSDKStream(
 	attempt := 0
 	emittedText := ""
 	currentClient := client
+
+	headersWritten := false
+	writeHeaders := func() {
+		if headersWritten {
+			return
+		}
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.Header().Set("Connection", "keep-alive")
+		c.Writer.Header().Set("Transfer-Encoding", "chunked")
+		c.Writer.Header().Set("X-Accel-Buffering", "no")
+		c.Writer.Header().Set("X-Gateway-Provider", "gemini")
+		c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+		c.Writer.WriteHeader(http.StatusOK)
+		headersWritten = true
+	}
+
+	hasEmittedValidData := false
 
 	for attempt < maxFailoverAttempts {
 		attempt++
@@ -624,6 +651,20 @@ func (h *Handler) geminiSDKStream(
 				continue
 			}
 
+			// Pre-emptive safety/filter block interceptor
+			if finishReason, fErr := jsonparser.GetString(translated, "choices", "[0]", "finish_reason"); fErr == nil {
+				if (finishReason == "content_filter" || finishReason == "error") && !hasEmittedValidData {
+					streamErr = fmt.Errorf("upstream generation intercepted by content filter block")
+					break
+				}
+			}
+			if finishReason, fErr := jsonparser.GetString(translated, "choices", "[0]", "delta", "finish_reason"); fErr == nil {
+				if (finishReason == "content_filter" || finishReason == "error") && !hasEmittedValidData {
+					streamErr = fmt.Errorf("upstream generation intercepted by content filter block")
+					break
+				}
+			}
+
 			// Rewrite the model field to match the requested model name.
 			if pctx.requestedModel != "" {
 				if _, mErr := jsonparser.GetString(translated, "model"); mErr == nil {
@@ -646,6 +687,7 @@ func (h *Handler) geminiSDKStream(
 					responseBuilder.WriteString(cleanText)
 					emittedText += cleanText
 					tokenEstimate++
+					hasEmittedValidData = true
 				}
 			} else if reasoning, rErr := jsonparser.GetString(translated, "choices", "[0]", "delta", "reasoning_content"); rErr == nil {
 				cleanText = sanitizer.Sanitize(reasoning)
@@ -658,15 +700,22 @@ func (h *Handler) geminiSDKStream(
 					responseBuilder.WriteString(cleanText)
 					emittedText += cleanText
 					tokenEstimate++
+					hasEmittedValidData = true
 				}
 			} else {
 				cleanText = "PASSTHROUGH" // Non-text deltas (metadata, tool calls) bypass buffering
+				// Mark as valid data if this chunk contains function/tool calls
+				if _, _, _, tErr := jsonparser.Get(translated, "choices", "[0]", "delta", "tool_calls"); tErr == nil {
+					hasEmittedValidData = true
+				}
 			}
 
 			// If sanitizer is still buffering leading characters to look for markdown blocks, skip outputting
 			if cleanText == "" {
 				continue
 			}
+
+			writeHeaders()
 
 			c.Writer.Write([]byte("data: "))  //nolint:errcheck
 			c.Writer.Write(translated)        //nolint:errcheck
@@ -676,6 +725,11 @@ func (h *Handler) geminiSDKStream(
 			}
 		}
 
+		// Catch success exit with empty generated body
+		if streamErr == nil && !hasEmittedValidData && sanitizer.buffer == "" {
+			streamErr = fmt.Errorf("empty streaming body received from upstream")
+		}
+
 		if streamErr == nil {
 			// Stream completed successfully!
 			// Flush any remaining buffered text from the sanitizer (e.g. short streams)
@@ -683,6 +737,9 @@ func (h *Handler) geminiSDKStream(
 				responseBuilder.WriteString(flushedText)
 				emittedText += flushedText
 				tokenEstimate++
+				hasEmittedValidData = true
+
+				writeHeaders()
 
 				modelName := pctx.requestedModel
 				if modelName == "" {
@@ -699,7 +756,7 @@ func (h *Handler) geminiSDKStream(
 			break
 		}
 
-		// Mid-stream error encountered (e.g. 429 TPM/RPM limit exceeded, connection close)
+		// Mid-stream error encountered (e.g. 429, safety filter, connection close, empty output)
 		h.logger.Warn("mid-stream failure caught, initiating key failover protocol",
 			zap.String("model", pctx.model),
 			zap.Int("credential_id", pctx.credential.Credential.ID),
@@ -754,6 +811,19 @@ func (h *Handler) geminiSDKStream(
 
 		// Small delay to allow connections to settle before resuming
 		time.Sleep(200 * time.Millisecond)
+	}
+
+	if !headersWritten {
+		// All attempts failed without writing any headers or content
+		type oaErr struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		}
+		type oaEnvelope struct {
+			Error oaErr `json:"error"`
+		}
+		body, _ := json.Marshal(oaEnvelope{Error: oaErr{Message: "Gemini pool exhausted without generating valid content", Type: "api_error"}})
+		return http.StatusBadGateway, body, nil
 	}
 
 	c.Writer.Write([]byte("data: [DONE]\n\n")) //nolint:errcheck
