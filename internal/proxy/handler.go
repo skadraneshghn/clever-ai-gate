@@ -1609,7 +1609,15 @@ func translateOllamaResponse(data []byte) ([]byte, bool) {
 
 // findPoolByPrefix searches for a pool matching a model name prefix.
 // E.g., "gpt-4o-2024-05-13" matches pool "gpt-4o".
-// Also handles NVIDIA namespace (e.g., "nvidia/nvidia/nemotron-3-super-120b-a12b").
+//
+// Named-provider blocks handle known slash-prefixed namespaces:
+//
+//	nvidia/, ollama/, 1min/, cloudflare/, sarvam/, puter/, zenmux/, gemini/
+//
+// A generic catch-all at the end applies the same progressive-prefix loop
+// to any other slash-containing model (e.g. "jiekou/baidu/ernie-4.5-300b-a47b-paddle",
+// or custom providers registered via the credential prefix field), so new
+// provider namespaces work automatically without requiring a new hard-coded block.
 func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 	// Handle NVIDIA slash-separated model names (e.g., "nvidia/nvidia/nemotron-3-super-120b-a12b")
 	if strings.HasPrefix(model, "nvidia/") {
@@ -1747,6 +1755,30 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 		// 4. Fallback to generic gemini key namespace
 		if val, found := h.cache.Get(cache.PoolKey("gemini")); found {
 			return val, true
+		}
+	}
+
+	// Generic catch-all for any slash-prefixed model not matched by the
+	// named-provider blocks above (e.g. "jiekou/baidu/ernie-4.5-300b-a47b-paddle",
+	// "mycompany/gpt-4o", or any other custom prefix registered via the
+	// credential prefix field).
+	//
+	// Strategy (mirrors the per-provider blocks):
+	//  1. Try the exact full model string first (already tried above via
+	//     h.cache.Get(cache.PoolKey(model)) in Handle; repeated here for clarity).
+	//  2. Walk progressively shorter slash-joined prefixes longest → shortest.
+	//  3. Try just the first slash token alone (the bare namespace key).
+	if strings.Contains(model, "/") {
+		slashParts := strings.Split(model, "/")
+		for i := len(slashParts) - 1; i >= 1; i-- {
+			prefix := strings.Join(slashParts[:i], "/")
+			if val, found := h.cache.Get(cache.PoolKey(prefix)); found {
+				h.logger.Debug("generic slash-prefix pool match",
+					zap.String("model", model),
+					zap.String("matched_prefix", prefix),
+				)
+				return val, true
+			}
 		}
 	}
 

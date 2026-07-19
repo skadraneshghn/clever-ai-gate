@@ -451,3 +451,90 @@ func TestRewriteResponseModel(t *testing.T) {
 		t.Errorf("expected body to be unchanged when requestedModel is empty")
 	}
 }
+
+// TestFindPoolByPrefix_GenericSlash verifies that multi-slash model identifiers
+// (e.g. "jiekou/baidu/ernie-4.5-300b-a47b-paddle") are resolved correctly by the
+// generic catch-all block inside findPoolByPrefix, without requiring a dedicated
+// named-provider block.
+func TestFindPoolByPrefix_GenericSlash(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := &config.Config{
+		CacheMaxSizeMB:   10,
+		CacheNumCounters: 100,
+	}
+	cacheStore, err := cache.New(cfg, logger)
+	if err != nil {
+		t.Fatalf("failed to create cache: %v", err)
+	}
+	defer cacheStore.Close()
+
+
+	cred := &credentials.RuntimeCredential{
+		ID:       1,
+		Provider: "custom",
+		APIKey:   "sk-test",
+		BaseURL:  "https://example.com/v1",
+		Weight:   1,
+		Prefix:   "jiekou",
+	}
+
+	tests := []struct {
+		name         string
+		poolPattern  string // key stored in cache
+		requestModel string // model ID the client sends
+		wantFound    bool
+	}{
+		{
+			// findPoolByPrefix is only called AFTER the exact cache.Get(model) in
+			// Handle() fails. When pool_pattern == model exactly, Handle() catches it
+			// and never reaches findPoolByPrefix. The loop inside the catch-all
+			// generates prefixes strictly shorter than the full model string, so it
+			// correctly returns false here — ensuring we don't double-scan.
+			name:         "exact match not found (handled by Handle() before this function)",
+			poolPattern:  "jiekou/baidu/ernie-4.5-300b-a47b-paddle",
+			requestModel: "jiekou/baidu/ernie-4.5-300b-a47b-paddle",
+			wantFound:    false,
+		},
+		{
+			name:         "two-segment prefix match for three-segment model",
+			poolPattern:  "jiekou/baidu",
+			requestModel: "jiekou/baidu/ernie-4.5-300b-a47b-paddle",
+			wantFound:    true,
+		},
+		{
+			name:         "bare namespace key match",
+			poolPattern:  "jiekou",
+			requestModel: "jiekou/baidu/ernie-4.5-300b-a47b-paddle",
+			wantFound:    true,
+		},
+		{
+			name:         "no match returns false",
+			poolPattern:  "other/model",
+			requestModel: "jiekou/baidu/ernie-4.5-300b-a47b-paddle",
+			wantFound:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create a fresh cache for each sub-test to avoid pollution.
+			cs, cerr := cache.New(cfg, logger)
+			if cerr != nil {
+				t.Fatalf("failed to create cache: %v", cerr)
+			}
+			defer cs.Close()
+
+			pool := credentials.NewBalancedPool(tc.poolPattern, "round-robin", []*credentials.RuntimeCredential{cred}, nil)
+			cs.Set(cache.PoolKey(tc.poolPattern), pool, 100)
+			cs.Wait()
+
+			handler := NewHandler(nil, cs, logger, nil, nil, nil)
+			_, found := handler.findPoolByPrefix(tc.requestModel)
+			if found != tc.wantFound {
+				t.Errorf("findPoolByPrefix(%q) with pool %q: got found=%v, want found=%v",
+					tc.requestModel, tc.poolPattern, found, tc.wantFound)
+			}
+		})
+	}
+}
+
