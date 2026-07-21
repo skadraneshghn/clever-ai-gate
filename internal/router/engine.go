@@ -26,17 +26,18 @@ import (
 
 // Dependencies holds all the shared dependencies for route handlers.
 type Dependencies struct {
-	Config      *config.Config
-	DB          *pgxpool.Pool
-	Cache       *cache.Store
-	TenantCache *cache.RedisTenantCache // nil when Redis not configured
-	Redis       *redisclient.Client     // nil when Redis not configured
-	Vault       *credentials.Vault
-	Logger      *zap.Logger
-	Health      *health.Handler
-	Proxy       *proxy.Handler
-	LogHub      *telemetry.LogHub // non-blocking log broadcaster for the admin log viewer
-	Scheduler   *jobs.Scheduler  // nil when not initialized
+	Config        *config.Config
+	DB            *pgxpool.Pool
+	Cache         *cache.Store
+	TenantCache   *cache.RedisTenantCache    // nil when Redis not configured
+	Redis         *redisclient.Client        // nil when Redis not configured
+	RedisCacheMgr *cache.RedisCacheManager   // nil when Redis not configured; drives L2 cache
+	Vault         *credentials.Vault
+	Logger        *zap.Logger
+	Health        *health.Handler
+	Proxy         *proxy.Handler
+	LogHub        *telemetry.LogHub // non-blocking log broadcaster for the admin log viewer
+	Scheduler     *jobs.Scheduler  // nil when not initialized
 }
 
 // NewEngine creates and configures the Gin engine with all routes.
@@ -191,7 +192,7 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		adminGroup.DELETE("/tenants/:id", tenantHandler.Delete)
 
 		// Model pool management
-		poolHandler := admin.NewPoolHandler(deps.DB, deps.Vault, deps.Scheduler)
+		poolHandler := admin.NewPoolHandler(deps.DB, deps.Vault, deps.Scheduler, deps.RedisCacheMgr)
 		adminGroup.GET("/pools", poolHandler.List)
 		adminGroup.POST("/pools", poolHandler.Create)
 		// NOTE: static routes must be registered before Gin's parameterised :id patterns.
@@ -206,7 +207,7 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		adminGroup.POST("/pools/:id/credentials/:cred_id/test", poolHandler.TestCredential)
 
 		// Credential management
-		credHandler := admin.NewCredentialHandler(deps.DB, deps.Vault, deps.Scheduler)
+		credHandler := admin.NewCredentialHandler(deps.DB, deps.Vault, deps.Scheduler, deps.RedisCacheMgr)
 		adminGroup.GET("/credentials", credHandler.List)
 		adminGroup.POST("/credentials", credHandler.Create)
 		adminGroup.GET("/credentials/:id", credHandler.Get)

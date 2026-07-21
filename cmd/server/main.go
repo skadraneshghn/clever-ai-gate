@@ -126,11 +126,32 @@ func main() {
 		logger.Info("redis tenant L2 cache enabled")
 	}
 
-	// --- Step 5: Load routing pools from DB → cache ---
+	// --- Step 4.6: Initialize Redis Cache Manager (L2 for pools/models/providers) ---
+	var rawRedisForCache *redis.Client
+	if redisClient != nil {
+		rawRedisForCache = redisClient.Unwrap()
+	}
+	redisCacheMgr := cache.NewRedisCacheManager(rawRedisForCache, logger)
+
+	// --- Step 5: Load routing pools from DB → cache (+ pre-warm Redis L2) ---
 	syncManager := credentials.NewSyncManager(dbPool, cacheStore, vault, logger)
+	syncManager.SetRedisCacheManager(redisCacheMgr) // attach before LoadInitialState for pre-warming
 	if err := syncManager.LoadInitialState(ctx); err != nil {
 		logger.Fatal("failed to load initial routing state", zap.Error(err))
 	}
+
+	// --- Step 5.5: Subscribe to Redis cache sync events ---
+	// When any cluster node publishes an invalidation event (after pool/credential mutation),
+	// this node clears its Ristretto L1 so the next request re-reads fresh data from Redis L2.
+	redisCacheMgr.SubscribeCacheSync(func() {
+		logger.Info("[CacheSync] Received remote invalidation — reloading local routing state")
+		reloadCtx, reloadCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer reloadCancel()
+		if err := syncManager.LoadInitialState(reloadCtx); err != nil {
+			logger.Error("[CacheSync] Failed to reload state after remote invalidation", zap.Error(err))
+		}
+	})
+	defer redisCacheMgr.Stop()
 
 	// --- Step 6: Start LISTEN/NOTIFY watcher ---
 	syncManager.StartListener()
@@ -183,7 +204,7 @@ func main() {
 	// --- Step 8: Build HTTP transport and proxy handler ---
 	transport, edgeProber := proxy.BuildOptimizedTransport(cfg, logger)
 	httpClient := proxy.BuildHTTPClient(transport)
-	proxyHandler := proxy.NewHandler(httpClient, cacheStore, logger, telemetryPipeline, broadcaster, alertSupervisor)
+	proxyHandler := proxy.NewHandler(httpClient, cacheStore, redisCacheMgr, logger, telemetryPipeline, broadcaster, alertSupervisor)
 
 	// Start edge IP probing and connection pre-warming
 	edgeProber.Start()
@@ -210,17 +231,18 @@ func main() {
 
 	// --- Step 10: Build Gin engine with all routes ---
 	engine := router.NewEngine(&router.Dependencies{
-		Config:      cfg,
-		DB:          dbPool,
-		Cache:       cacheStore,
-		TenantCache: tenantCache,
-		Redis:       redisClient,
-		Vault:       vault,
-		Logger:      logger,
-		Health:      healthHandler,
-		Proxy:       proxyHandler,
-		LogHub:      logHub,
-		Scheduler:   jobScheduler,
+		Config:        cfg,
+		DB:            dbPool,
+		Cache:         cacheStore,
+		TenantCache:   tenantCache,
+		Redis:         redisClient,
+		RedisCacheMgr: redisCacheMgr,
+		Vault:         vault,
+		Logger:        logger,
+		Health:        healthHandler,
+		Proxy:         proxyHandler,
+		LogHub:        logHub,
+		Scheduler:     jobScheduler,
 	})
 
 	// --- Step 11: Start HTTP server ---

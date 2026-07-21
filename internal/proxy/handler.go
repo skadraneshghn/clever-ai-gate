@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,26 +35,28 @@ const metadataScanLimit = 256 * 1024 // 256KB
 // It sits on the hot-path and is designed for zero heap allocations
 // under normal operation using sync.Pool for buffer reuse.
 type Handler struct {
-	client       *http.Client
-	cache        *cache.Store
-	pipeline     *telemetry.Pipeline
-	broadcaster  *cluster.Broadcaster // nil when Redis not configured; safe no-op
-	logger       *zap.Logger
-	bufPool      sync.Pool
-	rewriter     *Rewriter
-	stream       *StreamProxy
-	AlertManager *telemetry.AlertManager
+	client        *http.Client
+	cache         *cache.Store
+	redisCacheMgr *cache.RedisCacheManager // nil when Redis not configured; all methods nil-safe
+	pipeline      *telemetry.Pipeline
+	broadcaster   *cluster.Broadcaster // nil when Redis not configured; safe no-op
+	logger        *zap.Logger
+	bufPool       sync.Pool
+	rewriter      *Rewriter
+	stream        *StreamProxy
+	AlertManager  *telemetry.AlertManager
 }
 
 // NewHandler creates the proxy handler with all its dependencies.
-// broadcaster may be nil — all Broadcaster methods are nil-safe no-ops.
-func NewHandler(client *http.Client, cacheStore *cache.Store, logger *zap.Logger, pipeline *telemetry.Pipeline, broadcaster *cluster.Broadcaster, alertManager *telemetry.AlertManager) *Handler {
+// broadcaster and redisCacheMgr may be nil — all methods are nil-safe no-ops.
+func NewHandler(client *http.Client, cacheStore *cache.Store, redisCacheMgr *cache.RedisCacheManager, logger *zap.Logger, pipeline *telemetry.Pipeline, broadcaster *cluster.Broadcaster, alertManager *telemetry.AlertManager) *Handler {
 	h := &Handler{
-		client:      client,
-		cache:       cacheStore,
-		pipeline:    pipeline,
-		broadcaster: broadcaster,
-		logger:      logger,
+		client:        client,
+		cache:         cacheStore,
+		redisCacheMgr: redisCacheMgr,
+		pipeline:      pipeline,
+		broadcaster:   broadcaster,
+		logger:        logger,
 		bufPool: sync.Pool{
 			New: func() interface{} {
 				return bytes.NewBuffer(make([]byte, 0, 32*1024)) // 32KB initial scratch
@@ -1898,12 +1901,40 @@ type ModelListResponse struct {
 
 // ListModels returns a list of configured active model pools with their
 // detected capabilities in OpenAI-compatible format.
+//
+// Read order:
+//  1. Redis L2 (< 1ms, shared across all gateway replicas)
+//  2. Ristretto L1 (sub-microsecond, local in-process)
+//  3. Empty list (no DB call — data is always pre-loaded at startup)
 func (h *Handler) ListModels(c *gin.Context) {
-	val, found := h.cache.Get("system:active_models")
-
 	var data []ModelDetail
 	now := time.Now().Unix()
 
+	// --- Tier 1: Redis L2 cache (serves all gateway replicas with single-digit ms) ---
+	if h.redisCacheMgr != nil {
+		var redisModels []cache.ActiveModelEntry
+		found, _ := h.redisCacheMgr.GetJSON(c.Request.Context(), cache.KeyActiveModels, &redisModels)
+		if found && len(redisModels) > 0 {
+			data = make([]ModelDetail, len(redisModels))
+			for i, m := range redisModels {
+				data[i] = ModelDetail{
+					ID:           m.Pattern,
+					Object:       "model",
+					Created:      now,
+					OwnedBy:      "clever-ai-gate",
+					Capabilities: m.Capabilities,
+				}
+			}
+			c.JSON(http.StatusOK, ModelListResponse{
+				Object: "list",
+				Data:   data,
+			})
+			return
+		}
+	}
+
+	// --- Tier 2: Ristretto L1 cache (sub-microsecond, local in-process) ---
+	val, found := h.cache.Get("system:active_models")
 	if found {
 		// New enriched format: []credentials.ActiveModel
 		if models, ok := val.([]credentials.ActiveModel); ok {
@@ -1916,6 +1947,20 @@ func (h *Handler) ListModels(c *gin.Context) {
 					OwnedBy:      "clever-ai-gate",
 					Capabilities: m.Capabilities,
 				}
+			}
+			// Back-fill Redis L2 asynchronously from Ristretto L1 data.
+			// This heals a Redis cache miss without blocking the response.
+			if h.redisCacheMgr != nil && len(models) > 0 {
+				go func(m []credentials.ActiveModel) {
+					entries := make([]cache.ActiveModelEntry, len(m))
+					for i, am := range m {
+						entries[i] = cache.ActiveModelEntry{
+							Pattern:      am.Pattern,
+							Capabilities: am.Capabilities,
+						}
+					}
+					h.redisCacheMgr.SetJSON(context.Background(), cache.KeyActiveModels, entries, cache.DefaultCacheTTL)
+				}(models)
 			}
 		}
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/skadraneshghn/clever-ai-gate/api/dto"
+	"github.com/skadraneshghn/clever-ai-gate/internal/cache"
 	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
 	"github.com/skadraneshghn/clever-ai-gate/internal/database"
 	"github.com/skadraneshghn/clever-ai-gate/internal/jobs"
@@ -21,14 +22,15 @@ import (
 
 // PoolHandler provides CRUD operations for model routing pools.
 type PoolHandler struct {
-	db        *pgxpool.Pool
-	vault     *credentials.Vault
-	scheduler *jobs.Scheduler
+	db            *pgxpool.Pool
+	vault         *credentials.Vault
+	scheduler     *jobs.Scheduler
+	redisCacheMgr *cache.RedisCacheManager // nil-safe; invalidates on every mutation
 }
 
 // NewPoolHandler creates a new pool handler.
-func NewPoolHandler(db *pgxpool.Pool, vault *credentials.Vault, scheduler *jobs.Scheduler) *PoolHandler {
-	return &PoolHandler{db: db, vault: vault, scheduler: scheduler}
+func NewPoolHandler(db *pgxpool.Pool, vault *credentials.Vault, scheduler *jobs.Scheduler, redisCacheMgr *cache.RedisCacheManager) *PoolHandler {
+	return &PoolHandler{db: db, vault: vault, scheduler: scheduler, redisCacheMgr: redisCacheMgr}
 }
 
 // List returns all model routing pools.
@@ -256,6 +258,9 @@ func (h *PoolHandler) Create(c *gin.Context) {
 		return
 	}
 
+	// Invalidate Redis cache so all cluster nodes get fresh model list.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+
 	c.JSON(http.StatusCreated, dto.PoolResponse{
 		ID:             id,
 		ModelPattern:   req.ModelPattern,
@@ -296,6 +301,9 @@ func (h *PoolHandler) Update(c *gin.Context) {
 		return
 	}
 
+	// Invalidate Redis cache so all cluster nodes get fresh model list.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+
 	c.JSON(http.StatusOK, dto.SuccessResponse{Message: "pool updated successfully"})
 }
 
@@ -321,6 +329,9 @@ func (h *PoolHandler) Delete(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to delete pool", Details: err.Error()})
 		return
 	}
+
+	// Invalidate Redis cache so all cluster nodes get fresh model list.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
 
 	c.JSON(http.StatusOK, dto.SuccessResponse{Message: "pool deleted successfully"})
 }
@@ -596,6 +607,9 @@ func (h *PoolHandler) BulkDelete(c *gin.Context) {
 		return
 	}
 
+	// Invalidate Redis cache so all cluster nodes get fresh model list.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+
 	c.JSON(http.StatusOK, dto.SuccessResponse{Message: fmt.Sprintf("%d model pools deleted successfully", len(req.IDs))})
 }
 
@@ -702,6 +716,9 @@ func (h *PoolHandler) PurgeUnhealthyPools(c *gin.Context) {
 	// Broadcast reload so all cluster nodes evict the deleted patterns immediately.
 	_, _ = h.db.Exec(ctx, "NOTIFY config_change, 'model_pools:reload'")
 
+	// Invalidate Redis cache so all cluster nodes get fresh model list.
+	h.redisCacheMgr.InvalidateAndPublish(ctx)
+
 	c.JSON(http.StatusOK, gin.H{
 		"message": fmt.Sprintf("%d pool(s) with 0%% healthy credentials permanently removed from the gateway.", deleted),
 		"deleted": deleted,
@@ -736,6 +753,9 @@ func (h *PoolHandler) BulkActivate(c *gin.Context) {
 
 	// Broadcast reload so all cluster nodes hot-swap their routing cache and load the newly activated credentials.
 	_, _ = h.db.Exec(ctx, "NOTIFY config_change, 'model_pools:reload'")
+
+	// Invalidate Redis cache so all cluster nodes get updated credential/health data.
+	h.redisCacheMgr.InvalidateAndPublish(ctx)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":   fmt.Sprintf("Successfully activated %d credentials/tokens across %d pools.", activated, len(req.IDs)),
