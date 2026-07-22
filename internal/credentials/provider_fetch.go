@@ -26,7 +26,7 @@ func fetchProviderDiscoveredModels(ctx context.Context, acc providerAccount, api
 		}
 		cleanBase := strings.TrimSuffix(baseURL, "/v1")
 
-		client := &http.Client{Timeout: 15 * time.Second}
+		client := &http.Client{Timeout: 3 * time.Second}
 		req, err := http.NewRequestWithContext(ctx, "GET", cleanBase+"/v1/models", nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build nvidia discovery request: %w", err)
@@ -68,7 +68,7 @@ func fetchProviderDiscoveredModels(ctx context.Context, acc providerAccount, api
 		}
 
 	case "ollama":
-		client := &http.Client{Timeout: 15 * time.Second}
+		client := &http.Client{Timeout: 3 * time.Second}
 		baseURL := strings.TrimRight(acc.BaseURL, "/")
 		req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/api/tags", nil)
 		if err != nil {
@@ -131,9 +131,6 @@ func fetchProviderDiscoveredModels(ctx context.Context, acc providerAccount, api
 		}
 
 	case "1minai":
-		if err := validateOneMinAIKey(ctx, apiKey); err != nil {
-			return nil, err
-		}
 		for _, entry := range oneminaiManifest {
 			caps := ClassifyModel(entry.Pattern)
 			switch entry.Modality {
@@ -162,38 +159,66 @@ func fetchProviderDiscoveredModels(ctx context.Context, acc providerAccount, api
 
 	case "cloudflare":
 		accountID := strings.TrimPrefix(acc.BaseURL, "cloudflare:")
-		sdkModels, sdkErr := fetchCloudflareSDKModels(ctx, accountID, apiKey)
-		docModels, docErr := fetchCloudflareDocModels(ctx)
+		reqURL := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/ai/models/search?per_page=1000", accountID)
 
-		if sdkErr != nil && docErr != nil {
-			return nil, fmt.Errorf("cloudflare discovery failed — SDK: %v; docs: %v", sdkErr, docErr)
-		}
+		client := &http.Client{Timeout: 3 * time.Second}
+		req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+		if err == nil {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+			req.Header.Set("Accept", "application/json")
 
-		type mergedModel struct {
-			ID       string
-			TaskName string
-		}
-		unified := make(map[string]mergedModel)
-		for _, m := range sdkModels {
-			if m.Name != "" {
-				unified[m.Name] = mergedModel{ID: m.Name, TaskName: m.Task.Name}
-			}
-		}
-		for _, dm := range docModels {
-			if _, exists := unified[dm.ID]; !exists {
-				unified[dm.ID] = mergedModel{ID: dm.ID, TaskName: dm.TaskHint}
-			}
-		}
-
-		for _, m := range unified {
-			var caps ModelCapabilities
-			if m.TaskName != "" {
-				caps = cloudflareTaskCapabilities(m.TaskName)
-				if caps == (ModelCapabilities{}) {
-					caps = inferCapabilitiesFromTask(m.TaskName)
+			resp, err := client.Do(req)
+			if err == nil && resp.StatusCode == http.StatusOK {
+				var cfPayload struct {
+					Result []struct {
+						ID   string `json:"id"`
+						Name string `json:"name"`
+						Task struct {
+							Name string `json:"name"`
+						} `json:"task"`
+					} `json:"result"`
 				}
+				if json.NewDecoder(resp.Body).Decode(&cfPayload) == nil && len(cfPayload.Result) > 0 {
+					resp.Body.Close()
+					for _, m := range cfPayload.Result {
+						modelID := m.Name
+						if modelID == "" {
+							modelID = m.ID
+						}
+						if modelID == "" {
+							continue
+						}
+						caps := cloudflareTaskCapabilities(m.Task.Name)
+						patterns := []string{"cloudflare/" + modelID, modelID}
+						for _, pat := range patterns {
+							items = append(items, DiscoveredModelItem{
+								ModelPattern: pat,
+								Provider:     "cloudflare",
+								BaseURL:      acc.BaseURL,
+								RawAPIKey:    apiKey,
+								Weight:       weight,
+								Prefix:       acc.Prefix,
+								Capabilities: caps,
+							})
+						}
+					}
+					return items, nil
+				}
+				resp.Body.Close()
 			}
-			patterns := []string{"cloudflare/" + m.ID, m.ID}
+		}
+
+		// Fallback to SDK fetch
+		sdkModels, sdkErr := fetchCloudflareSDKModels(ctx, accountID, apiKey)
+		if sdkErr != nil {
+			return nil, fmt.Errorf("cloudflare search and SDK fetch failed: %w", sdkErr)
+		}
+		for _, m := range sdkModels {
+			if m.Name == "" {
+				continue
+			}
+			caps := cloudflareTaskCapabilities(m.Task.Name)
+			patterns := []string{"cloudflare/" + m.Name, m.Name}
 			for _, pat := range patterns {
 				items = append(items, DiscoveredModelItem{
 					ModelPattern: pat,
@@ -208,9 +233,6 @@ func fetchProviderDiscoveredModels(ctx context.Context, acc providerAccount, api
 		}
 
 	case "sarvam":
-		if err := validateSarvamKey(ctx, apiKey); err != nil {
-			return nil, err
-		}
 		for _, entry := range sarvamManifest {
 			caps := ClassifyModel(entry.Pattern)
 			patterns := []string{entry.Pattern, entry.Model}
@@ -254,7 +276,7 @@ func fetchProviderDiscoveredModels(ctx context.Context, acc providerAccount, api
 		}
 
 	case "zenmux":
-		client := &http.Client{Timeout: 15 * time.Second}
+		client := &http.Client{Timeout: 3 * time.Second}
 		req, err := http.NewRequestWithContext(ctx, "GET", ZenMuxBaseURL+"/models", nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build ZenMux discovery request: %w", err)
@@ -331,7 +353,7 @@ func fetchProviderDiscoveredModels(ctx context.Context, acc providerAccount, api
 		base := strings.TrimRight(acc.BaseURL, "/")
 		cleanBase := strings.TrimSuffix(base, "/v1")
 
-		client := &http.Client{Timeout: 15 * time.Second}
+		client := &http.Client{Timeout: 3 * time.Second}
 		req, err := http.NewRequestWithContext(ctx, "GET", cleanBase+"/v1/models", nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build custom discovery request: %w", err)

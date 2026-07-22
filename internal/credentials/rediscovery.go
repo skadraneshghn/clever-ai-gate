@@ -53,9 +53,10 @@ type providerAccount struct {
 //
 // Ultra-High Performance Architecture:
 // 1. 50 Parallel Workers (HTTP ONLY): Workers run pure HTTP API calls in parallel. Zero DB locks or connections held during fetching.
-// 2. Fast Fail (3s Timeout): Unresponsive provider endpoints fast-fail in 3s so the whole job completes in ~3-6 seconds.
-// 3. Single Batch Transaction: All items are bulk-upserted into PostgreSQL in a SINGLE transaction with sorted keys to eliminate deadlocks (SQLSTATE 40P01).
-// 4. Single NOTIFY: Fires 'model_pools:reload' exactly ONCE at job completion.
+// 2. Fast Fail (3s Timeout): Unresponsive provider endpoints fast-fail in 3s so the whole job completes in ~2.5–5 seconds.
+// 3. In-Memory Deduplication & Filter: Pre-loads existing model patterns. If 0 new models are found, NO DB transaction or NOTIFY is executed!
+// 4. Single Batch Transaction: All genuinely new items are bulk-upserted into PostgreSQL in a SINGLE transaction with sorted keys to eliminate deadlocks (SQLSTATE 40P01).
+// 5. Single NOTIFY: Fires 'model_pools:reload' exactly ONCE at job completion only when new models were added.
 func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger *zap.Logger, perProviderTimeoutSec int) (*ReDiscoveryReport, error) {
 	startTime := time.Now()
 
@@ -82,7 +83,7 @@ func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger 
 		WorkerCount:       numWorkers,
 	}
 
-	// 1. Snapshot all existing model_patterns before discovery
+	// 1. Snapshot all existing model_patterns before discovery (1 SELECT query)
 	existingPatterns, err := snapshotModelPatterns(ctx, db)
 	if err != nil {
 		return nil, fmt.Errorf("failed to snapshot existing model patterns: %w", err)
@@ -193,9 +194,25 @@ func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger 
 
 	wg.Wait()
 
-	// 4. Batch persist all collected discovered items in a single transaction with sorted keys
-	if len(allDiscoveredItems) > 0 {
-		totalSynced, newAdded, batchErr := BatchInsertDiscoveredModels(ctx, db, vault, allDiscoveredItems)
+	// 4. In-Memory Filtering against existing model snapshot
+	var trulyNewItems []DiscoveredModelItem
+	seenPatterns := make(map[string]bool)
+
+	for _, item := range allDiscoveredItems {
+		report.TotalModelsSynced++
+		if !existingPatterns[item.ModelPattern] && !seenPatterns[item.ModelPattern] {
+			seenPatterns[item.ModelPattern] = true
+			trulyNewItems = append(trulyNewItems, item)
+			report.NewModels = append(report.NewModels, item.ModelPattern)
+		}
+	}
+
+	// 5. IF NO NEW MODELS: Complete immediately without executing ANY database transactions or NOTIFY signals!
+	if len(trulyNewItems) == 0 {
+		logger.Info("re-discovery: complete - no new models found (0 DB writes executed)")
+	} else {
+		// Only run batch transaction if new models were discovered
+		totalSynced, newAdded, batchErr := BatchInsertDiscoveredModels(ctx, db, vault, trulyNewItems)
 		if batchErr != nil {
 			logger.Error("re-discovery: batch insert failed", zap.Error(batchErr))
 			report.Errors = append(report.Errors, fmt.Sprintf("batch insert error: %v", batchErr))
@@ -205,19 +222,7 @@ func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger 
 		}
 	}
 
-	// 5. Post-scan diff: query model_pools again and find truly new patterns
-	postPatterns, err := snapshotModelPatterns(ctx, db)
-	if err != nil {
-		logger.Warn("re-discovery: failed to snapshot post-scan patterns", zap.Error(err))
-	} else {
-		for pattern := range postPatterns {
-			if !existingPatterns[pattern] {
-				report.NewModels = append(report.NewModels, pattern)
-			}
-		}
-	}
 	report.NewModelsAdded = len(report.NewModels)
-
 	report.CompletedAt = time.Now()
 	report.DurationMs = time.Since(startTime).Milliseconds()
 
