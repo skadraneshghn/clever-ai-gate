@@ -44,7 +44,6 @@ var nvidiaUnsupportedFields = []string{
 // so it covers both the "nvidia/…" prefixed routing form and any clean alias
 // that resolves to an NVIDIA credential.
 func sanitizeNvidiaRequest(body []byte) []byte {
-	// Fast probe: skip the deletion pass entirely when no unsupported field is present.
 	needed := false
 	for _, f := range nvidiaUnsupportedFields {
 		if bytes.Contains(body, []byte(`"`+f+`"`)) {
@@ -52,6 +51,14 @@ func sanitizeNvidiaRequest(body []byte) []byte {
 			break
 		}
 	}
+
+	// Check if temperature is present and non-positive (NVIDIA NIM requires temperature > 0)
+	if !needed && bytes.Contains(body, []byte(`"temperature"`)) {
+		if temp, err := jsonparser.GetFloat(body, "temperature"); err == nil && temp <= 0 {
+			needed = true
+		}
+	}
+
 	if !needed {
 		return body
 	}
@@ -62,5 +69,14 @@ func sanitizeNvidiaRequest(body []byte) []byte {
 			out = jsonparser.Delete(out, f)
 		}
 	}
+
+	if bytes.Contains(out, []byte(`"temperature"`)) {
+		if temp, err := jsonparser.GetFloat(out, "temperature"); err == nil && temp <= 0 {
+			if updated, err := jsonparser.Set(out, []byte("0.7"), "temperature"); err == nil {
+				out = updated
+			}
+		}
+	}
+
 	return out
 }

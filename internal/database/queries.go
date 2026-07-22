@@ -422,15 +422,17 @@ func ListCredentialsByPool(ctx context.Context, pool *pgxpool.Pool, poolID int) 
 type CredentialWithPool struct {
 	CredentialRow
 	ModelPattern string
+	Capabilities []byte // JSONB raw bytes from model_pools
 }
 
 // ListAllCredentials returns all credentials across all pools, joined with
-// the model_pools table to include the model_pattern string.
+// the model_pools table to include the model_pattern string and capabilities.
 func ListAllCredentials(ctx context.Context, pool *pgxpool.Pool) ([]*CredentialWithPool, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT c.id, c.pool_id, c.provider, c.encrypted_key, c.base_url, c.weight,
 		       c.is_healthy, c.last_error, c.created_at::text,
-		       COALESCE(mp.model_pattern, '') AS model_pattern, c.prefix
+		       COALESCE(mp.model_pattern, '') AS model_pattern, c.prefix,
+		       COALESCE(mp.capabilities, '{}'::jsonb) AS capabilities
 		FROM credentials c
 		LEFT JOIN model_pools mp ON c.pool_id = mp.id
 		ORDER BY c.id
@@ -446,6 +448,7 @@ func ListAllCredentials(ctx context.Context, pool *pgxpool.Pool) ([]*CredentialW
 		if err := rows.Scan(
 			&c.ID, &c.PoolID, &c.Provider, &c.EncryptedKey, &c.BaseURL, &c.Weight,
 			&c.IsHealthy, &c.LastError, &c.CreatedAt, &c.ModelPattern, &c.Prefix,
+			&c.Capabilities,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan credential: %w", err)
 		}

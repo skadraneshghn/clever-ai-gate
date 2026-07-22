@@ -71,7 +71,7 @@ func TestForwardRequest_PrefixStripping(t *testing.T) {
 		},
 	}
 
-	h := NewHandler(mockClient, cacheStore, logger, nil, nil, nil)
+	h := NewHandler(mockClient, cacheStore, nil, logger, nil, nil, nil)
 
 	requestBody := `{"model": "exampleprefix/claude-fable", "messages": [{"role": "user", "content": "hi"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(requestBody))
@@ -405,7 +405,7 @@ func TestHandle_CloudflareImageStripsPrefixFromURL(t *testing.T) {
 		},
 	}
 
-	h := NewHandler(mockClient, cacheStore, logger, nil, nil, nil)
+	h := NewHandler(mockClient, cacheStore, nil, logger, nil, nil, nil)
 
 	requestBody := `{"model":"cloudflare/@cf/runwayml/stable-diffusion-v1-5-inpainting","prompt":"a cat"}`
 	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(requestBody))
@@ -528,7 +528,7 @@ func TestFindPoolByPrefix_GenericSlash(t *testing.T) {
 			cs.Set(cache.PoolKey(tc.poolPattern), pool, 100)
 			cs.Wait()
 
-			handler := NewHandler(nil, cs, logger, nil, nil, nil)
+			handler := NewHandler(nil, cs, nil, logger, nil, nil, nil)
 			_, found := handler.findPoolByPrefix(tc.requestModel)
 			if found != tc.wantFound {
 				t.Errorf("findPoolByPrefix(%q) with pool %q: got found=%v, want found=%v",

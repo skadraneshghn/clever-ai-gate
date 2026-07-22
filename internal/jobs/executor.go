@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -233,9 +235,35 @@ func isPermanentError(errStr string) bool {
 		strings.Contains(upper, "DELETED")
 }
 
+// HostRateLimiter caps maximum concurrent active health check probes per domain host
+// to prevent 503 ResourceExhausted rate limit bursts on upstream endpoints.
+type HostRateLimiter struct {
+	mu     sync.Mutex
+	limits map[string]chan struct{}
+}
+
+func NewHostRateLimiter() *HostRateLimiter {
+	return &HostRateLimiter{
+		limits: make(map[string]chan struct{}),
+	}
+}
+
+func (h *HostRateLimiter) Acquire(host string, maxConcurrent int) func() {
+	h.mu.Lock()
+	ch, exists := h.limits[host]
+	if !exists {
+		ch = make(chan struct{}, maxConcurrent)
+		h.limits[host] = ch
+	}
+	h.mu.Unlock()
+
+	ch <- struct{}{}
+	return func() { <-ch }
+}
+
 // --- Built-in Executor: bulk_pool_health_check ---
-// Iterates all credentials across every pool and executes a lightweight live
-// HTTP probe per credential (bounded by a semaphore of 20 workers).
+// Iterates all credentials across every pool and executes CPU-parallel,
+// adaptive capability-aware live HTTP probes per credential.
 //
 // Observability-only: probe results are logged and counted but NEVER written
 // back to the database or Redis. is_healthy is exclusively controlled by
@@ -243,9 +271,12 @@ func isPermanentError(errStr string) bool {
 
 func newBulkPoolHealthCheckExecutor(db *pgxpool.Pool, rdb *redis.Client, vault *credentials.Vault, logger *zap.Logger) ExecutorFunc {
 	return func(execCtx *ExecutionContext) (string, error) {
-		ctx := context.Background()
+		ctx := execCtx.Context
+		if ctx == nil {
+			ctx = context.Background()
+		}
 
-		// 1. Pull all credentials joined with pool model_pattern
+		// 1. Pull all credentials joined with pool model_pattern and capabilities
 		creds, err := database.ListAllCredentials(ctx, db)
 		if err != nil {
 			return "", fmt.Errorf("bulk health check: failed to list credentials: %w", err)
@@ -254,54 +285,78 @@ func newBulkPoolHealthCheckExecutor(db *pgxpool.Pool, rdb *redis.Client, vault *
 			return "No credentials found in database to evaluate.", nil
 		}
 
+		workerCount := runtime.NumCPU() * 4
+		if workerCount < 16 {
+			workerCount = 16
+		}
+
 		logger.Info("bulk_pool_health_check started",
 			zap.String("run_id", execCtx.RunID),
 			zap.Int("total_credentials", len(creds)),
+			zap.Int("cpu_workers", workerCount),
 		)
 
-		// 2. Bounded semaphore — max 20 parallel outbound connections
-		const maxWorkers = 20
-		sem := make(chan struct{}, maxWorkers)
-		var wg sync.WaitGroup
+		jobsChan := make(chan *database.CredentialWithPool, len(creds))
+		for _, cr := range creds {
+			jobsChan <- cr
+		}
+		close(jobsChan)
 
 		var successCount atomic.Int64
 		var failureCount atomic.Int64
+		var wg sync.WaitGroup
 
-		client := &http.Client{Timeout: 10 * time.Second}
+		hostLimiter := NewHostRateLimiter()
 
-		for _, cr := range creds {
+		// Tuned outbound HTTP client with high idle connection limits
+		client := &http.Client{
+			Timeout: 10 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:        500,
+				MaxIdleConnsPerHost: 30,
+				IdleConnTimeout:     30 * time.Second,
+			},
+		}
+
+		for i := 0; i < workerCount; i++ {
 			wg.Add(1)
-			sem <- struct{}{}
-
-			go func(c *database.CredentialWithPool) {
+			go func() {
 				defer wg.Done()
-				defer func() { <-sem }()
 
-				// Decrypt key securely per credential
-				apiKey, decErr := vault.Decrypt(c.EncryptedKey)
-				if decErr != nil {
-					logger.Error("bulk health: key decryption failed (no action taken)",
-						zap.Int("cred_id", c.ID), zap.Error(decErr))
-					failureCount.Add(1)
-					return
+				for c := range jobsChan {
+					// Acquire host concurrency lease (max 8 concurrent requests per host domain)
+					hostKey := "default"
+					if parsedURL, err := url.Parse(c.BaseURL); err == nil && parsedURL.Host != "" {
+						hostKey = parsedURL.Host
+					}
+					release := hostLimiter.Acquire(hostKey, 8)
+
+					// Decrypt key securely per credential
+					apiKey, decErr := vault.Decrypt(c.EncryptedKey)
+					if decErr != nil {
+						release()
+						logger.Error("bulk health: key decryption failed (no action taken)",
+							zap.Int("cred_id", c.ID), zap.Error(decErr))
+						failureCount.Add(1)
+						continue
+					}
+
+					isHealthy, errStr := probeCredential(ctx, client, c, apiKey)
+					release()
+
+					if !isHealthy && errStr != nil {
+						logger.Warn("bulk health: probe failed (no action taken — admin controls is_healthy)",
+							zap.Int("cred_id", c.ID),
+							zap.String("provider", c.Provider),
+							zap.String("model_pattern", c.ModelPattern),
+							zap.String("error", *errStr),
+						)
+						failureCount.Add(1)
+					} else {
+						successCount.Add(1)
+					}
 				}
-
-				isHealthy, errStr := probeCredential(ctx, client, c, apiKey)
-
-				// Log the probe result for observability — NO DB or Redis writes.
-				// is_healthy is exclusively controlled by admin action.
-				if !isHealthy && errStr != nil {
-					logger.Warn("bulk health: probe failed (no action taken — admin controls is_healthy)",
-						zap.Int("cred_id", c.ID),
-						zap.String("provider", c.Provider),
-						zap.String("model_pattern", c.ModelPattern),
-						zap.String("error", *errStr),
-					)
-					failureCount.Add(1)
-				} else {
-					successCount.Add(1)
-				}
-			}(cr)
+			}()
 		}
 
 		wg.Wait()
@@ -319,28 +374,27 @@ func newBulkPoolHealthCheckExecutor(db *pgxpool.Pool, rdb *redis.Client, vault *
 	}
 }
 
-// probeCredential sends a lightweight HTTP health probe to the upstream provider
+// probeCredential sends a capability- and provider-adaptive HTTP health probe
 // for a single credential and returns (isHealthy, *errorString).
 func probeCredential(ctx context.Context, client *http.Client, c *database.CredentialWithPool, apiKey string) (bool, *string) {
 	var req *http.Request
 	var buildErr error
 
 	if c.Provider == "ollama" {
-		// Ollama: use /api/tags instead of chat completions
-		url := strings.TrimRight(c.BaseURL, "/") + "/api/tags"
-		req, buildErr = http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		// Ollama: use /api/tags endpoint
+		urlStr := strings.TrimRight(c.BaseURL, "/") + "/api/tags"
+		req, buildErr = http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
 		if buildErr == nil {
 			req.Header.Set("Authorization", "Bearer "+apiKey)
 		}
 	} else {
-		// All other providers: POST /v1/chat/completions with a minimal payload
-		url := strings.TrimRight(c.BaseURL, "/")
-		if !strings.HasSuffix(url, "/v1") && c.Provider != "custom" {
-			url += "/v1"
+		// Parse capabilities JSON if present
+		var caps map[string]bool
+		if len(c.Capabilities) > 0 {
+			_ = json.Unmarshal(c.Capabilities, &caps)
 		}
-		url += "/chat/completions"
 
-		// Resolve wildcard model patterns to a concrete, tiny target model
+		// Resolve wildcard patterns
 		testModel := c.ModelPattern
 		if strings.Contains(testModel, "*") {
 			switch {
@@ -354,27 +408,23 @@ func probeCredential(ctx context.Context, client *http.Client, c *database.Crede
 				testModel = strings.ReplaceAll(testModel, "*", "latest")
 			}
 		}
-		testModel = strings.TrimPrefix(testModel, "nvidia/")
-		testModel = strings.TrimPrefix(testModel, "ollama/")
 
-		payload := map[string]interface{}{
-			"model": testModel,
-			"messages": []map[string]string{
-				{"role": "user", "content": "Reply with exactly: OK"},
-			},
-			"temperature": 0,
-			"max_tokens":  2,
+		probeReq, err := BuildAdaptiveProbeRequest(c.BaseURL, apiKey, c.Provider, testModel, caps)
+		if err != nil {
+			errStr := fmt.Sprintf("failed to build adaptive probe request: %v", err)
+			return false, &errStr
 		}
-		bodyBytes, _ := json.Marshal(payload)
-		req, buildErr = http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+
+		req, buildErr = http.NewRequestWithContext(ctx, probeReq.Method, probeReq.URL, bytes.NewReader(probeReq.Body))
 		if buildErr == nil {
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("Authorization", "Bearer "+apiKey)
+			for k, v := range probeReq.Headers {
+				req.Header.Set(k, v)
+			}
 		}
 	}
 
 	if buildErr != nil {
-		errStr := fmt.Sprintf("failed to build probe request: %v", buildErr)
+		errStr := fmt.Sprintf("failed to build HTTP request: %v", buildErr)
 		return false, &errStr
 	}
 

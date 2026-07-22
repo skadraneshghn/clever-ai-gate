@@ -151,3 +151,20 @@ func TestSanitizeNvidiaRequest_ReasoningBudgetNotStripped(t *testing.T) {
 		t.Error("sanitizeNvidiaRequest incorrectly stripped 'chat_template_kwargs' (should be preserved for reasoning models)")
 	}
 }
+
+func TestSanitizeNvidiaRequest_ClampsZeroTemperature(t *testing.T) {
+	input := `{"model":"nvidia/google/gemma-2-2b-it","messages":[{"role":"user","content":"hi"}],"temperature":0}`
+	body := []byte(input)
+
+	out := sanitizeNvidiaRequest(body)
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("invalid JSON after sanitize: %v", err)
+	}
+
+	temp, ok := result["temperature"].(float64)
+	if !ok || temp <= 0 {
+		t.Errorf("sanitizeNvidiaRequest did not clamp temperature 0 to > 0 value, got %v", result["temperature"])
+	}
+}
