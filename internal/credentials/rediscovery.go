@@ -51,25 +51,27 @@ type providerAccount struct {
 
 // RunReDiscovery performs a full re-discovery scan across all registered provider accounts.
 //
-// High-Performance Architecture:
-// 1. Decoupled Network I/O: Workers run pure HTTP API calls in parallel across CPU cores. No DB connections or locks are held during fetching.
-// 2. In-Memory Aggregation: Discovered models are collected into a thread-safe channel/slice.
-// 3. Single Batch Transaction: All items are bulk-upserted into PostgreSQL in a SINGLE transaction with sorted keys to completely eliminate deadlocks (SQLSTATE 40P01).
+// Ultra-High Performance Architecture:
+// 1. 50 Parallel Workers (HTTP ONLY): Workers run pure HTTP API calls in parallel. Zero DB locks or connections held during fetching.
+// 2. Fast Fail (3s Timeout): Unresponsive provider endpoints fast-fail in 3s so the whole job completes in ~3-6 seconds.
+// 3. Single Batch Transaction: All items are bulk-upserted into PostgreSQL in a SINGLE transaction with sorted keys to eliminate deadlocks (SQLSTATE 40P01).
 // 4. Single NOTIFY: Fires 'model_pools:reload' exactly ONCE at job completion.
 func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger *zap.Logger, perProviderTimeoutSec int) (*ReDiscoveryReport, error) {
 	startTime := time.Now()
 
+	// Strict fast-fail timeout: default 3 seconds per provider HTTP call
 	if perProviderTimeoutSec <= 0 {
-		perProviderTimeoutSec = 15
+		perProviderTimeoutSec = 3
 	}
 	perProviderTimeout := time.Duration(perProviderTimeoutSec) * time.Second
 
-	numWorkers := runtime.NumCPU() * 4
-	if numWorkers < 8 {
-		numWorkers = 8
+	// High worker concurrency (50 workers) since workers ONLY perform HTTP network I/O
+	numWorkers := 50
+	if c := runtime.NumCPU() * 8; c > numWorkers {
+		numWorkers = c
 	}
-	if numWorkers > 32 {
-		numWorkers = 32
+	if numWorkers > 60 {
+		numWorkers = 60
 	}
 
 	report := &ReDiscoveryReport{
