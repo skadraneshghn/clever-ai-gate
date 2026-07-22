@@ -6,6 +6,30 @@ import (
 	"testing"
 )
 
+func TestCleanUpstreamModel(t *testing.T) {
+	cases := []struct {
+		pattern  string
+		provider string
+		want     string
+	}{
+		{"nvidia/google/gemma-2-2b-it", "nvidia", "google/gemma-2-2b-it"},
+		{"nvidia/nvidia/nemoretriever-parse", "nvidia", "nvidia/nemoretriever-parse"},
+		{"cloudflare/@cf/meta/llama-3-8b-instruct", "cloudflare", "@cf/meta/llama-3-8b-instruct"},
+		{"ollama/llama3", "ollama", "llama3"},
+		{"1min/claude-3-5-sonnet", "1min", "claude-3-5-sonnet"},
+		{"huggingface/meta-llama/Llama-3.3-70B-Instruct", "huggingface", "meta-llama/Llama-3.3-70B-Instruct"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.pattern, func(t *testing.T) {
+			got := CleanUpstreamModel(tc.pattern, tc.provider)
+			if got != tc.want {
+				t.Errorf("CleanUpstreamModel(%q, %q) = %q; want %q", tc.pattern, tc.provider, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildAdaptiveProbeRequest_Embedding(t *testing.T) {
 	req, err := BuildAdaptiveProbeRequest("https://api.nvidia.com/v1", "key123", "nvidia", "nvidia/google/bge-m3", map[string]bool{"embedding": true})
 	if err != nil {
@@ -24,6 +48,9 @@ func TestBuildAdaptiveProbeRequest_Embedding(t *testing.T) {
 	if body["input"] != "health check" {
 		t.Errorf("expected input 'health check', got %v", body["input"])
 	}
+	if body["model"] != "google/bge-m3" {
+		t.Errorf("expected model 'google/bge-m3', got %v", body["model"])
+	}
 }
 
 func TestBuildAdaptiveProbeRequest_NvidiaTemperatureOverride(t *testing.T) {
@@ -41,6 +68,9 @@ func TestBuildAdaptiveProbeRequest_NvidiaTemperatureOverride(t *testing.T) {
 	if !ok || temp <= 0 {
 		t.Errorf("expected temperature > 0 for NVIDIA, got %v", body["temperature"])
 	}
+	if body["model"] != "google/gemma-2-2b-it" {
+		t.Errorf("expected model 'google/gemma-2-2b-it', got %v", body["model"])
+	}
 }
 
 func TestBuildAdaptiveProbeRequest_ParserMultimodal(t *testing.T) {
@@ -52,6 +82,10 @@ func TestBuildAdaptiveProbeRequest_ParserMultimodal(t *testing.T) {
 	var body map[string]interface{}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		t.Fatalf("invalid json body: %v", err)
+	}
+
+	if body["model"] != "nvidia/nemoretriever-parse" {
+		t.Errorf("expected model 'nvidia/nemoretriever-parse', got %v", body["model"])
 	}
 
 	messages, ok := body["messages"].([]interface{})
