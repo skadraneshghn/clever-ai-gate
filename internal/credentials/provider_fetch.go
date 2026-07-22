@@ -26,13 +26,14 @@ func fetchProviderDiscoveredModels(ctx context.Context, acc providerAccount, api
 		}
 		cleanBase := strings.TrimSuffix(baseURL, "/v1")
 
-		client := &http.Client{Timeout: 3 * time.Second}
+		client := &http.Client{Timeout: 8 * time.Second}
 		req, err := http.NewRequestWithContext(ctx, "GET", cleanBase+"/v1/models", nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build nvidia discovery request: %w", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "CleverAIGate-Discovery/1.0")
 
 		resp, err := client.Do(req)
 		if err != nil {
@@ -68,12 +69,13 @@ func fetchProviderDiscoveredModels(ctx context.Context, acc providerAccount, api
 		}
 
 	case "ollama":
-		client := &http.Client{Timeout: 3 * time.Second}
+		client := &http.Client{Timeout: 8 * time.Second}
 		baseURL := strings.TrimRight(acc.BaseURL, "/")
 		req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/api/tags", nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build ollama discovery request: %w", err)
 		}
+		req.Header.Set("User-Agent", "CleverAIGate-Discovery/1.0")
 		resp, err := client.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("ollama connection failed: %w", err)
@@ -161,11 +163,12 @@ func fetchProviderDiscoveredModels(ctx context.Context, acc providerAccount, api
 		accountID := strings.TrimPrefix(acc.BaseURL, "cloudflare:")
 		reqURL := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/ai/models/search?per_page=1000", accountID)
 
-		client := &http.Client{Timeout: 3 * time.Second}
+		client := &http.Client{Timeout: 8 * time.Second}
 		req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 		if err == nil {
 			req.Header.Set("Authorization", "Bearer "+apiKey)
 			req.Header.Set("Accept", "application/json")
+			req.Header.Set("User-Agent", "CleverAIGate-Discovery/1.0")
 
 			resp, err := client.Do(req)
 			if err == nil && resp.StatusCode == http.StatusOK {
@@ -276,13 +279,14 @@ func fetchProviderDiscoveredModels(ctx context.Context, acc providerAccount, api
 		}
 
 	case "zenmux":
-		client := &http.Client{Timeout: 3 * time.Second}
+		client := &http.Client{Timeout: 8 * time.Second}
 		req, err := http.NewRequestWithContext(ctx, "GET", ZenMuxBaseURL+"/models", nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build ZenMux discovery request: %w", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "CleverAIGate-Discovery/1.0")
 
 		resp, err := client.Do(req)
 		if err != nil {
@@ -349,17 +353,19 @@ func fetchProviderDiscoveredModels(ctx context.Context, acc providerAccount, api
 		}
 
 	default:
-		// Any OpenAI-compatible custom provider
+		// Any OpenAI-compatible custom provider (Cerebras, Bynara, Baseten, Freemodel, etc.)
 		base := strings.TrimRight(acc.BaseURL, "/")
 		cleanBase := strings.TrimSuffix(base, "/v1")
 
-		client := &http.Client{Timeout: 3 * time.Second}
+		client := &http.Client{Timeout: 8 * time.Second}
 		req, err := http.NewRequestWithContext(ctx, "GET", cleanBase+"/v1/models", nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build custom discovery request: %w", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("Api-Key", apiKey) // Baseten & custom provider header support
 		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "CleverAIGate-Discovery/1.0")
 
 		resp, err := client.Do(req)
 		if err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,30 +50,37 @@ type providerAccount struct {
 	Weight       int
 }
 
+// providerEndpointGroup aggregates all credentials registered for a unique (Provider, BaseURL, Prefix) target.
+type providerEndpointGroup struct {
+	Provider string
+	BaseURL  string
+	Prefix   string
+	Accounts []providerAccount
+}
+
 // RunReDiscovery performs a full re-discovery scan across all registered provider accounts.
 //
-// Ultra-High Performance Architecture:
-// 1. 50 Parallel Workers (HTTP ONLY): Workers run pure HTTP API calls in parallel. Zero DB locks or connections held during fetching.
-// 2. Fast Fail (3s Timeout): Unresponsive provider endpoints fast-fail in 3s so the whole job completes in ~2.5–5 seconds.
-// 3. In-Memory Deduplication & Filter: Pre-loads existing model patterns. If 0 new models are found, NO DB transaction or NOTIFY is executed!
-// 4. Single Batch Transaction: All genuinely new items are bulk-upserted into PostgreSQL in a SINGLE transaction with sorted keys to eliminate deadlocks (SQLSTATE 40P01).
-// 5. Single NOTIFY: Fires 'model_pools:reload' exactly ONCE at job completion only when new models were added.
+// Smart High-Performance Architecture:
+// 1. Endpoint Grouping: Groups credentials by (Provider, BaseURL, Prefix) to eliminate thundering herd bombardment (e.g. 26 simultaneous HTTP GETs to the same provider).
+// 2. Sequential Key Fallback: For each unique endpoint group, tries Key 1 first. If Key 1 succeeds, completes immediately! If Key 1 fails/throttled, falls back to Key 2.
+// 3. Generous 8s Timeout: Gives cold-start or slower proxies (Cerebras, Baseten, Freemodel) 8s to complete TLS handshakes and return models.
+// 4. In-Memory Deduplication & Zero-DB Filter: Pre-loads existing model patterns. If 0 new models are found, NO DB transaction or NOTIFY signal is executed!
+// 5. Single Batch Transaction: All genuinely new items are bulk-upserted into PostgreSQL in a SINGLE transaction with sorted keys to eliminate deadlocks (SQLSTATE 40P01).
 func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger *zap.Logger, perProviderTimeoutSec int) (*ReDiscoveryReport, error) {
 	startTime := time.Now()
 
-	// Strict fast-fail timeout: default 3 seconds per provider HTTP call
+	// Generous per-endpoint timeout: default 8 seconds
 	if perProviderTimeoutSec <= 0 {
-		perProviderTimeoutSec = 3
+		perProviderTimeoutSec = 8
 	}
 	perProviderTimeout := time.Duration(perProviderTimeoutSec) * time.Second
 
-	// High worker concurrency (50 workers) since workers ONLY perform HTTP network I/O
-	numWorkers := 50
-	if c := runtime.NumCPU() * 8; c > numWorkers {
+	numWorkers := 20
+	if c := runtime.NumCPU() * 4; c > numWorkers {
 		numWorkers = c
 	}
-	if numWorkers > 60 {
-		numWorkers = 60
+	if numWorkers > 40 {
+		numWorkers = 40
 	}
 
 	report := &ReDiscoveryReport{
@@ -105,96 +113,125 @@ func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger 
 		return report, nil
 	}
 
-	logger.Info("re-discovery: launching parallel provider scans",
+	// 3. Group accounts by unique (Provider, BaseURL, Prefix) to prevent thundering herd requests
+	endpointGroupsMap := make(map[string]*providerEndpointGroup)
+	var endpointGroupKeys []string
+
+	for _, acc := range accounts {
+		groupKey := fmt.Sprintf("%s|%s|%s", strings.ToLower(acc.Provider), strings.ToLower(acc.BaseURL), acc.Prefix)
+		grp, exists := endpointGroupsMap[groupKey]
+		if !exists {
+			grp = &providerEndpointGroup{
+				Provider: acc.Provider,
+				BaseURL:  acc.BaseURL,
+				Prefix:   acc.Prefix,
+			}
+			endpointGroupsMap[groupKey] = grp
+			endpointGroupKeys = append(endpointGroupKeys, groupKey)
+		}
+		grp.Accounts = append(grp.Accounts, acc)
+	}
+
+	logger.Info("re-discovery: launching smart parallel endpoint group scans",
 		zap.Int("account_count", len(accounts)),
+		zap.Int("unique_endpoint_groups", len(endpointGroupKeys)),
 		zap.Int("worker_count", numWorkers),
 		zap.Int("per_provider_timeout_sec", perProviderTimeoutSec),
 	)
 
-	// 3. Dispatch provider discovery tasks concurrently via bounded worker pool
+	// 4. Dispatch unique endpoint group tasks concurrently via bounded worker pool
 	sem := semaphore.NewWeighted(int64(numWorkers))
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
 	var allDiscoveredItems []DiscoveredModelItem
 
-	for _, acc := range accounts {
+	for _, groupKey := range endpointGroupKeys {
+		grp := endpointGroupsMap[groupKey]
+
 		if err := sem.Acquire(ctx, 1); err != nil {
 			break
 		}
 
 		wg.Add(1)
-		go func(acc providerAccount) {
+		go func(g *providerEndpointGroup) {
 			defer wg.Done()
 			defer sem.Release(1)
-
-			apiKey, decErr := vault.Decrypt(acc.EncryptedKey)
-			if decErr != nil {
-				errMsg := fmt.Sprintf("%s(%s): decrypt error: %v", acc.Provider, acc.BaseURL, decErr)
-				mu.Lock()
-				report.Errors = append(report.Errors, errMsg)
-				report.FailedEndpoints++
-				report.ProviderBreakdown = append(report.ProviderBreakdown, ProviderScanResult{
-					Provider: acc.Provider,
-					BaseURL:  acc.BaseURL,
-					Status:   "failed",
-					Error:    errMsg,
-				})
-				mu.Unlock()
-				return
-			}
-
-			weight := acc.Weight
-			if weight <= 0 {
-				weight = 1
-			}
 
 			taskCtx, cancel := context.WithTimeout(ctx, perProviderTimeout)
 			defer cancel()
 
-			discoveredItems, fetchErr := fetchProviderDiscoveredModels(taskCtx, acc, apiKey, weight)
-			if fetchErr != nil {
-				errMsg := fmt.Sprintf("%s(%s): %v", acc.Provider, acc.BaseURL, fetchErr)
+			var lastErr error
+			var discoveredItems []DiscoveredModelItem
+
+			// Try API keys for this provider endpoint sequentially until one succeeds
+			for _, acc := range g.Accounts {
+				apiKey, decErr := vault.Decrypt(acc.EncryptedKey)
+				if decErr != nil {
+					lastErr = fmt.Errorf("decrypt error: %w", decErr)
+					continue
+				}
+
+				weight := acc.Weight
+				if weight <= 0 {
+					weight = 1
+				}
+
+				items, fetchErr := fetchProviderDiscoveredModels(taskCtx, acc, apiKey, weight)
+				if fetchErr != nil {
+					lastErr = fetchErr
+					continue // Try next key in group if rate-limited or unauthorized
+				}
+
+				if len(items) > 0 {
+					discoveredItems = items
+					lastErr = nil
+					break // Success! Skip remaining duplicate keys for this endpoint group
+				}
+			}
+
+			if lastErr != nil && len(discoveredItems) == 0 {
+				errMsg := fmt.Sprintf("%s(%s): %v", g.Provider, g.BaseURL, lastErr)
 				mu.Lock()
 				report.Errors = append(report.Errors, errMsg)
-				report.FailedEndpoints++
+				report.FailedEndpoints += len(g.Accounts)
 				report.ProviderBreakdown = append(report.ProviderBreakdown, ProviderScanResult{
-					Provider: acc.Provider,
-					BaseURL:  acc.BaseURL,
+					Provider: g.Provider,
+					BaseURL:  g.BaseURL,
 					Status:   "failed",
 					Error:    errMsg,
 				})
 				mu.Unlock()
-				logger.Warn("re-discovery: provider scan failed",
-					zap.String("provider", acc.Provider),
-					zap.String("base_url", acc.BaseURL),
-					zap.Error(fetchErr),
+				logger.Warn("re-discovery: provider group scan failed",
+					zap.String("provider", g.Provider),
+					zap.String("base_url", g.BaseURL),
+					zap.Error(lastErr),
 				)
 				return
 			}
 
 			mu.Lock()
-			report.SuccessfulEndpoints++
+			report.SuccessfulEndpoints += len(g.Accounts)
 			allDiscoveredItems = append(allDiscoveredItems, discoveredItems...)
 			report.ProviderBreakdown = append(report.ProviderBreakdown, ProviderScanResult{
-				Provider:     acc.Provider,
-				BaseURL:      acc.BaseURL,
+				Provider:     g.Provider,
+				BaseURL:      g.BaseURL,
 				Status:       "success",
 				ModelsSynced: len(discoveredItems),
 			})
 			mu.Unlock()
 
-			logger.Info("re-discovery: provider scan completed",
-				zap.String("provider", acc.Provider),
-				zap.String("base_url", acc.BaseURL),
+			logger.Info("re-discovery: provider group scan completed",
+				zap.String("provider", g.Provider),
+				zap.String("base_url", g.BaseURL),
 				zap.Int("synced", len(discoveredItems)),
 			)
-		}(acc)
+		}(grp)
 	}
 
 	wg.Wait()
 
-	// 4. In-Memory Filtering against existing model snapshot
+	// 5. In-Memory Filtering against existing model snapshot
 	var trulyNewItems []DiscoveredModelItem
 	seenPatterns := make(map[string]bool)
 
@@ -207,7 +244,7 @@ func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger 
 		}
 	}
 
-	// 5. IF NO NEW MODELS: Complete immediately without executing ANY database transactions or NOTIFY signals!
+	// 6. IF NO NEW MODELS: Complete immediately without executing ANY database transactions or NOTIFY signals!
 	if len(trulyNewItems) == 0 {
 		logger.Info("re-discovery: complete - no new models found (0 DB writes executed)")
 	} else {
