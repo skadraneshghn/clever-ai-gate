@@ -51,11 +51,20 @@ func newProviderRediscoveryExecutor(db *pgxpool.Pool, vault *credentials.Vault, 
 			ctx = context.Background() // safe fallback for tests / manual calls
 		}
 
+		// Allow per-provider timeout to be configured via job payload.
+		// Default is 15 seconds (applied inside RunReDiscovery).
+		perProviderTimeout := 0
+		if v, ok := execCtx.Payload["per_provider_timeout_seconds"]; ok {
+			if d, ok := v.(float64); ok && d > 0 {
+				perProviderTimeout = int(d)
+			}
+		}
+
 		logger.Info("provider_rediscovery job started",
 			zap.String("run_id", execCtx.RunID),
 		)
 
-		report, err := credentials.RunReDiscovery(ctx, db, vault, logger)
+		report, err := credentials.RunReDiscovery(ctx, db, vault, logger, perProviderTimeout)
 		if err != nil {
 			return "", fmt.Errorf("re-discovery failed: %w", err)
 		}
@@ -67,6 +76,7 @@ func newProviderRediscoveryExecutor(db *pgxpool.Pool, vault *credentials.Vault, 
 			zap.String("run_id", execCtx.RunID),
 			zap.Int("new_models", report.NewModelsAdded),
 			zap.Int("total_synced", report.TotalModelsSynced),
+			zap.Int("workers_used", report.WorkerCount),
 			zap.Int64("duration_ms", report.DurationMs),
 		)
 

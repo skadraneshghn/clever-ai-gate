@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
+	"golang.org/x/sync/semaphore"
 )
 
 // ReDiscoveryReport holds the aggregated results of a full provider re-discovery scan.
@@ -25,6 +28,7 @@ type ReDiscoveryReport struct {
 	StartedAt             time.Time             `json:"started_at"`
 	CompletedAt           time.Time             `json:"completed_at"`
 	DurationMs            int64                 `json:"duration_ms"`
+	WorkerCount           int                   `json:"worker_count"`
 }
 
 // ProviderScanResult records the outcome of scanning a single provider account.
@@ -51,21 +55,46 @@ type providerAccount struct {
 // The algorithm:
 //  1. Snapshot every existing model_pattern from model_pools
 //  2. Query all distinct (provider, encrypted_key, base_url, prefix) tuples from credentials
-//  3. For each account, call the appropriate DiscoverAndRegister* function
-//  4. Diff the post-scan model_pools against the snapshot to find truly new models
-//  5. Build and return a ReDiscoveryReport
+//  3. Dispatch all accounts concurrently via a bounded worker pool (NumCPU * 4 goroutines)
+//  4. Each goroutine runs with an isolated per-provider timeout (default 15s) so one
+//     dead endpoint can never block others
+//  5. Diff the post-scan model_pools against the snapshot to find truly new models
+//  6. Build and return a ReDiscoveryReport
 //
 // This reuses the exact same per-provider discovery functions that RefreshAllProviders
-// calls synchronously — the difference is that this function runs inside an async job
-// and produces a structured diff-based report.
-func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger *zap.Logger) (*ReDiscoveryReport, error) {
+// calls synchronously — the difference is that this function runs inside an async job,
+// executes all providers in parallel across all CPU cores, and produces a structured
+// diff-based report.
+//
+// perProviderTimeoutSec controls the maximum duration for each individual provider
+// scan. Pass 0 to use the default of 15 seconds.
+func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger *zap.Logger, perProviderTimeoutSec int) (*ReDiscoveryReport, error) {
 	startTime := time.Now()
+
+	// Default per-provider timeout: 15 seconds (generous enough for Cloudflare SDK
+	// pagination, Gemini page tokens, and OpenRouter's large catalog).
+	if perProviderTimeoutSec <= 0 {
+		perProviderTimeoutSec = 15
+	}
+	perProviderTimeout := time.Duration(perProviderTimeoutSec) * time.Second
+
+	// Size the worker pool to saturate all CPU cores for I/O-bound work.
+	// Floor of 8 ensures decent parallelism on small machines; ceiling of 32
+	// prevents socket/DB connection pool exhaustion on large ones.
+	numWorkers := runtime.NumCPU() * 4
+	if numWorkers < 8 {
+		numWorkers = 8
+	}
+	if numWorkers > 32 {
+		numWorkers = 32
+	}
 
 	report := &ReDiscoveryReport{
 		NewModels:         make([]string, 0),
 		ProviderBreakdown: make([]ProviderScanResult, 0),
 		Errors:            make([]string, 0),
 		StartedAt:         startTime,
+		WorkerCount:       numWorkers,
 	}
 
 	// 1. Snapshot all existing model_patterns before discovery
@@ -90,75 +119,107 @@ func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger 
 		return report, nil
 	}
 
-	logger.Info("re-discovery: scanning provider accounts",
+	logger.Info("re-discovery: launching parallel provider scans",
 		zap.Int("account_count", len(accounts)),
+		zap.Int("worker_count", numWorkers),
+		zap.Int("per_provider_timeout_sec", perProviderTimeoutSec),
 	)
 
-	// 3. Re-run discovery for each unique account
+	// 3. Dispatch provider discovery tasks concurrently via bounded worker pool
+	sem := semaphore.NewWeighted(int64(numWorkers))
+	var wg sync.WaitGroup
+	var mu sync.Mutex // guards report fields during concurrent writes
+
 	for _, acc := range accounts {
-		apiKey, decErr := vault.Decrypt(acc.EncryptedKey)
-		if decErr != nil {
-			errMsg := fmt.Sprintf("%s(%s): decrypt error: %v", acc.Provider, acc.BaseURL, decErr)
-			report.Errors = append(report.Errors, errMsg)
-			report.FailedEndpoints++
-			report.ProviderBreakdown = append(report.ProviderBreakdown, ProviderScanResult{
-				Provider: acc.Provider,
-				BaseURL:  acc.BaseURL,
-				Status:   "failed",
-				Error:    errMsg,
-			})
-			continue
+		// Acquire a worker slot; if the parent context is cancelled, stop dispatching.
+		if err := sem.Acquire(ctx, 1); err != nil {
+			break
 		}
 
-		weight := acc.Weight
-		if weight <= 0 {
-			weight = 1
-		}
+		wg.Add(1)
+		go func(acc providerAccount) {
+			defer wg.Done()
+			defer sem.Release(1)
 
-		count, discovered, discErr := callProviderDiscovery(ctx, db, vault, acc, apiKey, weight)
-		if discErr != nil {
-			errMsg := fmt.Sprintf("%s(%s): %v", acc.Provider, acc.BaseURL, discErr)
-			report.Errors = append(report.Errors, errMsg)
-			report.FailedEndpoints++
+			// Decrypt the API key (vault.Decrypt is stateless/AES-GCM — safe for concurrent use)
+			apiKey, decErr := vault.Decrypt(acc.EncryptedKey)
+			if decErr != nil {
+				errMsg := fmt.Sprintf("%s(%s): decrypt error: %v", acc.Provider, acc.BaseURL, decErr)
+				mu.Lock()
+				report.Errors = append(report.Errors, errMsg)
+				report.FailedEndpoints++
+				report.ProviderBreakdown = append(report.ProviderBreakdown, ProviderScanResult{
+					Provider: acc.Provider,
+					BaseURL:  acc.BaseURL,
+					Status:   "failed",
+					Error:    errMsg,
+				})
+				mu.Unlock()
+				return
+			}
+
+			weight := acc.Weight
+			if weight <= 0 {
+				weight = 1
+			}
+
+			// Per-provider isolated timeout: a dead/slow endpoint fails fast
+			// without blocking the other goroutines.
+			taskCtx, cancel := context.WithTimeout(ctx, perProviderTimeout)
+			defer cancel()
+
+			count, discovered, discErr := callProviderDiscovery(taskCtx, db, vault, acc, apiKey, weight)
+			if discErr != nil {
+				errMsg := fmt.Sprintf("%s(%s): %v", acc.Provider, acc.BaseURL, discErr)
+				mu.Lock()
+				report.Errors = append(report.Errors, errMsg)
+				report.FailedEndpoints++
+				report.ProviderBreakdown = append(report.ProviderBreakdown, ProviderScanResult{
+					Provider: acc.Provider,
+					BaseURL:  acc.BaseURL,
+					Status:   "failed",
+					Error:    errMsg,
+				})
+				mu.Unlock()
+				logger.Warn("re-discovery: provider scan failed",
+					zap.String("provider", acc.Provider),
+					zap.String("base_url", acc.BaseURL),
+					zap.Error(discErr),
+				)
+				return
+			}
+
+			// Identify which discovered models are actually new (O(1) map lookup)
+			var newFromThisProvider []string
+			for _, modelPattern := range discovered {
+				if !existingPatterns[modelPattern] {
+					newFromThisProvider = append(newFromThisProvider, modelPattern)
+				}
+			}
+
+			mu.Lock()
+			report.SuccessfulEndpoints++
+			report.TotalModelsSynced += count
 			report.ProviderBreakdown = append(report.ProviderBreakdown, ProviderScanResult{
-				Provider: acc.Provider,
-				BaseURL:  acc.BaseURL,
-				Status:   "failed",
-				Error:    errMsg,
+				Provider:     acc.Provider,
+				BaseURL:      acc.BaseURL,
+				Status:       "success",
+				ModelsSynced: count,
+				NewModels:    newFromThisProvider,
 			})
-			logger.Warn("re-discovery: provider scan failed",
+			mu.Unlock()
+
+			logger.Info("re-discovery: provider scan completed",
 				zap.String("provider", acc.Provider),
 				zap.String("base_url", acc.BaseURL),
-				zap.Error(discErr),
+				zap.Int("synced", count),
+				zap.Int("new", len(newFromThisProvider)),
 			)
-			continue
-		}
-
-		// Identify which discovered models are actually new
-		var newFromThisProvider []string
-		for _, modelPattern := range discovered {
-			if !existingPatterns[modelPattern] {
-				newFromThisProvider = append(newFromThisProvider, modelPattern)
-			}
-		}
-
-		report.SuccessfulEndpoints++
-		report.TotalModelsSynced += count
-		report.ProviderBreakdown = append(report.ProviderBreakdown, ProviderScanResult{
-			Provider:     acc.Provider,
-			BaseURL:      acc.BaseURL,
-			Status:       "success",
-			ModelsSynced: count,
-			NewModels:    newFromThisProvider,
-		})
-
-		logger.Info("re-discovery: provider scan completed",
-			zap.String("provider", acc.Provider),
-			zap.String("base_url", acc.BaseURL),
-			zap.Int("synced", count),
-			zap.Int("new", len(newFromThisProvider)),
-		)
+		}(acc)
 	}
+
+	// Wait for ALL goroutines to finish before building the final report
+	wg.Wait()
 
 	// 4. Post-scan diff: query model_pools again and find truly new patterns
 	postPatterns, err := snapshotModelPatterns(ctx, db)
@@ -178,12 +239,13 @@ func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger 
 	report.CompletedAt = time.Now()
 	report.DurationMs = time.Since(startTime).Milliseconds()
 
-	logger.Info("re-discovery: scan complete",
+	logger.Info("re-discovery: parallel scan complete",
 		zap.Int("endpoints_scanned", report.TotalEndpointsScanned),
 		zap.Int("successful", report.SuccessfulEndpoints),
 		zap.Int("failed", report.FailedEndpoints),
 		zap.Int("new_models", report.NewModelsAdded),
 		zap.Int("total_synced", report.TotalModelsSynced),
+		zap.Int("workers_used", numWorkers),
 		zap.Int64("duration_ms", report.DurationMs),
 	)
 
