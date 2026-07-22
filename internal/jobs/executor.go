@@ -115,47 +115,36 @@ func newTelemetryCleanupExecutor(db *pgxpool.Pool, logger *zap.Logger) ExecutorF
 }
 
 // --- Built-in Executor: credential_health_check ---
-// Marks credentials as unhealthy if they have a recent error.
+// Read-only audit of credential error state. is_healthy is exclusively
+// controlled by admin action — this job no longer mutates it automatically.
 
 func newCredentialHealthCheckExecutor(db *pgxpool.Pool, logger *zap.Logger) ExecutorFunc {
 	return func(ctx *ExecutionContext) (string, error) {
 		c := context.Background()
 
-		// Check for credentials that had errors in the last hour and mark them unhealthy
-		result, err := db.Exec(c, `
-			UPDATE credentials
-			SET is_healthy = FALSE
-			WHERE last_error IS NOT NULL
-			  AND last_error != ''
-			  AND is_healthy = TRUE
-		`)
-		if err != nil {
-			return "", fmt.Errorf("credential health check failed: %w", err)
+		// Count credentials that have a recorded error (read-only — no state mutation).
+		var withErrors int64
+		if err := db.QueryRow(c, `
+			SELECT COUNT(*) FROM credentials
+			WHERE last_error IS NOT NULL AND last_error != ''
+		`).Scan(&withErrors); err != nil {
+			return "", fmt.Errorf("credential health audit query failed: %w", err)
 		}
 
-		markedUnhealthy := result.RowsAffected()
+		// Count credentials currently flagged healthy by admin.
+		var healthy int64
+		_ = db.QueryRow(c, `SELECT COUNT(*) FROM credentials WHERE is_healthy = TRUE`).Scan(&healthy)
 
-		// Also recover credentials that had no recent errors
-		recovered, err := db.Exec(c, `
-			UPDATE credentials
-			SET is_healthy = TRUE
-			WHERE last_error IS NULL OR last_error = ''
-			  AND is_healthy = FALSE
-		`)
-		if err != nil {
-			logger.Warn("failed to recover credentials", zap.Error(err))
-		}
+		var total int64
+		_ = db.QueryRow(c, `SELECT COUNT(*) FROM credentials`).Scan(&total)
 
-		recoveredCount := int64(0)
-		if err == nil {
-			recoveredCount = recovered.RowsAffected()
-		}
-
-		logger.Info("credential_health_check complete",
-			zap.Int64("marked_unhealthy", markedUnhealthy),
-			zap.Int64("recovered", recoveredCount),
+		logger.Info("credential_health_check audit complete (read-only)",
+			zap.Int64("total", total),
+			zap.Int64("healthy", healthy),
+			zap.Int64("with_errors", withErrors),
 		)
-		return fmt.Sprintf("Health check: %d marked unhealthy, %d recovered", markedUnhealthy, recoveredCount), nil
+		return fmt.Sprintf("Health audit: %d/%d healthy, %d with recorded errors (no state changes — admin controls is_healthy)",
+			healthy, total, withErrors), nil
 	}
 }
 
@@ -245,15 +234,18 @@ func isPermanentError(errStr string) bool {
 }
 
 // --- Built-in Executor: bulk_pool_health_check ---
-// Iterates all credentials across every pool, executes a lightweight live
-// HTTP probe per credential (bounded by a semaphore of 20 workers),
-// persists the health result, and broadcasts a NOTIFY reload signal.
+// Iterates all credentials across every pool and executes a lightweight live
+// HTTP probe per credential (bounded by a semaphore of 20 workers).
+//
+// Observability-only: probe results are logged and counted but NEVER written
+// back to the database or Redis. is_healthy is exclusively controlled by
+// admin action — background jobs no longer disable credentials automatically.
 
 func newBulkPoolHealthCheckExecutor(db *pgxpool.Pool, rdb *redis.Client, vault *credentials.Vault, logger *zap.Logger) ExecutorFunc {
 	return func(execCtx *ExecutionContext) (string, error) {
 		ctx := context.Background()
 
-		// 1. Pull all active credentials joined with pool model_pattern
+		// 1. Pull all credentials joined with pool model_pattern
 		creds, err := database.ListAllCredentials(ctx, db)
 		if err != nil {
 			return "", fmt.Errorf("bulk health check: failed to list credentials: %w", err)
@@ -288,68 +280,40 @@ func newBulkPoolHealthCheckExecutor(db *pgxpool.Pool, rdb *redis.Client, vault *
 				// Decrypt key securely per credential
 				apiKey, decErr := vault.Decrypt(c.EncryptedKey)
 				if decErr != nil {
-					logger.Error("bulk health: key decryption failed",
+					logger.Error("bulk health: key decryption failed (no action taken)",
 						zap.Int("cred_id", c.ID), zap.Error(decErr))
-					errStr := fmt.Sprintf("decryption failure: %v", decErr)
-					_ = database.UpdateCredentialHealthState(ctx, db, c.ID, false, &errStr)
 					failureCount.Add(1)
 					return
 				}
 
 				isHealthy, errStr := probeCredential(ctx, client, c, apiKey)
 
-				persistHealthy := isHealthy
-				var cooldownInRedis bool
-
+				// Log the probe result for observability — NO DB or Redis writes.
+				// is_healthy is exclusively controlled by admin action.
 				if !isHealthy && errStr != nil {
-					if isPermanentError(*errStr) {
-						persistHealthy = false
-					} else {
-						// Rate limits, timeouts, or temporary network issues: keep healthy in DB, cool down in Redis
-						persistHealthy = true
-						cooldownInRedis = true
-					}
-				}
-
-				updateErr := database.UpdateCredentialHealthState(ctx, db, c.ID, persistHealthy, errStr)
-				if updateErr != nil {
-					logger.Warn("bulk health: failed to persist health state",
-						zap.Int("cred_id", c.ID), zap.Error(updateErr))
-				}
-
-				// Apply active cooldown inside Redis if rate-limited or transient-failing
-				if cooldownInRedis && rdb != nil {
-					cooldownKey := fmt.Sprintf("gate:key:%d:cooldown", c.ID)
-					rdb.Set(ctx, cooldownKey, "rate_limited_backoff", 30*time.Second)
-				}
-
-				// Clear active cooldown if fully healthy
-				if isHealthy && rdb != nil {
-					cooldownKey := fmt.Sprintf("gate:key:%d:cooldown", c.ID)
-					rdb.Del(ctx, cooldownKey)
-				}
-
-				if persistHealthy {
-					successCount.Add(1)
-				} else {
+					logger.Warn("bulk health: probe failed (no action taken — admin controls is_healthy)",
+						zap.Int("cred_id", c.ID),
+						zap.String("provider", c.Provider),
+						zap.String("model_pattern", c.ModelPattern),
+						zap.String("error", *errStr),
+					)
 					failureCount.Add(1)
+				} else {
+					successCount.Add(1)
 				}
 			}(cr)
 		}
 
 		wg.Wait()
 
-		// 3. Broadcast reload to all cluster nodes via PostgreSQL NOTIFY
-		_, _ = db.Exec(ctx, "NOTIFY config_change, 'model_pools:reload'")
-
 		summary := fmt.Sprintf(
-			"Bulk health evaluation complete — healthy: %d, unhealthy: %d (total: %d).",
+			"Bulk health probe complete — reachable: %d, unreachable: %d (total: %d). No state changes made.",
 			successCount.Load(), failureCount.Load(), len(creds),
 		)
 		logger.Info("bulk_pool_health_check finished",
 			zap.String("run_id", execCtx.RunID),
-			zap.Int64("healthy", successCount.Load()),
-			zap.Int64("unhealthy", failureCount.Load()),
+			zap.Int64("reachable", successCount.Load()),
+			zap.Int64("unreachable", failureCount.Load()),
 		)
 		return summary, nil
 	}

@@ -83,10 +83,9 @@ func (sm *SyncManager) LoadInitialState(ctx context.Context) error {
 		runtimeCreds := make([]*RuntimeCredential, 0, len(creds))
 
 		for _, cr := range creds {
-			if !cr.IsHealthy {
-				continue
-			}
-			// Decrypt the API key
+			// Decrypt the API key — is_healthy is not checked here.
+			// All credentials are loaded into the routing cache.
+			// is_healthy is exclusively controlled by admin action via the API.
 			decryptedKey, err := sm.vault.Decrypt(cr.EncryptedKey)
 			if err != nil {
 				sm.logger.Error("failed to decrypt credential",
@@ -107,7 +106,7 @@ func (sm *SyncManager) LoadInitialState(ctx context.Context) error {
 		}
 
 		if len(runtimeCreds) == 0 {
-			sm.logger.Warn("pool has no healthy credentials",
+			sm.logger.Warn("pool has no credentials",
 				zap.String("model", pr.ModelPattern),
 			)
 			continue

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
 
@@ -17,18 +16,18 @@ import (
 // ReDiscoveryReport holds the aggregated results of a full provider re-discovery scan.
 // Serialized to JSON and stored in job_runs.output by the scheduler framework.
 type ReDiscoveryReport struct {
-	TotalEndpointsScanned int                   `json:"total_endpoints_scanned"`
-	SuccessfulEndpoints   int                   `json:"successful_endpoints"`
-	FailedEndpoints       int                   `json:"failed_endpoints"`
-	NewModelsAdded        int                   `json:"new_models_added"`
-	TotalModelsSynced     int                   `json:"total_models_synced"`
-	NewModels             []string              `json:"new_models"`
-	ProviderBreakdown     []ProviderScanResult  `json:"provider_breakdown"`
-	Errors                []string              `json:"errors,omitempty"`
-	StartedAt             time.Time             `json:"started_at"`
-	CompletedAt           time.Time             `json:"completed_at"`
-	DurationMs            int64                 `json:"duration_ms"`
-	WorkerCount           int                   `json:"worker_count"`
+	TotalEndpointsScanned int                  `json:"total_endpoints_scanned"`
+	SuccessfulEndpoints   int                  `json:"successful_endpoints"`
+	FailedEndpoints       int                  `json:"failed_endpoints"`
+	NewModelsAdded        int                  `json:"new_models_added"`
+	TotalModelsSynced     int                  `json:"total_models_synced"`
+	NewModels             []string             `json:"new_models"`
+	ProviderBreakdown     []ProviderScanResult `json:"provider_breakdown"`
+	Errors                []string             `json:"errors,omitempty"`
+	StartedAt             time.Time            `json:"started_at"`
+	CompletedAt           time.Time            `json:"completed_at"`
+	DurationMs            int64                `json:"duration_ms"`
+	WorkerCount           int                  `json:"worker_count"`
 }
 
 // ProviderScanResult records the outcome of scanning a single provider account.
@@ -52,35 +51,19 @@ type providerAccount struct {
 
 // RunReDiscovery performs a full re-discovery scan across all registered provider accounts.
 //
-// The algorithm:
-//  1. Snapshot every existing model_pattern from model_pools
-//  2. Query all distinct (provider, encrypted_key, base_url, prefix) tuples from credentials
-//  3. Dispatch all accounts concurrently via a bounded worker pool (NumCPU * 4 goroutines)
-//  4. Each goroutine runs with an isolated per-provider timeout (default 15s) so one
-//     dead endpoint can never block others
-//  5. Diff the post-scan model_pools against the snapshot to find truly new models
-//  6. Build and return a ReDiscoveryReport
-//
-// This reuses the exact same per-provider discovery functions that RefreshAllProviders
-// calls synchronously — the difference is that this function runs inside an async job,
-// executes all providers in parallel across all CPU cores, and produces a structured
-// diff-based report.
-//
-// perProviderTimeoutSec controls the maximum duration for each individual provider
-// scan. Pass 0 to use the default of 15 seconds.
+// High-Performance Architecture:
+// 1. Decoupled Network I/O: Workers run pure HTTP API calls in parallel across CPU cores. No DB connections or locks are held during fetching.
+// 2. In-Memory Aggregation: Discovered models are collected into a thread-safe channel/slice.
+// 3. Single Batch Transaction: All items are bulk-upserted into PostgreSQL in a SINGLE transaction with sorted keys to completely eliminate deadlocks (SQLSTATE 40P01).
+// 4. Single NOTIFY: Fires 'model_pools:reload' exactly ONCE at job completion.
 func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger *zap.Logger, perProviderTimeoutSec int) (*ReDiscoveryReport, error) {
 	startTime := time.Now()
 
-	// Default per-provider timeout: 15 seconds (generous enough for Cloudflare SDK
-	// pagination, Gemini page tokens, and OpenRouter's large catalog).
 	if perProviderTimeoutSec <= 0 {
 		perProviderTimeoutSec = 15
 	}
 	perProviderTimeout := time.Duration(perProviderTimeoutSec) * time.Second
 
-	// Size the worker pool to saturate all CPU cores for I/O-bound work.
-	// Floor of 8 ensures decent parallelism on small machines; ceiling of 32
-	// prevents socket/DB connection pool exhaustion on large ones.
 	numWorkers := runtime.NumCPU() * 4
 	if numWorkers < 8 {
 		numWorkers = 8
@@ -128,10 +111,11 @@ func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger 
 	// 3. Dispatch provider discovery tasks concurrently via bounded worker pool
 	sem := semaphore.NewWeighted(int64(numWorkers))
 	var wg sync.WaitGroup
-	var mu sync.Mutex // guards report fields during concurrent writes
+	var mu sync.Mutex
+
+	var allDiscoveredItems []DiscoveredModelItem
 
 	for _, acc := range accounts {
-		// Acquire a worker slot; if the parent context is cancelled, stop dispatching.
 		if err := sem.Acquire(ctx, 1); err != nil {
 			break
 		}
@@ -141,7 +125,6 @@ func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger 
 			defer wg.Done()
 			defer sem.Release(1)
 
-			// Decrypt the API key (vault.Decrypt is stateless/AES-GCM — safe for concurrent use)
 			apiKey, decErr := vault.Decrypt(acc.EncryptedKey)
 			if decErr != nil {
 				errMsg := fmt.Sprintf("%s(%s): decrypt error: %v", acc.Provider, acc.BaseURL, decErr)
@@ -163,14 +146,12 @@ func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger 
 				weight = 1
 			}
 
-			// Per-provider isolated timeout: a dead/slow endpoint fails fast
-			// without blocking the other goroutines.
 			taskCtx, cancel := context.WithTimeout(ctx, perProviderTimeout)
 			defer cancel()
 
-			count, discovered, discErr := callProviderDiscovery(taskCtx, db, vault, acc, apiKey, weight)
-			if discErr != nil {
-				errMsg := fmt.Sprintf("%s(%s): %v", acc.Provider, acc.BaseURL, discErr)
+			discoveredItems, fetchErr := fetchProviderDiscoveredModels(taskCtx, acc, apiKey, weight)
+			if fetchErr != nil {
+				errMsg := fmt.Sprintf("%s(%s): %v", acc.Provider, acc.BaseURL, fetchErr)
 				mu.Lock()
 				report.Errors = append(report.Errors, errMsg)
 				report.FailedEndpoints++
@@ -184,48 +165,48 @@ func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger 
 				logger.Warn("re-discovery: provider scan failed",
 					zap.String("provider", acc.Provider),
 					zap.String("base_url", acc.BaseURL),
-					zap.Error(discErr),
+					zap.Error(fetchErr),
 				)
 				return
 			}
 
-			// Identify which discovered models are actually new (O(1) map lookup)
-			var newFromThisProvider []string
-			for _, modelPattern := range discovered {
-				if !existingPatterns[modelPattern] {
-					newFromThisProvider = append(newFromThisProvider, modelPattern)
-				}
-			}
-
 			mu.Lock()
 			report.SuccessfulEndpoints++
-			report.TotalModelsSynced += count
+			allDiscoveredItems = append(allDiscoveredItems, discoveredItems...)
 			report.ProviderBreakdown = append(report.ProviderBreakdown, ProviderScanResult{
 				Provider:     acc.Provider,
 				BaseURL:      acc.BaseURL,
 				Status:       "success",
-				ModelsSynced: count,
-				NewModels:    newFromThisProvider,
+				ModelsSynced: len(discoveredItems),
 			})
 			mu.Unlock()
 
 			logger.Info("re-discovery: provider scan completed",
 				zap.String("provider", acc.Provider),
 				zap.String("base_url", acc.BaseURL),
-				zap.Int("synced", count),
-				zap.Int("new", len(newFromThisProvider)),
+				zap.Int("synced", len(discoveredItems)),
 			)
 		}(acc)
 	}
 
-	// Wait for ALL goroutines to finish before building the final report
 	wg.Wait()
 
-	// 4. Post-scan diff: query model_pools again and find truly new patterns
+	// 4. Batch persist all collected discovered items in a single transaction with sorted keys
+	if len(allDiscoveredItems) > 0 {
+		totalSynced, newAdded, batchErr := BatchInsertDiscoveredModels(ctx, db, vault, allDiscoveredItems)
+		if batchErr != nil {
+			logger.Error("re-discovery: batch insert failed", zap.Error(batchErr))
+			report.Errors = append(report.Errors, fmt.Sprintf("batch insert error: %v", batchErr))
+		} else {
+			report.TotalModelsSynced = totalSynced
+			report.NewModelsAdded = newAdded
+		}
+	}
+
+	// 5. Post-scan diff: query model_pools again and find truly new patterns
 	postPatterns, err := snapshotModelPatterns(ctx, db)
 	if err != nil {
 		logger.Warn("re-discovery: failed to snapshot post-scan patterns", zap.Error(err))
-		// Non-fatal: fall back to per-provider new model tracking
 	} else {
 		for pattern := range postPatterns {
 			if !existingPatterns[pattern] {
@@ -235,7 +216,6 @@ func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger 
 	}
 	report.NewModelsAdded = len(report.NewModels)
 
-	// 5. Finalize timing
 	report.CompletedAt = time.Now()
 	report.DurationMs = time.Since(startTime).Milliseconds()
 
@@ -294,42 +274,6 @@ func queryDistinctAccounts(ctx context.Context, db *pgxpool.Pool) ([]providerAcc
 		accounts = append(accounts, acc)
 	}
 	return accounts, nil
-}
-
-// callProviderDiscovery dispatches to the correct DiscoverAndRegister* function based on provider type.
-func callProviderDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, acc providerAccount, apiKey string, weight int) (int, []string, error) {
-	switch acc.Provider {
-	case "nvidia":
-		return DiscoverAndRegisterNvidiaModels(ctx, db, vault, apiKey, acc.BaseURL, weight)
-
-	case "ollama":
-		return DiscoverAndRegisterOllamaModels(ctx, db, vault, apiKey, acc.BaseURL, weight)
-
-	case "openrouter":
-		return DiscoverAndRegisterOpenRouterModels(ctx, db, vault, apiKey, weight)
-
-	case "1minai":
-		return DiscoverAndRegisterOneMinAIModels(ctx, db, vault, apiKey, weight)
-
-	case "cloudflare":
-		// Recover the account ID from the stored base_url convention.
-		// base_url is stored as "cloudflare:<accountID>" by RegisterCloudflareProvider.
-		accountID := strings.TrimPrefix(acc.BaseURL, "cloudflare:")
-		return DiscoverAndRegisterCloudflareModels(ctx, db, vault, accountID, apiKey, weight)
-
-	case "sarvam":
-		return DiscoverAndRegisterSarvamModels(ctx, db, vault, apiKey, weight)
-
-	case "puter":
-		return DiscoverAndRegisterPuterModels(ctx, db, vault, apiKey, weight)
-
-	case "zenmux":
-		return DiscoverAndRegisterZenMuxModels(ctx, db, vault, apiKey, weight)
-
-	default:
-		// Any OpenAI-compatible provider (openai, anthropic, deepseek, custom, …)
-		return DiscoverAndRegisterCustomModels(ctx, db, vault, apiKey, acc.BaseURL, acc.Provider, weight, acc.Prefix)
-	}
 }
 
 // MarshalReport serializes a ReDiscoveryReport to a JSON string suitable for job_runs.output storage.
