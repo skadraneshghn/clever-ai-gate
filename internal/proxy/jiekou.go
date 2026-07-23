@@ -88,6 +88,7 @@ func sanitizeJiekouRequest(body []byte) []byte {
 		[]byte(`"presence_penalty"`),
 		[]byte(`"frequency_penalty"`),
 		[]byte(`"max_tokens"`),
+		[]byte(`"developer"`), // IDE clients (Cursor, Cline, Roo Code) use role:"developer" for system prompts
 	}
 	for _, t := range triggers {
 		if bytes.Contains(body, t) {
@@ -133,6 +134,34 @@ func sanitizeJiekouRequest(body []byte) []byte {
 		delete(payload, f)
 	}
 
+	// ── Layer 1b: Universal Message Role Normalization ─────────────────────────
+	// IDE coding tools (Cursor, Cline, Kilo Code, Roo Code) send system prompts
+	// as {"role": "developer", ...} when talking to reasoning/newer models.
+	// Non-OpenAI backends (Jiekou, Moonshot, DeepSeek, Qwen) only accept:
+	// "system", "user", "assistant", or "tool". Sending "developer" triggers
+	// HTTP 400 "invalid request error" from the Moonshot/Kimi upstream.
+	if messages, ok := payload["messages"].([]interface{}); ok {
+		for i, msgInterface := range messages {
+			if msgMap, ok := msgInterface.(map[string]interface{}); ok {
+				if role, ok := msgMap["role"].(string); ok && strings.ToLower(role) == "developer" {
+					msgMap["role"] = "system"
+				}
+				// Replace null content with empty string — Moonshot rejects null
+				if msgMap["content"] == nil {
+					msgMap["content"] = ""
+				}
+				messages[i] = msgMap
+			}
+		}
+		payload["messages"] = messages
+	}
+
+	// Remove empty tools array — Moonshot returns 400 when tools is [] (not nil)
+	if tools, ok := payload["tools"].([]interface{}); ok && len(tools) == 0 {
+		delete(payload, "tools")
+		delete(payload, "tool_choice")
+	}
+
 	// ── Layer 2: Kimi/Moonshot clamp ──────────────────────────────────────────
 
 	isKimiMoonshot := strings.Contains(strings.ToLower(modelName), "kimi") ||
@@ -155,6 +184,11 @@ func sanitizeJiekouRequest(body []byte) []byte {
 				}
 			}
 		}
+		// Moonshot/Kimi rejects presence_penalty, frequency_penalty, and seed
+		// when sent alongside standard completions requests.
+		delete(payload, "presence_penalty")
+		delete(payload, "frequency_penalty")
+		delete(payload, "seed")
 	}
 
 	// ── Layer 3: Reasoning/Beta GPT fixed-parameter enforcement ───────────────

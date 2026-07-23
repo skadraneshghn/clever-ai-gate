@@ -297,3 +297,119 @@ func assertFloat(t *testing.T, out map[string]interface{}, key string, want floa
 		t.Errorf("field %q: got %v, want %v", key, v, want)
 	}
 }
+
+// ── Layer 1b: Role Normalization ──────────────────────────────────────────────
+
+// TestSanitizeJiekouRequest_DeveloperRoleNormalized validates that IDE clients
+// (Cursor, Cline, Roo Code) sending role:"developer" get it transparently
+// rewritten to role:"system" so Moonshot/Kimi upstream does not reject with 400.
+func TestSanitizeJiekouRequest_DeveloperRoleNormalized(t *testing.T) {
+	input := `{
+		"model": "jiekou/moonshotai/kimi-k3",
+		"messages": [
+			{"role": "developer", "content": "You are a helpful assistant."},
+			{"role": "user", "content": "Hello!"}
+		]
+	}`
+	result := sanitizeJiekouRequest([]byte(input))
+
+	var out map[string]interface{}
+	if err := json.Unmarshal(result, &out); err != nil {
+		t.Fatalf("output is not valid JSON: %v\nraw: %s", err, result)
+	}
+
+	messages, ok := out["messages"].([]interface{})
+	if !ok || len(messages) < 2 {
+		t.Fatalf("expected 2 messages in output, got: %v", out["messages"])
+	}
+	firstMsg, ok := messages[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("first message is not a map: %T", messages[0])
+	}
+	if role, _ := firstMsg["role"].(string); role != "system" {
+		t.Errorf("expected role \"system\" after normalization, got %q", role)
+	}
+	// Second message (user) must remain unchanged.
+	secondMsg, _ := messages[1].(map[string]interface{})
+	if role, _ := secondMsg["role"].(string); role != "user" {
+		t.Errorf("user role should remain unchanged, got %q", role)
+	}
+}
+
+// TestSanitizeJiekouRequest_NullContentReplaced validates that null content
+// in a message is replaced with an empty string to avoid Moonshot 400 rejections.
+func TestSanitizeJiekouRequest_NullContentReplaced(t *testing.T) {
+	input := `{
+		"model": "moonshotai/kimi-k3",
+		"messages": [
+			{"role": "system", "content": null},
+			{"role": "user", "content": "Hi"}
+		]
+	}`
+	result := sanitizeJiekouRequest([]byte(input))
+
+	var out map[string]interface{}
+	if err := json.Unmarshal(result, &out); err != nil {
+		t.Fatalf("output is not valid JSON: %v\nraw: %s", err, result)
+	}
+
+	messages, _ := out["messages"].([]interface{})
+	if len(messages) < 1 {
+		t.Fatal("expected at least 1 message")
+	}
+	firstMsg, _ := messages[0].(map[string]interface{})
+	if content, _ := firstMsg["content"].(string); content != "" {
+		t.Errorf("expected empty string for null content, got %q", content)
+	}
+}
+
+// TestSanitizeJiekouRequest_EmptyToolsRemoved validates that an empty tools array
+// is removed (Moonshot returns 400 when tools:[] is present).
+func TestSanitizeJiekouRequest_EmptyToolsRemoved(t *testing.T) {
+	input := `{
+		"model": "moonshotai/kimi-k3",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [],
+		"tool_choice": "none"
+	}`
+	result := sanitizeJiekouRequest([]byte(input))
+
+	var out map[string]interface{}
+	if err := json.Unmarshal(result, &out); err != nil {
+		t.Fatalf("output is not valid JSON: %v\nraw: %s", err, result)
+	}
+	if _, ok := out["tools"]; ok {
+		t.Error("expected 'tools' to be removed when empty, but it was present")
+	}
+	if _, ok := out["tool_choice"]; ok {
+		t.Error("expected 'tool_choice' to be removed alongside empty tools, but it was present")
+	}
+}
+
+// TestSanitizeJiekouRequest_KimiFieldsRemoved validates that Kimi/Moonshot models
+// have presence_penalty, frequency_penalty, and seed stripped.
+func TestSanitizeJiekouRequest_KimiFieldsRemoved(t *testing.T) {
+	input := `{
+		"model": "moonshotai/kimi-k3",
+		"messages": [{"role": "user", "content": "hi"}],
+		"temperature": 0.8,
+		"presence_penalty": 0.5,
+		"frequency_penalty": 0.3,
+		"seed": 42
+	}`
+	result := sanitizeJiekouRequest([]byte(input))
+
+	var out map[string]interface{}
+	if err := json.Unmarshal(result, &out); err != nil {
+		t.Fatalf("output is not valid JSON: %v\nraw: %s", err, result)
+	}
+
+	for _, field := range []string{"presence_penalty", "frequency_penalty", "seed"} {
+		if _, ok := out[field]; ok {
+			t.Errorf("field %q should have been removed for kimi/moonshot model, but was present", field)
+		}
+	}
+	// temperature within [0,1] should be preserved
+	assertFloat(t, out, "temperature", 0.8)
+}
+

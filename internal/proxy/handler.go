@@ -784,19 +784,35 @@ retryLoop:
 		}
 
 		// Fast Fail for 400 Bad Request Payload Issues (not a Puter quota error)
-		// Exception: Jiekou returns 400 for structural parameter issues (temperature
-		// out of range, prefix leakage) that the sanitizer in forwardRequest corrects.
-		// For Jiekou the sanitizer runs every attempt, so the first 400 from a
-		// non-sanitized body is actually a "was sanitized, retry" signal — let it
-		// continue the retry loop. All other providers: abort on 400 to protect keys.
-		if recStatus == http.StatusBadRequest && result.Credential.Provider != "jiekou" {
-			h.logger.Error("client payload schema error encountered — aborting rotation to protect pool keys",
-				zap.String("model", pctx.model),
-				zap.String("provider", result.Credential.Provider),
-				zap.Int("status", recStatus),
-				zap.ByteString("error_body", errBody),
-			)
-			break retryLoop
+		//
+		// For Jiekou: the sanitizer (sanitizeJiekouRequest) runs on every forwardRequest
+		// call and fixes known issues (jiekou/ prefix, temperature clamping, role
+		// normalization, etc.). If we get a second consecutive HTTP 400 from Jiekou,
+		// the sanitizer could not fix the root cause — it is a fundamental payload
+		// schema mismatch that rotating credentials will NOT resolve.
+		//
+		// Strategy: allow ONE jiekou 400 through (attempt index 0) as a potential
+		// first-pass sanitizer miss, then break on the second 400 to protect the
+		// remaining pool keys from pointless exhaustion.
+		//
+		// All other providers: abort immediately on first 400.
+		if recStatus == http.StatusBadRequest {
+			jiekou400Count := 0
+			for _, a := range attempts {
+				if a.provider == "jiekou" && a.statusCode == http.StatusBadRequest {
+					jiekou400Count++
+				}
+			}
+			if result.Credential.Provider != "jiekou" || jiekou400Count >= 2 {
+				h.logger.Error("payload schema error — aborting rotation to protect pool keys",
+					zap.String("model", pctx.model),
+					zap.String("provider", result.Credential.Provider),
+					zap.Int("status", recStatus),
+					zap.Int("jiekou_400_count", jiekou400Count),
+					zap.ByteString("error_body", errBody),
+				)
+				break retryLoop
+			}
 		}
 
 		if recStatus == http.StatusTooManyRequests && isSingleKey {
