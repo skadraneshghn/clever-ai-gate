@@ -2,7 +2,7 @@
   import { page } from '$app/stores';
   import { 
     Settings, Plus, Trash2, Sparkles, Sun, Moon, KeyRound, Terminal, Users, Cpu, Activity, CalendarClock,
-    PanelLeftClose, PanelLeftOpen, MessageSquare
+    PanelLeftClose, PanelLeftOpen, MessageSquare, HeartPulse
   } from '@lucide/svelte';
   import { appState } from '$lib/state.svelte.js';
   import Button from '$lib/components/Button.svelte';
@@ -23,6 +23,7 @@
   let isProviders = $derived($page.url.pathname.includes('/providers'));
   let isTenants = $derived($page.url.pathname.includes('/tenants'));
   let isPools = $derived($page.url.pathname.includes('/pools'));
+  let isHealth = $derived($page.url.pathname.includes('/health'));
   let isLogs = $derived($page.url.pathname.includes('/logs'));
   let isJobs = $derived($page.url.pathname.includes('/jobs'));
 </script>
@@ -193,6 +194,16 @@
         >
           <Cpu size={18} />
           {#if !isSidebarCollapsed}<span>Model Pools</span>{/if}
+        </Button>
+        <Button
+          href="/playground/health"
+          variant={isHealth ? 'secondary' : 'ghost'}
+          align={isSidebarCollapsed ? 'center' : 'left'}
+          class="nav-link w-full {isHealth ? 'nav-link-active' : ''}"
+          title="Health Monitor"
+        >
+          <HeartPulse size={18} />
+          {#if !isSidebarCollapsed}<span>Health Monitor</span>{/if}
         </Button>
         <Button
           href="/playground/logs"

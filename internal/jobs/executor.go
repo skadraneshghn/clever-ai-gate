@@ -31,11 +31,34 @@ func RegisterBuiltinExecutors(reg *Registry, db *pgxpool.Pool, rdb *redis.Client
 	reg.Register("job_log_cleanup", newJobLogCleanupExecutor(db, logger))
 	reg.Register("noop", newNoopExecutor(logger))
 	reg.Register("bulk_pool_health_check", newBulkPoolHealthCheckExecutor(db, rdb, vault, logger))
+	reg.Register("exhaustive_pool_health_check", newExhaustivePoolHealthCheckExecutor(db, logger))
 	reg.Register("provider_rediscovery", newProviderRediscoveryExecutor(db, vault, logger))
 
 	logger.Info("built-in job executors registered",
 		zap.Strings("types", reg.ListTypes()),
 	)
+}
+
+// --- Built-in Executor: exhaustive_pool_health_check ---
+// Probes every (pool × credential) combination, records sessions and granular results to DB,
+// and streams live progress via SSE.
+
+func newExhaustivePoolHealthCheckExecutor(db *pgxpool.Pool, logger *zap.Logger) ExecutorFunc {
+	return func(execCtx *ExecutionContext) (string, error) {
+		ctx := execCtx.Context
+		if ctx == nil {
+			ctx = context.Background()
+		}
+
+		job := NewExhaustiveHealthCheckJob(db, logger, nil)
+		summary, err := job.Run(ctx, "scheduled")
+		if err != nil {
+			return "", err
+		}
+
+		return fmt.Sprintf("Exhaustive health check session %s completed: %d total tasks, %d passed, %d failed, avg latency %.1fms",
+			summary.ID, summary.TotalTasks, summary.PassedCount, summary.FailedCount, summary.AvgLatencyMS), nil
+	}
 }
 
 // --- Built-in Executor: provider_rediscovery ---

@@ -144,12 +144,12 @@ func DefaultSettings() SchedulerSettings {
 
 // QueueMessage is the payload pushed to the Redis async queue.
 type QueueMessage struct {
-	JobID     string         `json:"job_id"`
-	JobType   string         `json:"job_type"`
-	Payload   map[string]any `json:"payload"`
-	RunID     string         `json:"run_id"`
-	Attempt   int            `json:"attempt"`
-	EnqueuedAt time.Time     `json:"enqueued_at"`
+	JobID      string         `json:"job_id"`
+	JobType    string         `json:"job_type"`
+	Payload    map[string]any `json:"payload"`
+	RunID      string         `json:"run_id"`
+	Attempt    int            `json:"attempt"`
+	EnqueuedAt time.Time      `json:"enqueued_at"`
 }
 
 // ExecutorFunc is the signature for all job executor functions.
@@ -167,4 +167,45 @@ type ExecutionContext struct {
 	JobType string
 	Payload map[string]any
 	Attempt int
+}
+
+// --- Health Check Session & Event Types ---
+
+// HealthCheckSessionSummary represents aggregate session stats.
+type HealthCheckSessionSummary struct {
+	ID           string     `json:"id"`
+	TriggerType  string     `json:"trigger_type"`
+	Status       string     `json:"status"`
+	TotalPools   int        `json:"total_pools"`
+	TotalTasks   int        `json:"total_tasks"`
+	PassedCount  int        `json:"passed_count"`
+	FailedCount  int        `json:"failed_count"`
+	AvgLatencyMS float64    `json:"avg_latency_ms"`
+	StartedAt    time.Time  `json:"started_at"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+}
+
+// HealthCheckResultItem is one probe result row (pool × credential).
+type HealthCheckResultItem struct {
+	ID           int64     `json:"id"`
+	SessionID    string    `json:"session_id"`
+	PoolID       int64     `json:"pool_id"`
+	PoolName     string    `json:"pool_name"`
+	ModelPattern string    `json:"model_pattern"`
+	ProviderID   string    `json:"provider_id"`
+	CredentialID int64     `json:"credential_id"`
+	StatusCode   int       `json:"status_code"`
+	IsHealthy    bool      `json:"is_healthy"`
+	LatencyMS    int       `json:"latency_ms"`
+	ErrorMessage string    `json:"error_message,omitempty"`
+	CheckedAt    time.Time `json:"checked_at"`
+}
+
+// HealthCheckSSEEvent is the JSON envelope streamed over SSE.
+type HealthCheckSSEEvent struct {
+	EventType string                     `json:"event_type"`
+	SessionID string                     `json:"session_id"`
+	Progress  float64                    `json:"progress"` // 0.0–100.0
+	Summary   *HealthCheckSessionSummary `json:"summary,omitempty"`
+	Item      *HealthCheckResultItem     `json:"item,omitempty"`
 }

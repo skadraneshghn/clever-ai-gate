@@ -229,20 +229,24 @@ func main() {
 		}
 	}
 
+	// --- Step 9.6: Initialize Model Health Check SSE Broadcaster ---
+	healthCheckBroadcaster := make(chan jobs.HealthCheckSSEEvent, 512)
+
 	// --- Step 10: Build Gin engine with all routes ---
 	engine := router.NewEngine(&router.Dependencies{
-		Config:        cfg,
-		DB:            dbPool,
-		Cache:         cacheStore,
-		TenantCache:   tenantCache,
-		Redis:         redisClient,
-		RedisCacheMgr: redisCacheMgr,
-		Vault:         vault,
-		Logger:        logger,
-		Health:        healthHandler,
-		Proxy:         proxyHandler,
-		LogHub:        logHub,
-		Scheduler:     jobScheduler,
+		Config:                 cfg,
+		DB:                     dbPool,
+		Cache:                  cacheStore,
+		TenantCache:            tenantCache,
+		Redis:                  redisClient,
+		RedisCacheMgr:          redisCacheMgr,
+		Vault:                  vault,
+		Logger:                 logger,
+		Health:                 healthHandler,
+		Proxy:                  proxyHandler,
+		LogHub:                 logHub,
+		Scheduler:              jobScheduler,
+		HealthCheckBroadcaster: healthCheckBroadcaster,
 	})
 
 	// --- Step 11: Start HTTP server ---

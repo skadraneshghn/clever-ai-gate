@@ -101,3 +101,4 @@ func MaskAPIKey(key string) string {
 	// Show first 3 chars and last 4 chars
 	return key[:3] + "..." + key[len(key)-4:]
 }
+

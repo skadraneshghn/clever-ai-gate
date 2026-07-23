@@ -36,8 +36,9 @@ type Dependencies struct {
 	Logger        *zap.Logger
 	Health        *health.Handler
 	Proxy         *proxy.Handler
-	LogHub        *telemetry.LogHub // non-blocking log broadcaster for the admin log viewer
-	Scheduler     *jobs.Scheduler  // nil when not initialized
+	LogHub                *telemetry.LogHub // non-blocking log broadcaster for the admin log viewer
+	Scheduler             *jobs.Scheduler  // nil when not initialized
+	HealthCheckBroadcaster chan jobs.HealthCheckSSEEvent // real-time SSE broadcaster for model health monitor
 }
 
 // NewEngine creates and configures the Gin engine with all routes.
@@ -241,6 +242,13 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		// Dashboard statistics & metrics
 		metricsCtrl := admin.NewMetricsController(deps.DB)
 		adminGroup.GET("/metrics", metricsCtrl.GetDashboardStats)
+
+		// Exhaustive Model Health Check & Real-time SSE Monitor
+		hcHandler := admin.NewHealthCheckHandler(deps.DB, deps.Logger, deps.HealthCheckBroadcaster)
+		adminGroup.POST("/health-check/trigger", hcHandler.TriggerHealthCheck)
+		adminGroup.GET("/health-check/stream", hcHandler.StreamHealthCheckSSE)
+		adminGroup.GET("/health-check/sessions", hcHandler.GetSessions)
+		adminGroup.GET("/health-check/sessions/:id", hcHandler.GetSessionDetails)
 
 		// Job scheduling system
 		if deps.Scheduler != nil {
