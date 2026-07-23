@@ -250,6 +250,33 @@ func (sm *SyncManager) listen() error {
 		return fmt.Errorf("failed to LISTEN: %w", err)
 	}
 
+	// Keep-alive goroutine: send SELECT 1 every 30 seconds to prevent Clever Cloud
+	// PostgreSQL's network firewall from killing the idle LISTEN TCP connection
+	// (which caused "unexpected EOF" errors every ~60 minutes in logs).
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-sm.ctx.Done():
+				return
+			case <-ticker.C:
+				// Ping the connection to keep it alive through cloud network firewalls.
+				// Using conn.Exec() on the pgx pooled connection is safe here.
+				if _, pingErr := conn.Exec(sm.ctx, "SELECT 1"); pingErr != nil {
+					// Connection is broken — the outer WaitForNotification will also fail.
+					// Log at debug level; the main loop will log the actual error.
+					return
+				}
+			}
+		}
+	}()
+
 	for {
 		notification, err := conn.Conn().WaitForNotification(sm.ctx)
 		if err != nil {
@@ -276,6 +303,7 @@ func (sm *SyncManager) listen() error {
 		}
 	}
 }
+
 
 // debouncer aggregates configuration updates in a sliding 100ms quiet window
 // to prevent notification storms when batch inserts occur (e.g. provider discovery).

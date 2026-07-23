@@ -65,25 +65,25 @@
     white-space: nowrap;
   }
 
-  /* Sizes according to Material Design 3 (Rounded Rectangles) */
+  /* Standardized Sizes to match Inputs 1:1 */
   .btn-sm {
-    padding: 0 16px;
+    padding: 0 14px;
     font-size: 13px;
-    height: 32px;
+    height: var(--input-h-sm, 34px);
     border-radius: 8px;
   }
 
   .btn-md {
-    padding: 0 24px;
+    padding: 0 20px;
     font-size: 14px;
-    height: 40px;
+    height: var(--input-h-md, 40px);
     border-radius: 10px;
   }
 
   .btn-lg {
-    padding: 0 32px;
+    padding: 0 28px;
     font-size: 15px;
-    height: 48px;
+    height: var(--input-h-lg, 48px);
     border-radius: 12px;
   }
 

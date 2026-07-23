@@ -15,7 +15,7 @@
 
   function adminHeaders() {
     return {
-      'Authorization': `Bearer ${appState.adminKey.trim()}`,
+      'Authorization': `Bearer ${appState.getAdminKey()}`,
       'Content-Type': 'application/json'
     };
   }
@@ -79,9 +79,11 @@
   let chartPoints = $derived(
     stats && stats.daily_stats && stats.daily_stats.length > 0
       ? stats.daily_stats.map((d, index) => {
-          const x = (index / (stats.daily_stats.length - 1)) * 100;
-          const y = 100 - (d.total / maxCount) * 80; // Scale to fit with vertical margins
-          return { x, y, date: d.date, total: d.total };
+          const count = stats.daily_stats.length;
+          const step = count > 1 ? 460 / (count - 1) : 460;
+          const x = 20 + index * step;
+          const y = 125 - (d.total / maxCount) * 105;
+          return { x: Number(x.toFixed(1)), y: Number(y.toFixed(1)), date: d.date, total: d.total };
         })
       : []
   );
@@ -89,9 +91,11 @@
   let successPoints = $derived(
     stats && stats.daily_stats && stats.daily_stats.length > 0
       ? stats.daily_stats.map((d, index) => {
-          const x = (index / (stats.daily_stats.length - 1)) * 100;
-          const y = 100 - (d.successful / maxCount) * 80;
-          return { x, y };
+          const count = stats.daily_stats.length;
+          const step = count > 1 ? 460 / (count - 1) : 460;
+          const x = 20 + index * step;
+          const y = 125 - (d.successful / maxCount) * 105;
+          return { x: Number(x.toFixed(1)), y: Number(y.toFixed(1)) };
         })
       : []
   );
@@ -102,7 +106,7 @@
 
   let svgAreaPath = $derived(
     chartPoints.length > 0
-      ? `${svgLinePath} L 100 100 L 0 100 Z`
+      ? `${svgLinePath} L ${chartPoints[chartPoints.length - 1].x} 135 L ${chartPoints[0].x} 135 Z`
       : ''
   );
 
@@ -110,8 +114,15 @@
     successPoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
   );
 
+  $effect(() => {
+    const key = appState.getAdminKey();
+    if (key && !stats && !loading) {
+      loadDashboardStats();
+    }
+  });
+
   onMount(() => {
-    if (appState.adminKey.trim()) {
+    if (appState.getAdminKey()) {
       loadDashboardStats();
     }
   });
@@ -283,36 +294,41 @@
           </div>
 
           <!-- SVG Vector Chart -->
-          <div class="chart-wrapper relative border rounded-xl overflow-hidden p-4 bg-gray-light/30">
+          <div class="chart-wrapper relative border rounded-xl overflow-hidden p-3.5 bg-gray-light/30">
             {#if stats.daily_stats.length === 0}
-              <div class="flex items-center justify-center h-48 text-sm text-secondary opacity-60">No recent traffic records found</div>
+              <div class="flex items-center justify-center h-36 text-sm text-secondary opacity-60">No recent traffic records found</div>
             {:else}
-              <svg viewBox="0 0 100 100" class="w-full h-48 overflow-visible" preserveAspectRatio="none">
+              <svg viewBox="0 0 500 140" class="w-full h-36 overflow-visible">
                 <defs>
                   <linearGradient id="chartGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stop-color="#f97316" stop-opacity="0.25" />
+                    <stop offset="0%" stop-color="#f97316" stop-opacity="0.22" />
                     <stop offset="100%" stop-color="#f97316" stop-opacity="0.0" />
                   </linearGradient>
                 </defs>
                 
-                <!-- Gridlines -->
-                <line x1="0" y1="20" x2="100" y2="20" stroke="var(--border-color)" stroke-width="0.3" stroke-dasharray="1 1" />
-                <line x1="0" y1="40" x2="100" y2="40" stroke="var(--border-color)" stroke-width="0.3" stroke-dasharray="1 1" />
-                <line x1="0" y1="60" x2="100" y2="60" stroke="var(--border-color)" stroke-width="0.3" stroke-dasharray="1 1" />
-                <line x1="0" y1="80" x2="100" y2="80" stroke="var(--border-color)" stroke-width="0.3" stroke-dasharray="1 1" />
+                <!-- Horizontal Gridlines -->
+                <line x1="15" y1="20" x2="485" y2="20" stroke="var(--border-color)" stroke-width="1" stroke-dasharray="3 3" opacity="0.5" />
+                <line x1="15" y1="60" x2="485" y2="60" stroke="var(--border-color)" stroke-width="1" stroke-dasharray="3 3" opacity="0.5" />
+                <line x1="15" y1="100" x2="485" y2="100" stroke="var(--border-color)" stroke-width="1" stroke-dasharray="3 3" opacity="0.5" />
+                <line x1="15" y1="135" x2="485" y2="135" stroke="var(--border-color)" stroke-width="1" opacity="0.7" />
 
                 <!-- Gradient Filled Area -->
                 <path d={svgAreaPath} fill="url(#chartGradient)" />
 
                 <!-- Request total line -->
-                <path d={svgLinePath} fill="none" stroke="#f97316" stroke-width="1.8" stroke-linecap="round" />
+                <path d={svgLinePath} fill="none" stroke="#f97316" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
 
                 <!-- Request success line -->
-                <path d={svgSuccessLinePath} fill="none" stroke="#10b981" stroke-width="1" stroke-linecap="round" stroke-dasharray="1 0.8" />
+                <path d={svgSuccessLinePath} fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="4 3" />
+
+                <!-- Data Points Glow Circles -->
+                {#each chartPoints as pt}
+                  <circle cx={pt.x} cy={pt.y} r="3.5" fill="#f97316" stroke="var(--card-bg)" stroke-width="2" />
+                {/each}
               </svg>
 
               <!-- Chart X Axis Labels -->
-              <div class="flex justify-between mt-2.5 px-2 font-mono text-[10px] text-secondary opacity-60">
+              <div class="flex justify-between mt-3 px-3 font-mono text-[11px] font-medium text-secondary opacity-70">
                 {#each stats.daily_stats as day}
                   <span>{day.date.slice(5)}</span>
                 {/each}
@@ -320,9 +336,9 @@
             {/if}
           </div>
           
-          <div class="flex items-center gap-4 mt-4 pt-4 border-t border-[var(--border-color)] text-xs text-secondary justify-end">
-            <span class="flex items-center gap-1.5"><span class="w-3 h-1 bg-[#f97316] rounded-full"></span> Total Requests</span>
-            <span class="flex items-center gap-1.5"><span class="w-3 h-1 bg-[#10b981] rounded-full"></span> Success Requests</span>
+          <div class="flex items-center gap-4 mt-3 pt-3 border-t border-[var(--border-color)] text-xs text-secondary justify-end">
+            <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 bg-[#f97316] rounded-full"></span> Total Requests</span>
+            <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 bg-[#10b981] rounded-full"></span> Success Requests</span>
           </div>
         </Card>
 

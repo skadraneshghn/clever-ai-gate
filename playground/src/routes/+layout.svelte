@@ -1,7 +1,8 @@
 <script>
   import { page } from '$app/stores';
   import { 
-    Settings, Plus, Trash2, Sparkles, Sun, Moon, KeyRound, Terminal, Users, Cpu, Activity, CalendarClock
+    Settings, Plus, Trash2, Sparkles, Sun, Moon, KeyRound, Terminal, Users, Cpu, Activity, CalendarClock,
+    PanelLeftClose, PanelLeftOpen, MessageSquare
   } from '@lucide/svelte';
   import { appState } from '$lib/state.svelte.js';
   import Button from '$lib/components/Button.svelte';
@@ -12,6 +13,9 @@
   import '../app.css';
 
   let { children } = $props();
+
+  // Collapsible sidebar state (expanded by default)
+  let isSidebarCollapsed = $state(false);
 
   // Route-based active states
   let isDashboard = $derived($page.url.pathname === '/playground' || $page.url.pathname === '/playground/');
@@ -29,183 +33,233 @@
   <!-- Desktop Frame Layout (Cognivo UI) -->
   <div class="cognivo-frame flex w-full h-full overflow-hidden">
     
-    <!-- Left Sidebar -->
-    <aside class="sidebar flex flex-col w-sidebar shrink-0 border-r p-4 justify-between">
-      <div class="flex flex-col gap-6 overflow-hidden">
-        <!-- Logo -->
-        <div class="flex items-center justify-between">
-          <div class="logo flex items-center gap-2">
-            <svg class="w-8 h-8 text-[#f97316]" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16m-7 6h7" />
-            </svg>
-            <span class="font-bold text-lg tracking-tight select-none">Cognivo</span>
-          </div>
-          <Button variant="ghost" size="sm" class="p-2" onclick={() => appState.applyTheme(appState.theme === 'dark' ? 'light' : 'dark')}>
-            {#if appState.theme === 'dark'}
-              <Sun size={16} />
-            {:else}
-              <Moon size={16} />
+    <!-- Left Sidebar (Collapsible, expanded by default) -->
+    <aside class="sidebar flex flex-col shrink-0 border-r p-3 justify-between transition-all duration-300 ease-in-out {isSidebarCollapsed ? 'w-16 items-center' : 'w-sidebar'}">
+      <div class="flex flex-col gap-5 overflow-hidden w-full">
+        <!-- Logo & Collapse Toggle -->
+        <div class="flex items-center justify-between w-full">
+          {#if !isSidebarCollapsed}
+            <div class="logo flex items-center gap-2">
+              <svg class="w-7 h-7 text-[#f97316]" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16m-7 6h7" />
+              </svg>
+              <span class="font-bold text-lg tracking-tight select-none">Cognivo</span>
+            </div>
+          {/if}
+          <div class="flex items-center gap-1 {isSidebarCollapsed ? 'w-full justify-center' : ''}">
+            <Button
+              variant="ghost"
+              size="sm"
+              class="p-1.5 text-secondary hover:text-primary"
+              onclick={() => isSidebarCollapsed = !isSidebarCollapsed}
+              title={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            >
+              {#if isSidebarCollapsed}
+                <PanelLeftOpen size={18} />
+              {:else}
+                <PanelLeftClose size={18} />
+              {/if}
+            </Button>
+            {#if !isSidebarCollapsed}
+              <Button variant="ghost" size="sm" class="p-1.5" onclick={() => appState.applyTheme(appState.theme === 'dark' ? 'light' : 'dark')} title="Toggle Theme">
+                {#if appState.theme === 'dark'}
+                  <Sun size={16} />
+                {:else}
+                  <Moon size={16} />
+                {/if}
+              </Button>
             {/if}
-          </Button>
+          </div>
         </div>
 
         <!-- New Chat Button -->
-        <Button href="/playground" variant="primary" align="between" class="new-chat-btn w-full" onclick={() => appState.startNewChat()}>
+        <Button
+          href="/playground/chat"
+          variant="primary"
+          align={isSidebarCollapsed ? 'center' : 'between'}
+          class="new-chat-btn w-full"
+          onclick={() => appState.startNewChat()}
+          title="New Chat"
+        >
           <span class="flex items-center gap-2">
-            <Plus size={20} />
-            New Chat
+            <Plus size={18} />
+            {#if !isSidebarCollapsed}<span>New Chat</span>{/if}
           </span>
-          <span class="btn-shortcut">⌘ N</span>
+          {#if !isSidebarCollapsed}<span class="btn-shortcut">⌘ N</span>{/if}
         </Button>
 
         <!-- Grouped Scrollable History -->
-        <div class="history-section flex flex-col gap-4 overflow-y-auto pr-1">
-          {#if appState.sidebarChats.today.length > 0}
-            <div>
-              <div class="history-label text-xs uppercase font-bold tracking-wider mb-2">Today</div>
-              <div class="flex flex-col gap-1">
-                {#each appState.sidebarChats.today as chat}
-                  <a href="/playground" class="history-item flex items-center justify-between p-2.5 rounded-lg w-full text-left {appState.currentChatId === chat.id ? 'active' : ''}" onclick={() => appState.selectChat(chat.id)}>
-                    <span class="truncate pr-2">{chat.title}</span>
-                    <Trash2 size={14} class="trash-icon hover:text-red-500" onclick={(e) => appState.deleteChat(chat.id, e)} />
-                  </a>
-                {/each}
+        {#if isSidebarCollapsed}
+          <div class="flex flex-col gap-2 items-center py-2">
+            <Button href="/playground/chat" variant="ghost" size="sm" class="p-2" title="Chat History">
+              <MessageSquare size={18} />
+            </Button>
+          </div>
+        {:else}
+          <div class="history-section flex flex-col gap-4 overflow-y-auto pr-1">
+            {#if appState.sidebarChats.today.length > 0}
+              <div>
+                <div class="history-label text-xs uppercase font-bold tracking-wider mb-2">Today</div>
+                <div class="flex flex-col gap-1">
+                  {#each appState.sidebarChats.today as chat}
+                    <a href="/playground/chat" class="history-item flex items-center justify-between p-2.5 rounded-lg w-full text-left {appState.currentChatId === chat.id ? 'active' : ''}" onclick={() => appState.selectChat(chat.id)}>
+                      <span class="truncate pr-2 font-medium text-[13.5px] leading-snug">{chat.title}</span>
+                      <Trash2 size={14} class="trash-icon hover:text-red-500 shrink-0" onclick={(e) => appState.deleteChat(chat.id, e)} />
+                    </a>
+                  {/each}
+                </div>
               </div>
-            </div>
-          {/if}
+            {/if}
 
-          {#if appState.sidebarChats.yesterday.length > 0}
-            <div>
-              <div class="history-label text-xs uppercase font-bold tracking-wider mb-2">Yesterday</div>
-              <div class="flex flex-col gap-1">
-                {#each appState.sidebarChats.yesterday as chat}
-                  <a href="/playground" class="history-item flex items-center justify-between p-2.5 rounded-lg w-full text-left {appState.currentChatId === chat.id ? 'active' : ''}" onclick={() => appState.selectChat(chat.id)}>
-                    <span class="truncate pr-2">{chat.title}</span>
-                    <Trash2 size={14} class="trash-icon hover:text-red-500" onclick={(e) => appState.deleteChat(chat.id, e)} />
-                  </a>
-                {/each}
+            {#if appState.sidebarChats.yesterday.length > 0}
+              <div>
+                <div class="history-label text-xs uppercase font-bold tracking-wider mb-2">Yesterday</div>
+                <div class="flex flex-col gap-1">
+                  {#each appState.sidebarChats.yesterday as chat}
+                    <a href="/playground/chat" class="history-item flex items-center justify-between p-2.5 rounded-lg w-full text-left {appState.currentChatId === chat.id ? 'active' : ''}" onclick={() => appState.selectChat(chat.id)}>
+                      <span class="truncate pr-2 font-medium text-[13.5px] leading-snug">{chat.title}</span>
+                      <Trash2 size={14} class="trash-icon hover:text-red-500 shrink-0" onclick={(e) => appState.deleteChat(chat.id, e)} />
+                    </a>
+                  {/each}
+                </div>
               </div>
-            </div>
-          {/if}
+            {/if}
 
-          {#if appState.sidebarChats.older.length > 0}
-            <div>
-              <div class="history-label text-xs uppercase font-bold tracking-wider mb-2">Older</div>
-              <div class="flex flex-col gap-1">
-                {#each appState.sidebarChats.older as chat}
-                  <a href="/playground" class="history-item flex items-center justify-between p-2.5 rounded-lg w-full text-left {appState.currentChatId === chat.id ? 'active' : ''}" onclick={() => appState.selectChat(chat.id)}>
-                    <span class="truncate pr-2">{chat.title}</span>
-                    <Trash2 size={14} class="trash-icon hover:text-red-500" onclick={(e) => appState.deleteChat(chat.id, e)} />
-                  </a>
-                {/each}
+            {#if appState.sidebarChats.older.length > 0}
+              <div>
+                <div class="history-label text-xs uppercase font-bold tracking-wider mb-2">Older</div>
+                <div class="flex flex-col gap-1">
+                  {#each appState.sidebarChats.older as chat}
+                    <a href="/playground/chat" class="history-item flex items-center justify-between p-2.5 rounded-lg w-full text-left {appState.currentChatId === chat.id ? 'active' : ''}" onclick={() => appState.selectChat(chat.id)}>
+                      <span class="truncate pr-2 font-medium text-[13.5px] leading-snug">{chat.title}</span>
+                      <Trash2 size={14} class="trash-icon hover:text-red-500 shrink-0" onclick={(e) => appState.deleteChat(chat.id, e)} />
+                    </a>
+                  {/each}
+                </div>
               </div>
-            </div>
-          {/if}
-        </div>
+            {/if}
+          </div>
+        {/if}
       </div>
 
       <!-- Bottom sidebar info -->
-      <div class="flex flex-col gap-2 border-t pt-4 animate-fade-in">
+      <div class="flex flex-col gap-2 border-t pt-3 w-full animate-fade-in">
         <Button
           href="/playground"
           variant={isDashboard ? 'secondary' : 'ghost'}
-          align="left"
+          align={isSidebarCollapsed ? 'center' : 'left'}
           class="nav-link w-full {isDashboard ? 'nav-link-active' : ''}"
+          title="Dashboard"
         >
           <Activity size={18} />
-          <span>Dashboard</span>
+          {#if !isSidebarCollapsed}<span>Dashboard</span>{/if}
         </Button>
         <Button
           href="/playground/chat"
           variant={isChat ? 'secondary' : 'ghost'}
-          align="left"
+          align={isSidebarCollapsed ? 'center' : 'left'}
           class="nav-link w-full {isChat ? 'nav-link-active' : ''}"
+          title="Chat Playground"
         >
           <Sparkles size={18} />
-          <span>Chat Playground</span>
+          {#if !isSidebarCollapsed}<span>Chat Playground</span>{/if}
         </Button>
         <Button
           href="/playground/providers"
           variant={isProviders ? 'secondary' : 'ghost'}
-          align="left"
+          align={isSidebarCollapsed ? 'center' : 'left'}
           class="nav-link w-full {isProviders ? 'nav-link-active' : ''}"
+          title="Providers"
         >
           <KeyRound size={18} />
-          <span>Providers</span>
+          {#if !isSidebarCollapsed}<span>Providers</span>{/if}
         </Button>
         <Button
           href="/playground/tenants"
           variant={isTenants ? 'secondary' : 'ghost'}
-          align="left"
+          align={isSidebarCollapsed ? 'center' : 'left'}
           class="nav-link w-full {isTenants ? 'nav-link-active' : ''}"
+          title="Tenants"
         >
           <Users size={18} />
-          <span>Tenants</span>
+          {#if !isSidebarCollapsed}<span>Tenants</span>{/if}
         </Button>
         <Button
           href="/playground/pools"
           variant={isPools ? 'secondary' : 'ghost'}
-          align="left"
+          align={isSidebarCollapsed ? 'center' : 'left'}
           class="nav-link w-full {isPools ? 'nav-link-active' : ''}"
+          title="Model Pools"
         >
           <Cpu size={18} />
-          <span>Model Pools</span>
+          {#if !isSidebarCollapsed}<span>Model Pools</span>{/if}
         </Button>
         <Button
           href="/playground/logs"
           variant={isLogs ? 'secondary' : 'ghost'}
-          align="left"
+          align={isSidebarCollapsed ? 'center' : 'left'}
           class="nav-link w-full {isLogs ? 'nav-link-active' : ''}"
+          title="Gateway Logs"
         >
           <Terminal size={18} />
-          <span>Gateway Logs</span>
-          {#if appState.logsStreaming}
-            <span class="logs-live-badge">LIVE</span>
+          {#if !isSidebarCollapsed}
+            <span>Gateway Logs</span>
+            {#if appState.logsStreaming}
+              <span class="logs-live-badge">LIVE</span>
+            {/if}
           {/if}
         </Button>
         <Button
           href="/playground/jobs"
           variant={isJobs ? 'secondary' : 'ghost'}
-          align="left"
+          align={isSidebarCollapsed ? 'center' : 'left'}
           class="nav-link w-full {isJobs ? 'nav-link-active' : ''}"
+          title="Job Scheduler"
         >
           <CalendarClock size={18} />
-          <span>Job Scheduler</span>
+          {#if !isSidebarCollapsed}<span>Job Scheduler</span>{/if}
         </Button>
         <Button
           variant="ghost"
-          align="left"
+          align={isSidebarCollapsed ? 'center' : 'left'}
           class="nav-link w-full"
           onclick={() => appState.showSettingsModal = true}
+          title="Settings"
         >
           <Settings size={18} />
-          <span>Settings</span>
+          {#if !isSidebarCollapsed}<span>Settings</span>{/if}
         </Button>
 
         <!-- User profile panel -->
-        <Card variant="filled" padding="sm" class="profile-card flex-row items-center justify-between">
-          <div class="flex items-center gap-3 overflow-hidden">
-            <div class="avatar flex items-center justify-center w-9 h-9 rounded-full text-white bg-gradient-to-tr from-orange to-pink font-bold text-xs shrink-0">
-              {appState.tenantInitials}
-            </div>
-            <div class="flex flex-col overflow-hidden text-left">
-              <span class="font-bold text-xs truncate">{appState.tenantName || 'Not Connected'}</span>
-              <span class="text-[10px] text-[#f97316] font-bold uppercase tracking-wider mt-0.5">
-                {#if appState.tenantRateLimit}
-                  Limit: {appState.tenantRateLimit} RPM
-                {:else}
-                  No Limit
-                {/if}
-              </span>
-              {#if appState.tenantBalance}
-                <span class="text-[10px] opacity-75 mt-0.5">Bal: {appState.formatBalance(appState.tenantBalance)} tokens</span>
-              {/if}
-            </div>
+        {#if isSidebarCollapsed}
+          <div class="avatar flex items-center justify-center w-9 h-9 rounded-full text-white bg-gradient-to-tr from-orange to-pink font-bold text-xs shrink-0 cursor-pointer my-1" onclick={() => appState.showSettingsModal = true} title={appState.tenantName || 'Not Connected'}>
+            {appState.tenantInitials}
           </div>
-          <Button variant="ghost" size="sm" class="p-1 shrink-0" onclick={() => appState.showSettingsModal = true} title="Configure Key">
-            <Settings size={14} />
-          </Button>
-        </Card>
+        {:else}
+          <Card variant="filled" padding="sm" class="profile-card flex-row items-center justify-between">
+            <div class="flex items-center gap-3 overflow-hidden">
+              <div class="avatar flex items-center justify-center w-9 h-9 rounded-full text-white bg-gradient-to-tr from-orange to-pink font-bold text-xs shrink-0">
+                {appState.tenantInitials}
+              </div>
+              <div class="flex flex-col overflow-hidden text-left">
+                <span class="font-bold text-xs truncate">{appState.tenantName || 'Not Connected'}</span>
+                <span class="text-[10px] text-[#f97316] font-bold uppercase tracking-wider mt-0.5">
+                  {#if appState.tenantRateLimit}
+                    Limit: {appState.tenantRateLimit} RPM
+                  {:else}
+                    No Limit
+                  {/if}
+                </span>
+                {#if appState.tenantBalance}
+                  <span class="text-[10px] opacity-75 mt-0.5">Bal: {appState.formatBalance(appState.tenantBalance)} tokens</span>
+                {/if}
+              </div>
+            </div>
+            <Button variant="ghost" size="sm" class="p-1 shrink-0" onclick={() => appState.showSettingsModal = true} title="Configure Key">
+              <Settings size={14} />
+            </Button>
+          </Card>
+        {/if}
       </div>
     </aside>
 
@@ -370,22 +424,27 @@
 
   :global(.history-label) {
     color: var(--text-secondary);
-    opacity: 0.6;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    opacity: 0.7;
   }
 
   :global(.history-item) {
-    color: var(--text-secondary);
-    font-size: 11px;
-    transition: all 0.15s;
+    color: var(--text-primary);
+    font-size: 13.5px;
+    font-weight: 500;
+    line-height: 1.4;
+    transition: all 0.15s ease;
     display: flex;
     text-decoration: none;
   }
   :global(.history-item:hover) {
     background-color: var(--item-hover);
-    color: var(--text-primary);
+    color: #f97316;
   }
   :global(.history-item.active) {
-    background-color: rgba(249, 115, 22, 0.08);
+    background-color: rgba(249, 115, 22, 0.12);
     color: #f97316;
     font-weight: 600;
   }

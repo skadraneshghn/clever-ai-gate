@@ -102,7 +102,7 @@
   // ─── API Helper Headers ───────────────────────────────────────────────────
   function adminHeaders() {
     return {
-      'Authorization': `Bearer ${appState.adminKey.trim()}`,
+      'Authorization': `Bearer ${appState.getAdminKey()}`,
       'Content-Type': 'application/json'
     };
   }
@@ -544,8 +544,17 @@
     return `${Math.floor(secs / 60)}m ${secs % 60}s`;
   }
 
+  $effect(() => {
+    const key = appState.getAdminKey();
+    if (key && providerCredentials.length === 0 && !providerLoading) {
+      reloadCredentials();
+      loadPools();
+      checkRediscoveryStatus();
+    }
+  });
+
   onMount(() => {
-    if (appState.adminKey.trim()) {
+    if (appState.getAdminKey()) {
       reloadCredentials();
       loadPools();
       checkRediscoveryStatus();
@@ -577,15 +586,16 @@
         <RefreshCw size={14} class={refreshLoading ? 'animate-spin' : ''} />
         {refreshLoading ? 'Refreshing...' : 'Refresh'}
       </Button>
-      <button 
+      <Button
+        variant="outline"
+        size="sm"
         onclick={runReDiscovery}
         disabled={isRediscovering || rediscoveryStatus.status === 'RUNNING'}
-        class="rediscover-btn"
         title="Scan all provider endpoints for newly available models and auto-register them"
       >
         <Radar size={14} class={isRediscovering || rediscoveryStatus.status === 'RUNNING' ? 'animate-spin' : ''} />
         <span>{isRediscovering || rediscoveryStatus.status === 'RUNNING' ? 'Scanning...' : 'Re-Discover Models'}</span>
-      </button>
+      </Button>
       <Button variant="primary" size="sm" onclick={openAddProviderModal}>
         <Plus size={14} />
         Add Provider
@@ -758,40 +768,55 @@
       </div>
     {/if}
     <!-- Filter / search toolbar -->
-    <div class="flex items-center gap-3 px-6 py-3 border-b shrink-0">
-      <div class="relative flex-grow max-w-sm">
-        <Search size={15} class="absolute left-3 top-1/2 -translate-y-1/2 text-secondary opacity-50" />
-        <input
-          type="text"
-          class="w-full pl-9 pr-3 py-1.5 text-sm rounded-lg bg-[var(--input-bg)] border border-[var(--border-color)] focus:border-[#f97316] focus:outline-none"
-          placeholder="Search provider, URL, model..."
-          bind:value={searchQuery}
-          oninput={onSearchInput}
-        />
-      </div>
-      <select
-        class="text-sm rounded-lg bg-[var(--input-bg)] border border-[var(--border-color)] focus:border-[#f97316] focus:outline-none px-3 py-1.5 cursor-pointer"
-        bind:value={providerFilter}
-        onchange={onSearchInput}
-      >
-        <option value="">All providers</option>
-        <option value="openai">OpenAI</option>
-        <option value="anthropic">Anthropic</option>
-        <option value="nvidia">NVIDIA</option>
-        <option value="ollama">Ollama</option>
-        <option value="openrouter">OpenRouter</option>
-        <option value="1minai">1min.ai</option>
-        <option value="cloudflare">Cloudflare</option>
-        <option value="sarvam">Sarvam</option>
-        <option value="puter">Puter</option>
-        <option value="custom">Custom</option>
-      </select>
-      <span class="text-xs text-secondary ml-auto">
-        {#if totalCount > 0}
-          Showing {providerCredentials.length} of {totalCount}
-          {#if loadingMore}<span class="opacity-60"> · loading more…</span>{/if}
+    <div class="flex flex-col border-b shrink-0 bg-[var(--card-bg)] shadow-sm">
+      <div class="flex items-center gap-3 px-6 py-4 flex-wrap">
+        <div class="relative flex items-center flex-grow max-w-md">
+          <div class="absolute left-3.5 inset-y-0 flex items-center pointer-events-none z-10 text-secondary opacity-70">
+            <Search size={16} />
+          </div>
+          <input
+            type="text"
+            class="filter-search-input"
+            placeholder="Search provider, URL, model..."
+            bind:value={searchQuery}
+            oninput={onSearchInput}
+          />
+        </div>
+
+        <select class="filter-select max-w-[200px]" bind:value={providerFilter} onchange={onSearchInput}>
+          <option value="">All providers</option>
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="nvidia">NVIDIA</option>
+          <option value="ollama">Ollama</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="1minai">1min.ai</option>
+          <option value="cloudflare">Cloudflare</option>
+          <option value="sarvam">Sarvam AI</option>
+          <option value="puter">Puter</option>
+          <option value="zenmux">ZenMux</option>
+          <option value="gemini">Gemini</option>
+          <option value="custom">Custom</option>
+        </select>
+
+        {#if searchQuery || providerFilter}
+          <Button 
+            variant="ghost" 
+            size="sm" 
+            onclick={() => { searchQuery = ''; providerFilter = ''; onSearchInput(); }}
+            class="text-xs text-red-500 hover:text-red-600 font-semibold px-3 h-[42px]"
+          >
+            Clear Filters
+          </Button>
         {/if}
-      </span>
+
+        <span class="text-xs text-secondary font-medium ml-auto">
+          {#if totalCount > 0}
+            Showing {providerCredentials.length} of {totalCount}
+            {#if loadingMore}<span class="opacity-60"> · loading more…</span>{/if}
+          {/if}
+        </span>
+      </div>
     </div>
 
     {#if providerLoading}
@@ -819,19 +844,22 @@
         <!-- Fixed header -->
         <div class="providers-table-header">
           <div class="providers-table-row providers-table-headrow">
-            <div style="width: 40px; text-align: center;">
-              <input
-                type="checkbox"
-                class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
-                checked={selectedIds.length === providerCredentials.length && providerCredentials.length > 0}
-                onchange={(e) => {
-                  if (e.target.checked) {
-                    selectedIds = providerCredentials.map(c => c.id);
-                  } else {
-                    selectedIds = [];
-                  }
-                }}
-              />
+            <div style="width: 40px; display: flex; align-items: center; justify-content: center;">
+              <label class="ios-checkbox-wrapper" title="Select all credentials">
+                <input
+                  type="checkbox"
+                  class="ios-checkbox-input"
+                  checked={selectedIds.length === providerCredentials.length && providerCredentials.length > 0}
+                  onchange={(e) => {
+                    if (e.target.checked) {
+                      selectedIds = providerCredentials.map(c => c.id);
+                    } else {
+                      selectedIds = [];
+                    }
+                  }}
+                />
+                <span class="ios-checkbox-box"></span>
+              </label>
             </div>
             <div style="font-size: 11px;">ID</div>
             <div style="font-size: 11px;">Provider</div>
@@ -854,13 +882,16 @@
             <div style="position: absolute; top: {visibleRange.padTop}px; left: 0; right: 0;">
               {#each visibleItems as cred, i (cred.id)}
                 <div class="providers-table-row provider-row" style="height: {ROW_HEIGHT}px;">
-                  <div style="text-align: center; width: 40px;">
-                    <input
-                      type="checkbox"
-                      class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
-                      value={cred.id}
-                      bind:group={selectedIds}
-                    />
+                  <div style="width: 40px; display: flex; align-items: center; justify-content: center;">
+                    <label class="ios-checkbox-wrapper">
+                      <input
+                        type="checkbox"
+                        class="ios-checkbox-input"
+                        value={cred.id}
+                        bind:group={selectedIds}
+                      />
+                      <span class="ios-checkbox-box"></span>
+                    </label>
                   </div>
                   <div class="font-mono text-xs opacity-60">#{cred.id}</div>
                   <div>

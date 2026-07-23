@@ -82,6 +82,7 @@ type proxyContext struct {
 	isGemini       bool // True when model routes to the Gemini AI Studio pipeline (gemini/ prefix or standalone gemini-* family) — triggers full body transpilation
 	studioProvider string // Resolved routing label (ProviderGeminiStudio) for gemini requests; "" otherwise. Diagnostic only — the transpiler gate is cred.Provider == ProviderGemini
 	requestedModel string // The original model requested by the client before prefix stripping
+	isJiekou       bool // True when model uses jiekou/ prefix — triggers body model rewrite + parameter clamping
 	body           []byte
 	credential     *credentials.AcquireResult
 	pool           *credentials.BalancedChannelPool
@@ -265,6 +266,21 @@ func (h *Handler) Handle(c *gin.Context) {
 		)
 	}
 
+	// --- Jiekou.AI Prefix Detection ---
+	// Models prefixed with "jiekou/" are routed to Jiekou.AI, an OpenAI-compatible
+	// proxy for Moonshot/Kimi, DeepSeek and other Chinese model providers.
+	// The prefix must be stripped from the JSON body before forwarding so the
+	// upstream Jiekou API receives the clean model name (e.g. "moonshotai/kimi-k3"
+	// instead of "jiekou/moonshotai/kimi-k3"). Temperature clamping is also applied
+	// because Moonshot/Kimi enforce [0.0, 1.0] while OpenAI allows up to 2.0.
+	isJiekou := false
+	if strings.HasPrefix(model, "jiekou/") {
+		isJiekou = true
+		h.logger.Debug("jiekou.ai model detected",
+			zap.String("model", model),
+		)
+	}
+
 	// --- Request Remapping Engine: Google AI Studio (Gemini) ---
 	// Normalize both routing forms to the optimized gemini_studio pipeline so
 	// Kilo Code agents and standard chat clients bind to the same credential pool:
@@ -326,6 +342,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		zap.Bool("is_sarvam", isSarvam),
 		zap.Bool("is_puter", isPuter),
 		zap.Bool("is_zenmux", isZenMux),
+		zap.Bool("is_jiekou", isJiekou),
 		zap.Bool("is_gemini", isGemini),
 		zap.String("studio_provider", studioProvider),
 		zap.Int("body_bytes", len(body)),
@@ -428,6 +445,16 @@ func (h *Handler) Handle(c *gin.Context) {
 		model = strings.TrimPrefix(model, "zenmux/")
 	}
 
+	// --- Jiekou.AI Payload Sanitization ---
+	// Strip the "jiekou/" routing prefix from the JSON "model" field so the
+	// upstream Jiekou API receives the clean model name it expects.
+	// The full parameter sanitization (temperature clamp, unsupported field
+	// removal) happens in forwardRequest gated on cred.Provider == "jiekou".
+	if isJiekou {
+		body = stripModelPrefixInPlace(body, model, "jiekou/")
+		model = strings.TrimPrefix(model, "jiekou/")
+	}
+
 	// --- Gemini Payload Preparation ---
 	// For Gemini-routed models the routing prefix (if present) is stripped from
 	// both the model name and the JSON body. The actual body transpilation
@@ -453,6 +480,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		isPuter:        isPuter,
 		isZenMux:       isZenMux,
 		isGemini:       isGemini,
+		isJiekou:       isJiekou,
 		studioProvider: studioProvider,
 		requestedModel: requestedModel,
 		body:           body,
@@ -756,7 +784,12 @@ retryLoop:
 		}
 
 		// Fast Fail for 400 Bad Request Payload Issues (not a Puter quota error)
-		if recStatus == http.StatusBadRequest {
+		// Exception: Jiekou returns 400 for structural parameter issues (temperature
+		// out of range, prefix leakage) that the sanitizer in forwardRequest corrects.
+		// For Jiekou the sanitizer runs every attempt, so the first 400 from a
+		// non-sanitized body is actually a "was sanitized, retry" signal — let it
+		// continue the retry loop. All other providers: abort on 400 to protect keys.
+		if recStatus == http.StatusBadRequest && result.Credential.Provider != "jiekou" {
 			h.logger.Error("client payload schema error encountered — aborting rotation to protect pool keys",
 				zap.String("model", pctx.model),
 				zap.String("provider", result.Credential.Provider),
@@ -1020,6 +1053,23 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 
 	if cred.Provider == "puter" {
 		bodyBytes = sanitizePuterRequest(bodyBytes)
+	}
+
+	// --- Jiekou.AI Request Sanitization ---
+	// Jiekou proxies Moonshot/Kimi and other Chinese models behind an OpenAI-
+	// compatible API. Two issues cause HTTP 400 "invalid request" errors:
+	//
+	//  1. If any "jiekou/" prefix survived into bodyBytes (e.g., the credential
+	//     was resolved from a clean alias pool without a jiekou/ prefix token in
+	//     pctx.model), strip it now.
+	//
+	//  2. Moonshot/Kimi enforce temperature ∈ [0.0, 1.0]. OpenAI allows up to 2.0.
+	//     Clients (Cline, Cursor, VSCode) commonly send temperature: 1.2 or 1.5.
+	//
+	//  3. Several OpenAI-only fields (logit_bias, user, logprobs, stream_options…)
+	//     are passed through by Jiekou to Moonshot, which then rejects them.
+	if cred.Provider == "jiekou" {
+		bodyBytes = sanitizeJiekouRequest(bodyBytes)
 	}
 
 	// --- NVIDIA Request Sanitization ---

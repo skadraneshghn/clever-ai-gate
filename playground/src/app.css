@@ -266,6 +266,10 @@ select:-webkit-autofill:focus {
   --item-hover: rgba(15, 23, 42, 0.04);
   --card-bg: #ffffff;
   --shadow-color: rgba(15, 23, 42, 0.06);
+  --input-bg: #ffffff;
+  --input-h-sm: 34px;
+  --input-h-md: 40px;
+  --input-h-lg: 48px;
 }
 
 .dark {
@@ -279,6 +283,7 @@ select:-webkit-autofill:focus {
   --item-hover: rgba(255, 255, 255, 0.04);
   --card-bg: #15151a;
   --shadow-color: rgba(0, 0, 0, 0.5);
+  --input-bg: #15151a;
 }
 
 /* Modals & Backdrops from app */
@@ -479,12 +484,14 @@ select:-webkit-autofill:focus {
   color: var(--text-secondary);
   border-bottom: 2px solid var(--border-color);
   white-space: nowrap;
+  vertical-align: middle !important;
 }
 
 .providers-table td {
   padding: 12px 16px;
   border-bottom: 1px solid var(--border-color);
   color: var(--text-primary);
+  vertical-align: middle !important;
 }
 
 .providers-table tbody tr {
@@ -493,4 +500,124 @@ select:-webkit-autofill:focus {
 
 .providers-table tbody tr:hover {
   background-color: var(--item-hover);
+}
+
+/* ─── Apple iOS Styled Custom Checkbox ─── */
+.ios-checkbox-wrapper {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  cursor: pointer;
+  user-select: none;
+  vertical-align: middle;
+}
+.ios-checkbox-input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  cursor: pointer;
+  margin: 0;
+}
+.ios-checkbox-box {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  border: 1.5px solid var(--border-color, rgba(15, 23, 42, 0.2));
+  background-color: var(--frame-bg, #ffffff);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  box-sizing: border-box;
+}
+.dark .ios-checkbox-box {
+  border-color: rgba(255, 255, 255, 0.25);
+  background-color: #1c1c24;
+}
+.ios-checkbox-wrapper:hover .ios-checkbox-box {
+  border-color: #f97316;
+  transform: scale(1.05);
+}
+.ios-checkbox-input:checked + .ios-checkbox-box {
+  background-color: #f97316 !important;
+  border-color: #f97316 !important;
+  box-shadow: 0 2px 8px rgba(249, 115, 22, 0.35);
+}
+.ios-checkbox-box:after {
+  content: "";
+  display: none;
+  width: 4px;
+  height: 8px;
+  border: solid white;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) translate(-0.5px, -0.5px);
+}
+.ios-checkbox-input:checked + .ios-checkbox-box:after {
+  display: block;
+}
+
+/* ─── Standardized Toolbar Filter Controls ─── */
+.filter-search-input {
+  width: 100%;
+  height: 42px;
+  padding: 0 16px 0 40px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  background-color: var(--frame-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  transition: all 0.25s ease;
+  outline: none;
+  box-sizing: border-box;
+}
+.filter-search-input::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
+.filter-search-input:focus {
+  border-color: #f97316;
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.15);
+}
+
+.filter-select {
+  width: 100%;
+  height: 42px;
+  padding: 0 36px 0 14px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  background-color: var(--frame-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  outline: none;
+  box-sizing: border-box;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%23475569' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+  background-position: right 14px center;
+  background-repeat: no-repeat;
+  background-size: 18px 18px;
+}
+.filter-select:focus {
+  border-color: #f97316;
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.15);
+}
+
+/* ─── Universal Badge Padding & Alignment ─── */
+.provider-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px !important;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.3 !important;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
 }

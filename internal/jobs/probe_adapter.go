@@ -47,12 +47,16 @@ func CleanUpstreamModel(modelPattern, providerID string) string {
 		model = strings.TrimPrefix(model, "freemodel-cc/")
 	case "gemini":
 		model = strings.TrimPrefix(model, "gemini/")
+	case "jiekou":
+		model = strings.TrimPrefix(model, "jiekou/")
 	}
 
 	return model
 }
 
 // BuildAdaptiveProbeRequest constructs a capability- and provider-aware HTTP probe request.
+// It routes each probe to the correct endpoint and formats the body according to the
+// provider's requirements, eliminating false-positive 400/404/422 errors.
 func BuildAdaptiveProbeRequest(baseURL, apiKey, providerID, modelPattern string, capabilities map[string]bool) (*ModelProbeRequest, error) {
 	cleanBaseURL := strings.TrimRight(baseURL, "/")
 	provider := strings.ToLower(providerID)
@@ -66,7 +70,104 @@ func BuildAdaptiveProbeRequest(baseURL, apiKey, providerID, modelPattern string,
 		"User-Agent":    "CleverAIGate-HealthProbe/1.0",
 	}
 
-	// 1. EMBEDDING MODELS
+	// 1. 1MIN.AI SPECIAL ADAPTER
+	// 1min.ai does not expose /v1/chat/completions — all requests must go to
+	// /api/chat-with-ai with the API-KEY header (not Authorization: Bearer).
+	if provider == "1minai" || provider == "1min" || strings.Contains(cleanBaseURL, "1min.ai") {
+		reqURL := "https://api.1min.ai/api/chat-with-ai"
+		oneMinHeaders := map[string]string{
+			"Content-Type": "application/json",
+			"API-KEY":      apiKey,
+			"User-Agent":   "CleverAIGate-HealthProbe/1.0",
+		}
+		bodyMap := map[string]interface{}{
+			"type":  "UNIFY_CHAT_WITH_AI",
+			"model": "gpt-4o-mini",
+			"promptObject": map[string]interface{}{
+				"prompt": "hi",
+			},
+		}
+		jsonBody, err := json.Marshal(bodyMap)
+		if err != nil {
+			return nil, fmt.Errorf("marshal 1minai probe: %w", err)
+		}
+		return &ModelProbeRequest{Method: http.MethodPost, URL: reqURL, Headers: oneMinHeaders, Body: jsonBody}, nil
+	}
+
+	// 1b. JIEKOU.AI SPECIAL ADAPTER
+	// Jiekou proxies Moonshot/Kimi, GPT-5/o1/o3/sol reasoning models, DeepSeek,
+	// and other providers behind an OpenAI-compatible API. Key model families:
+	//
+	//   Reasoning/Beta (gpt-5*, *-sol, o1*, o3*, o4*):
+	//     temperature=1, top_p=1, n=1, presence_penalty=0, frequency_penalty=0
+	//     Uses max_completion_tokens (not max_tokens).
+	//
+	//   Kimi/Moonshot (moonshotai/*, kimi-*):
+	//     temperature ∈ [0.0, 1.0], safe default 0.7.
+	//
+	//   Standard models (deepseek, llama, qwen, …):
+	//     Standard safe probe defaults.
+	if provider == "jiekou" || strings.Contains(cleanBaseURL, "jiekou.ai") || strings.Contains(cleanBaseURL, "jiekou.cloud") {
+		reqURL := cleanBaseURL + "/v1/chat/completions"
+		if strings.HasSuffix(cleanBaseURL, "/v1") {
+			reqURL = cleanBaseURL + "/chat/completions"
+		}
+		// Strip any surviving "jiekou/" routing prefix from the model name.
+		cleanModel := targetModel
+		if strings.HasPrefix(cleanModel, "jiekou/") {
+			cleanModel = cleanModel[len("jiekou/"):]
+		}
+
+		var bodyMap map[string]interface{}
+
+		if isFixedParamReasoningModel(cleanModel) {
+			// Reasoning / Beta GPT models: enforce fixed parameters exactly as
+			// the upstream requires. Sending any other value causes HTTP 400:
+			// "beta-limitations, temperature, top_p and n are fixed at 1,
+			//  presence_penalty and frequency_penalty are fixed at 0"
+			bodyMap = map[string]interface{}{
+				"model": cleanModel,
+				"messages": []map[string]interface{}{
+					{"role": "user", "content": "hi"},
+				},
+				"temperature":        float64(1),
+				"top_p":              float64(1),
+				"n":                  float64(1),
+				"presence_penalty":   float64(0),
+				"frequency_penalty":  float64(0),
+				"max_completion_tokens": 1,
+			}
+		} else if strings.Contains(strings.ToLower(cleanModel), "kimi") ||
+			strings.Contains(strings.ToLower(cleanModel), "moonshot") {
+			// Kimi/Moonshot: temperature must be in [0.0, 1.0].
+			bodyMap = map[string]interface{}{
+				"model": cleanModel,
+				"messages": []map[string]interface{}{
+					{"role": "user", "content": "hi"},
+				},
+				"max_tokens":  1,
+				"temperature": 0.7,
+			}
+		} else {
+			// Standard OpenAI-compatible models through Jiekou.
+			bodyMap = map[string]interface{}{
+				"model": cleanModel,
+				"messages": []map[string]interface{}{
+					{"role": "user", "content": "hi"},
+				},
+				"max_tokens":  1,
+				"temperature": 0.1,
+			}
+		}
+
+		jsonBody, err := json.Marshal(bodyMap)
+		if err != nil {
+			return nil, fmt.Errorf("marshal jiekou probe: %w", err)
+		}
+		return &ModelProbeRequest{Method: http.MethodPost, URL: reqURL, Headers: headers, Body: jsonBody}, nil
+	}
+
+	// 2. EMBEDDING MODELS
 	if capabilities != nil && capabilities["embedding"] || strings.Contains(modelLower, "embed") || strings.Contains(modelLower, "bge-") {
 		reqURL := cleanBaseURL + "/v1/embeddings"
 		if strings.HasSuffix(cleanBaseURL, "/v1") {
@@ -83,8 +184,8 @@ func BuildAdaptiveProbeRequest(baseURL, apiKey, providerID, modelPattern string,
 		return &ModelProbeRequest{Method: http.MethodPost, URL: reqURL, Headers: headers, Body: jsonBody}, nil
 	}
 
-	// 2. IMAGE GENERATION MODELS
-	if capabilities != nil && capabilities["image_generation"] || strings.Contains(modelLower, "flux") || strings.Contains(modelLower, "dall-e") || strings.Contains(modelLower, "sdxl") {
+	// 3. IMAGE GENERATION MODELS
+	if capabilities != nil && capabilities["image_generation"] || strings.Contains(modelLower, "flux") || strings.Contains(modelLower, "dall-e") || strings.Contains(modelLower, "sdxl") || strings.Contains(modelLower, "ideogram") {
 		reqURL := cleanBaseURL + "/v1/images/generations"
 		if strings.HasSuffix(cleanBaseURL, "/v1") {
 			reqURL = cleanBaseURL + "/images/generations"
@@ -102,7 +203,7 @@ func BuildAdaptiveProbeRequest(baseURL, apiKey, providerID, modelPattern string,
 		return &ModelProbeRequest{Method: http.MethodPost, URL: reqURL, Headers: headers, Body: jsonBody}, nil
 	}
 
-	// 3. AUDIO / TTS MODELS
+	// 4. AUDIO / TTS MODELS
 	if capabilities != nil && (capabilities["audio"] || capabilities["speech"] || capabilities["tts"]) || strings.Contains(modelLower, "tts") || strings.Contains(modelLower, "whisper") {
 		reqURL := cleanBaseURL + "/v1/audio/speech"
 		if strings.HasSuffix(cleanBaseURL, "/v1") {
@@ -120,7 +221,7 @@ func BuildAdaptiveProbeRequest(baseURL, apiKey, providerID, modelPattern string,
 		return &ModelProbeRequest{Method: http.MethodPost, URL: reqURL, Headers: headers, Body: jsonBody}, nil
 	}
 
-	// 4. CHAT / REASONING / VISION / PARSE / GENERAL MODELS
+	// 5. CHAT / REASONING / VISION / PARSE / GENERAL MODELS
 	reqURL := cleanBaseURL + "/v1/chat/completions"
 	if strings.HasSuffix(cleanBaseURL, "/v1") {
 		reqURL = cleanBaseURL + "/chat/completions"
@@ -170,4 +271,75 @@ func BuildAdaptiveProbeRequest(baseURL, apiKey, providerID, modelPattern string,
 	}
 
 	return &ModelProbeRequest{Method: http.MethodPost, URL: reqURL, Headers: headers, Body: jsonBody}, nil
+}
+
+// IsQuotaOrBalanceError returns true ONLY for genuine auth/quota/balance failures.
+// HTTP 400 (Bad Request), 404 (Not Found), 422 (Unprocessable Entity), 504 (Timeout),
+// and connection errors are structural probe errors that indicate our payload or
+// endpoint is wrong — they do NOT mean the API key is bad or out of credits.
+//
+// Only these indicate the credential itself is the problem:
+//   - HTTP 401 Unauthorized      — key invalid or revoked
+//   - HTTP 402 Payment Required  — account needs payment
+//   - HTTP 403 Forbidden         — key blocked or permissions revoked
+//   - HTTP 429 Too Many Requests — quota exhausted
+//   - Body keywords              — "insufficient balance", "out of credits", etc.
+func IsQuotaOrBalanceError(statusCode int, bodySnippet string) bool {
+	switch statusCode {
+	case http.StatusUnauthorized,    // 401
+		http.StatusPaymentRequired,  // 402
+		http.StatusForbidden,        // 403
+		http.StatusTooManyRequests:  // 429
+		return true
+	}
+
+	// Body-level quota/balance keywords — provider-agnostic
+	bodyLower := strings.ToLower(bodySnippet)
+	quotaKeywords := []string{
+		"insufficient_quota",
+		"insufficient balance",
+		"credit_balance_too_low",
+		"account_deactivated",
+		"quota exceeded",
+		"out of credits",
+		"billing",
+		"usage limit exceeded",
+		"payment required",
+		"account suspended",
+		"credits have been exhausted",
+		"tier is insufficient",
+	}
+	for _, kw := range quotaKeywords {
+		if strings.Contains(bodyLower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// isFixedParamReasoningModel returns true when a model enforces hard-coded generation
+// parameters (temperature=1, top_p=1, n=1, presence_penalty=0, frequency_penalty=0).
+//
+// This is a package-local mirror of proxy.IsFixedParamReasoningModel. Both must be
+// kept in sync. Duplication avoids a circular import between jobs ↔ proxy packages.
+//
+// Affected families (as documented by OpenAI and Jiekou upstream error messages):
+//   - gpt-5*       (gpt-5.6-sol, gpt-5o, gpt-5-mini, …)
+//   - *-sol        (gpt-5.6-sol, gpt-4.5-sol, …)
+//   - o1*          (o1, o1-mini, o1-preview, o1-pro, …)
+//   - o3*          (o3, o3-mini, o3-pro, …)
+//   - o4*          (o4-mini, …)
+//   - *reasoning*  (any future reasoning variant)
+func isFixedParamReasoningModel(modelName string) bool {
+	lower := strings.ToLower(modelName)
+	// Strip any surviving gateway prefix before matching.
+	if idx := strings.LastIndex(lower, "/"); idx >= 0 {
+		lower = lower[idx+1:]
+	}
+	return strings.HasPrefix(lower, "gpt-5") ||
+		strings.HasSuffix(lower, "-sol") ||
+		strings.HasPrefix(lower, "o1") ||
+		strings.HasPrefix(lower, "o3") ||
+		strings.HasPrefix(lower, "o4") ||
+		strings.Contains(lower, "reasoning")
 }

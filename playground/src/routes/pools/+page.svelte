@@ -70,6 +70,17 @@
     reloadPools();
   }
 
+  function handleHeaderSort(colKey) {
+    if (!colKey) return;
+    if (sortBy === colKey) {
+      sortOrder = sortOrder === 'asc' ? 'desc' : 'asc';
+    } else {
+      sortBy = colKey;
+      sortOrder = 'asc';
+    }
+    reloadPools();
+  }
+
   // Virtualization
   const ROW_HEIGHT = 45;
   const OVERSCAN = 8;
@@ -200,7 +211,14 @@
 
   // Auto-fetch when adminKey changes
   $effect(() => {
-    if (appState.adminKey.trim() && !selectedPool) {
+    const key = appState.getAdminKey();
+    if (key && !selectedPool && pools.length === 0 && !loading) {
+      reloadPools();
+    }
+  });
+
+  onMount(() => {
+    if (appState.getAdminKey()) {
       reloadPools();
     }
   });
@@ -214,7 +232,7 @@
   // ─── API Helper Headers ───────────────────────────────────────────────────
   function adminHeaders() {
     return {
-      'Authorization': `Bearer ${appState.adminKey.trim()}`,
+      'Authorization': `Bearer ${appState.getAdminKey()}`,
       'Content-Type': 'application/json'
     };
   }
@@ -897,7 +915,7 @@
               <span class="text-xs font-bold uppercase tracking-wider text-[#a78bfa]">Enable</span>
             </label>
           </div>
-          <div class="relative">
+          <div class="relative flex items-center">
             <input 
               type="text" 
               class="input-box p-3 pl-9 text-sm rounded-xl border w-full {logsFilters.use_semantic ? 'border-[#a78bfa] focus:border-[#a78bfa]' : ''}" 
@@ -906,7 +924,9 @@
               disabled={!logsFilters.use_semantic}
               onkeydown={(e) => { if (e.key === 'Enter') handleFilterChange(); }}
             />
-            <Sparkles size={14} class="absolute left-3 top-3.5 {logsFilters.use_semantic ? 'text-[#a78bfa]' : 'opacity-30'}" />
+            <div class="absolute left-3 inset-y-0 flex items-center pointer-events-none z-10 {logsFilters.use_semantic ? 'text-[#a78bfa]' : 'opacity-30'}">
+              <Sparkles size={14} />
+            </div>
           </div>
         </div>
       </div>
@@ -1069,8 +1089,10 @@
     <div class="flex flex-col border-b shrink-0 bg-[var(--card-bg)] shadow-sm">
       <!-- Main Row: Search & Action Buttons -->
       <div class="flex items-center gap-3 px-6 py-4 flex-wrap">
-        <div class="relative flex-grow max-w-md">
-          <Search size={16} class="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#475569] dark:text-[#94a3b8] z-10" />
+        <div class="relative flex items-center flex-grow max-w-md">
+          <div class="absolute left-3.5 inset-y-0 flex items-center pointer-events-none z-10 text-secondary opacity-70">
+            <Search size={16} />
+          </div>
           <input
             type="text"
             class="filter-search-input"
@@ -1263,28 +1285,80 @@
         <!-- Fixed header -->
         <div class="pools-table-header">
           <div class="pools-table-row pools-table-headrow">
-            <div style="width: 40px; text-align: center;">
-              <input
-                type="checkbox"
-                class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
-                checked={selectedPoolIds.length === pools.length && pools.length > 0}
-                onchange={(e) => {
-                  if (e.target.checked) {
-                    selectedPoolIds = pools.map(p => p.id);
-                  } else {
-                    selectedPoolIds = [];
-                  }
-                }}
-              />
+            <div style="width: 40px; display: flex; align-items: center; justify-content: center;">
+              <label class="ios-checkbox-wrapper" title="Select all pools">
+                <input
+                  type="checkbox"
+                  class="ios-checkbox-input"
+                  checked={selectedPoolIds.length === pools.length && pools.length > 0}
+                  onchange={(e) => {
+                    if (e.target.checked) {
+                      selectedPoolIds = pools.map(p => p.id);
+                    } else {
+                      selectedPoolIds = [];
+                    }
+                  }}
+                />
+                <span class="ios-checkbox-box"></span>
+              </label>
             </div>
-            <div style="font-size: 11px;">ID</div>
-            <div style="font-size: 11px;">Model Pattern</div>
-            <div style="font-size: 11px;">Capabilities</div>
-            <div style="font-size: 11px;">Strategy</div>
-            <div style="font-size: 11px;">Fallback Pool ID</div>
-            <div style="font-size: 11px; text-align: center;">Credentials</div>
-            <div style="font-size: 11px; text-align: center;">Health</div>
-            <div style="font-size: 11px; text-align: center;">Actions</div>
+            <button type="button" class="th-sort-btn text-left" onclick={() => handleHeaderSort('id')}>
+              <span>ID</span>
+              {#if sortBy === 'id'}
+                <span class="sort-icon text-[#f97316]">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+              {:else}
+                <span class="sort-icon opacity-30">↕</span>
+              {/if}
+            </button>
+            <button type="button" class="th-sort-btn text-left" onclick={() => handleHeaderSort('model_pattern')}>
+              <span>Model Pattern</span>
+              {#if sortBy === 'model_pattern'}
+                <span class="sort-icon text-[#f97316]">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+              {:else}
+                <span class="sort-icon opacity-30">↕</span>
+              {/if}
+            </button>
+            <button type="button" class="th-sort-btn text-left" onclick={() => handleHeaderSort('capabilities')}>
+              <span>Capabilities</span>
+              {#if sortBy === 'capabilities'}
+                <span class="sort-icon text-[#f97316]">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+              {:else}
+                <span class="sort-icon opacity-30">↕</span>
+              {/if}
+            </button>
+            <button type="button" class="th-sort-btn text-left" onclick={() => handleHeaderSort('strategy')}>
+              <span>Strategy</span>
+              {#if sortBy === 'strategy'}
+                <span class="sort-icon text-[#f97316]">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+              {:else}
+                <span class="sort-icon opacity-30">↕</span>
+              {/if}
+            </button>
+            <button type="button" class="th-sort-btn text-left" onclick={() => handleHeaderSort('fallback_pool_id')}>
+              <span>Fallback Pool ID</span>
+              {#if sortBy === 'fallback_pool_id'}
+                <span class="sort-icon text-[#f97316]">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+              {:else}
+                <span class="sort-icon opacity-30">↕</span>
+              {/if}
+            </button>
+            <button type="button" class="th-sort-btn text-center justify-center" onclick={() => handleHeaderSort('credentials_count')}>
+              <span>Credentials</span>
+              {#if sortBy === 'credentials_count'}
+                <span class="sort-icon text-[#f97316]">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+              {:else}
+                <span class="sort-icon opacity-30">↕</span>
+              {/if}
+            </button>
+            <button type="button" class="th-sort-btn text-center justify-center" onclick={() => handleHeaderSort('health_pct')}>
+              <span>Health</span>
+              {#if sortBy === 'health_pct'}
+                <span class="sort-icon text-[#f97316]">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+              {:else}
+                <span class="sort-icon opacity-30">↕</span>
+              {/if}
+            </button>
+            <div class="th-sort-btn text-center justify-center cursor-default">Actions</div>
           </div>
         </div>
         <!-- Virtualized scroll body -->
@@ -1303,22 +1377,25 @@
                   style="height: {ROW_HEIGHT}px; {pool.credential_count > 0 && pool.health_percent === 0 ? 'opacity:0.55;' : ''}"
                   onclick={() => openPoolDetails(pool)}
                 >
-                  <div style="text-align: center; width: 40px;" onclick={(e) => e.stopPropagation()}>
-                    <input
-                      type="checkbox"
-                      class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
-                      value={pool.id}
-                      bind:group={selectedPoolIds}
-                      onclick={(e) => e.stopPropagation()}
-                    />
+                  <div style="width: 40px; display: flex; align-items: center; justify-content: center;" onclick={(e) => e.stopPropagation()}>
+                    <label class="ios-checkbox-wrapper" onclick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        class="ios-checkbox-input"
+                        value={pool.id}
+                        bind:group={selectedPoolIds}
+                        onclick={(e) => e.stopPropagation()}
+                      />
+                      <span class="ios-checkbox-box"></span>
+                    </label>
                   </div>
                   <div class="font-mono text-xs opacity-60">#{pool.id}</div>
                   <div class="font-bold text-sm text-[#f97316]">{pool.model_pattern}</div>
                   <div>
-                    <div class="flex gap-1 overflow-hidden">
+                    <div class="flex gap-1.5 items-center overflow-hidden">
                       {#each capabilityKeys(pool.capabilities) as key}
                         {@const badge = CAPABILITY_BADGES[key]}
-                        <span style="display:inline-block; padding:2px 7px; border-radius:5px; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; color:{badge.color}; background:{badge.bg}; border:1px solid {badge.border};">
+                        <span style="display:inline-flex; align-items:center; padding:3.5px 8px; border-radius:6px; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; line-height:1.2; color:{badge.color}; background:{badge.bg}; border:1px solid {badge.border};">
                           {badge.label}
                         </span>
                       {/each}
@@ -1563,42 +1640,41 @@
   /* Advanced Filters Redesign */
   .filter-search-input {
     width: 100%;
-    height: 46px;
+    height: 42px;
     padding: 0 16px 0 40px;
     font-size: 14px;
     font-weight: 500;
-    color: #0f172a; /* Force dark text for readability */
-    background-color: #ffffff !important; /* Force light background */
-    border: 2px solid #cbd5e1;
-    border-radius: 12px;
-    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02);
+    color: var(--text-primary);
+    background-color: var(--frame-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    transition: all 0.25s ease;
+    outline: none;
+    box-sizing: border-box;
   }
   .filter-search-input::placeholder {
-    color: #94a3b8;
+    color: var(--text-secondary);
+    opacity: 0.6;
   }
   .filter-search-input:focus {
     border-color: #f97316;
-    background-color: #ffffff !important;
-    box-shadow: 0 0 0 4px rgba(249, 115, 22, 0.15), 0 4px 12px rgba(0, 0, 0, 0.04);
-    outline: none;
+    box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.15);
   }
 
   .filter-select {
     width: 100%;
-    height: 46px;
-    padding: 0 36px 0 16px;
+    height: 42px;
+    padding: 0 36px 0 14px;
     font-size: 14px;
     font-weight: 500;
-    color: #0f172a; /* Force dark text for readability */
-    background-color: #ffffff !important; /* Force light background */
-    border: 2px solid #cbd5e1;
-    border-radius: 12px;
+    color: var(--text-primary);
+    background-color: var(--frame-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
     outline: none;
     box-sizing: border-box;
     cursor: pointer;
     transition: all 0.25s ease;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02);
     appearance: none;
     background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%23475569' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
     background-position: right 14px center;
@@ -1787,13 +1863,31 @@
   .pools-table-headrow {
     padding: 0;
   }
-  .pools-table-headrow > div {
+  .pools-table-headrow > div,
+  .th-sort-btn {
     padding: 12px 16px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     font-weight: 700;
+    font-size: 11px;
     color: var(--text-secondary);
     white-space: nowrap;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    transition: color 0.15s;
+    user-select: none;
+  }
+  .th-sort-btn:hover {
+    color: #f97316;
+  }
+  .sort-icon {
+    font-size: 11px;
+    line-height: 1;
   }
   .pools-table-row.pool-row {
     border-bottom: 1px solid var(--border-color);

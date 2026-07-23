@@ -78,6 +78,9 @@ func NewRewriter() *Rewriter {
 	// ZenMux: aggregation layer, natively OpenAI-compatible
 	r.pathTransformers["zenmux"] = passthroughPath
 
+	// Jiekou.AI: OpenAI-compatible proxy for Moonshot/Kimi, DeepSeek, and other Chinese models
+	r.pathTransformers["jiekou"] = passthroughPath
+
 	return r
 }
 

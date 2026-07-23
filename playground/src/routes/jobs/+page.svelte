@@ -18,7 +18,7 @@
       method,
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${appState.adminKey.trim()}`,
+        'Authorization': `Bearer ${appState.getAdminKey()}`,
       },
       body: body ? JSON.stringify(body) : undefined,
     });
@@ -878,24 +878,28 @@
       <div class="loading-center" style="flex:1"><RefreshCw size={20} class="spin" /></div>
     {:else if detailJob}
       <div class="panel-actions">
-        <button class="act-btn act-btn--green" onclick={() => triggerJob(detailJob.id, detailJob.name)} title="Trigger">
-          <Play size={13} /> Trigger
-        </button>
+        <Button variant="success" size="sm" onclick={() => triggerJob(detailJob.id, detailJob.name)} title="Trigger now">
+          <Play size={14} />
+          <span>Trigger</span>
+        </Button>
         {#if detailJob.is_enabled}
-          <button class="act-btn act-btn--amber" onclick={() => { pauseJob(detailJob.id); showDetail=false; }} title="Pause">
-            <Pause size={13} /> Pause
-          </button>
+          <Button variant="secondary" size="sm" onclick={() => { pauseJob(detailJob.id); showDetail=false; }} title="Pause job">
+            <Pause size={14} class="text-amber-500" />
+            <span>Pause</span>
+          </Button>
         {:else}
-          <button class="act-btn act-btn--green" onclick={() => { resumeJob(detailJob.id); showDetail=false; }}>
-            <Play size={13} /> Resume
-          </button>
+          <Button variant="success" size="sm" onclick={() => { resumeJob(detailJob.id); showDetail=false; }} title="Resume job">
+            <Play size={14} />
+            <span>Resume</span>
+          </Button>
         {/if}
-        <button class="act-btn act-btn--blue" onclick={() => { showDetail=false; openEdit(detailJob.id); }}>
-          <Pencil size={13} /> Edit
-        </button>
-        <button class="act-btn act-btn--red" onclick={() => { deleteJob(detailJob.id, detailJob.name); showDetail=false; }}>
-          <Trash2 size={13} />
-        </button>
+        <Button variant="outline" size="sm" onclick={() => { showDetail=false; openEdit(detailJob.id); }} title="Edit job">
+          <Pencil size={14} />
+          <span>Edit</span>
+        </Button>
+        <Button variant="danger" size="sm" onclick={() => { deleteJob(detailJob.id, detailJob.name); showDetail=false; }} title="Delete job">
+          <Trash2 size={14} />
+        </Button>
       </div>
 
       <div class="panel-body">
@@ -1649,7 +1653,8 @@
 
   .panel-actions {
     display: flex;
-    gap: 6px;
+    align-items: center;
+    gap: 8px;
     padding: 12px 20px;
     border-bottom: 1px solid var(--border-color);
     flex-shrink: 0;

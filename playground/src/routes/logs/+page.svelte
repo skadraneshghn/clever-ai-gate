@@ -26,8 +26,15 @@
     appState.startLogsStream();
   }
 
+  $effect(() => {
+    const key = appState.getAdminKey();
+    if (key && !appState.logsStreaming) {
+      appState.startLogsStream();
+    }
+  });
+
   onMount(() => {
-    if (appState.adminKey.trim() && !appState.logsStreaming) {
+    if (appState.getAdminKey() && !appState.logsStreaming) {
       appState.startLogsStream();
     }
   });

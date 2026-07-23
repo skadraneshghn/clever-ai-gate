@@ -223,18 +223,6 @@ func newNoopExecutor(logger *zap.Logger) ExecutorFunc {
 	}
 }
 
-// isPermanentError checks if the error returned during health check indicates the API key is invalid/revoked/permanently blocked.
-func isPermanentError(errStr string) bool {
-	upper := strings.ToUpper(errStr)
-	return strings.Contains(upper, "API_KEY_INVALID") ||
-		strings.Contains(upper, "INVALID_API_KEY") ||
-		strings.Contains(upper, "PERMISSION_DENIED") ||
-		strings.Contains(upper, "FORBIDDEN") ||
-		strings.Contains(upper, "HTTP 401") ||
-		strings.Contains(upper, "HTTP 403") ||
-		strings.Contains(upper, "DELETED")
-}
-
 // HostRateLimiter caps maximum concurrent active health check probes per domain host
 // to prevent 503 ResourceExhausted rate limit bursts on upstream endpoints.
 type HostRateLimiter struct {
@@ -262,12 +250,17 @@ func (h *HostRateLimiter) Acquire(host string, maxConcurrent int) func() {
 }
 
 // --- Built-in Executor: bulk_pool_health_check ---
-// Iterates all credentials across every pool and executes CPU-parallel,
-// adaptive capability-aware live HTTP probes per credential.
+// Probes all unique API keys (deduplicated from the N×M credential×pool join)
+// to detect genuine quota/balance failures. Uses CPU-parallel, adaptive
+// capability-aware HTTP probes.
 //
-// Observability-only: probe results are logged and counted but NEVER written
-// back to the database or Redis. is_healthy is exclusively controlled by
-// admin action — background jobs no longer disable credentials automatically.
+// Architecture:
+//   - ListAllCredentials returns N×M rows (e.g. 42,281 rows for 437 keys × ~97 pools).
+//   - We deduplicate by encrypted_key → probe only ~437 unique keys (one probe per key).
+//   - Strict error classification: only 401/402/403/429 + balance-body keywords
+//     count as failures. 400/404/422/timeouts are structural probe errors — ignored.
+//
+// Observability-only: no DB writes. is_healthy is exclusively admin-controlled.
 
 func newBulkPoolHealthCheckExecutor(db *pgxpool.Pool, rdb *redis.Client, vault *credentials.Vault, logger *zap.Logger) ExecutorFunc {
 	return func(execCtx *ExecutionContext) (string, error) {
@@ -276,7 +269,8 @@ func newBulkPoolHealthCheckExecutor(db *pgxpool.Pool, rdb *redis.Client, vault *
 			ctx = context.Background()
 		}
 
-		// 1. Pull all credentials joined with pool model_pattern and capabilities
+		// 1. Pull all credentials joined with pool model_pattern and capabilities.
+		// Returns N×M rows (credential × pool join — e.g. 42,281 rows).
 		creds, err := database.ListAllCredentials(ctx, db)
 		if err != nil {
 			return "", fmt.Errorf("bulk health check: failed to list credentials: %w", err)
@@ -285,36 +279,68 @@ func newBulkPoolHealthCheckExecutor(db *pgxpool.Pool, rdb *redis.Client, vault *
 			return "No credentials found in database to evaluate.", nil
 		}
 
-		workerCount := runtime.NumCPU() * 4
-		if workerCount < 16 {
-			workerCount = 16
+		// 2. DEDUPLICATION: group by unique encrypted key.
+		// We only need to probe each unique API key once — if the key is
+		// valid/invalid it will be the same regardless of which model pool is tested.
+		// This reduces 42,281 targets → ~437 unique API keys.
+		type keyGroup struct {
+			representative *database.CredentialWithPool
+			decryptedKey   string
+		}
+		seenKeys := make(map[string]*keyGroup, 512)
+		for _, c := range creds {
+			if _, exists := seenKeys[c.EncryptedKey]; !exists {
+				apiKey, decErr := vault.Decrypt(c.EncryptedKey)
+				if decErr != nil {
+					logger.Error("bulk health: key decryption failed (skipping)",
+						zap.Int("cred_id", c.ID), zap.Error(decErr))
+					continue
+				}
+				seenKeys[c.EncryptedKey] = &keyGroup{
+					representative: c,
+					decryptedKey:   apiKey,
+				}
+			}
+		}
+
+		uniqueKeys := make([]*keyGroup, 0, len(seenKeys))
+		for _, kg := range seenKeys {
+			uniqueKeys = append(uniqueKeys, kg)
+		}
+
+		workerCount := runtime.NumCPU() * 8
+		if workerCount < 32 {
+			workerCount = 32
 		}
 
 		logger.Info("bulk_pool_health_check started",
 			zap.String("run_id", execCtx.RunID),
-			zap.Int("total_credentials", len(creds)),
+			zap.Int("total_credential_rows", len(creds)),
+			zap.Int("unique_keys_to_probe", len(uniqueKeys)),
 			zap.Int("cpu_workers", workerCount),
 		)
 
-		jobsChan := make(chan *database.CredentialWithPool, len(creds))
-		for _, cr := range creds {
-			jobsChan <- cr
+		jobsChan := make(chan *keyGroup, len(uniqueKeys))
+		for _, kg := range uniqueKeys {
+			jobsChan <- kg
 		}
 		close(jobsChan)
 
 		var successCount atomic.Int64
 		var failureCount atomic.Int64
+		var structuralCount atomic.Int64
 		var wg sync.WaitGroup
 
 		hostLimiter := NewHostRateLimiter()
 
-		// Tuned outbound HTTP client with high idle connection limits
+		// Tuned outbound HTTP client: short timeout, high idle conn limits for throughput.
 		client := &http.Client{
 			Timeout: 10 * time.Second,
 			Transport: &http.Transport{
-				MaxIdleConns:        500,
-				MaxIdleConnsPerHost: 30,
+				MaxIdleConns:        1000,
+				MaxIdleConnsPerHost: 50,
 				IdleConnTimeout:     30 * time.Second,
+				DisableKeepAlives:   false,
 			},
 		}
 
@@ -323,35 +349,51 @@ func newBulkPoolHealthCheckExecutor(db *pgxpool.Pool, rdb *redis.Client, vault *
 			go func() {
 				defer wg.Done()
 
-				for c := range jobsChan {
-					// Acquire host concurrency lease (max 8 concurrent requests per host domain)
+				for kg := range jobsChan {
+					c := kg.representative
+					apiKey := kg.decryptedKey
+
+					// Acquire host concurrency lease (max 15 concurrent requests per host domain)
 					hostKey := "default"
 					if parsedURL, err := url.Parse(c.BaseURL); err == nil && parsedURL.Host != "" {
 						hostKey = parsedURL.Host
 					}
-					release := hostLimiter.Acquire(hostKey, 8)
+					release := hostLimiter.Acquire(hostKey, 15)
 
-					// Decrypt key securely per credential
-					apiKey, decErr := vault.Decrypt(c.EncryptedKey)
-					if decErr != nil {
-						release()
-						logger.Error("bulk health: key decryption failed (no action taken)",
-							zap.Int("cred_id", c.ID), zap.Error(decErr))
-						failureCount.Add(1)
-						continue
-					}
-
-					isHealthy, errStr := probeCredential(ctx, client, c, apiKey)
+					isHealthy, statusCode, errStr := probeCredential(ctx, client, c, apiKey)
 					release()
 
-					if !isHealthy && errStr != nil {
-						logger.Warn("bulk health: probe failed (no action taken — admin controls is_healthy)",
-							zap.Int("cred_id", c.ID),
-							zap.String("provider", c.Provider),
-							zap.String("model_pattern", c.ModelPattern),
-							zap.String("error", *errStr),
-						)
-						failureCount.Add(1)
+					if isHealthy {
+						successCount.Add(1)
+					} else if errStr != nil {
+						// STRICT ERROR CLASSIFICATION:
+						// Only warn on genuine quota/auth failures (401/402/403/429 + balance keywords).
+						// Structural errors (400/404/422/timeout) mean our probe payload/endpoint is
+						// wrong — NOT that the key is bad or out of credits.
+						bodyForClassify := *errStr
+						if IsQuotaOrBalanceError(statusCode, bodyForClassify) {
+							logger.Warn("bulk health: quota/balance failure detected (admin should review)",
+								zap.Int("cred_id", c.ID),
+								zap.String("provider", c.Provider),
+								zap.String("base_url", c.BaseURL),
+								zap.String("model_pattern", c.ModelPattern),
+								zap.Int("status_code", statusCode),
+								zap.String("error", bodyForClassify),
+							)
+							failureCount.Add(1)
+						} else {
+							// Structural/connectivity error — not a credential problem.
+							// Log at debug level only to avoid log noise.
+							logger.Debug("bulk health: structural probe error (key likely still valid)",
+								zap.Int("cred_id", c.ID),
+								zap.String("provider", c.Provider),
+								zap.String("model_pattern", c.ModelPattern),
+								zap.Int("status_code", statusCode),
+								zap.String("error", bodyForClassify),
+							)
+							structuralCount.Add(1)
+							successCount.Add(1) // Don't penalise credential for our structural probe error
+						}
 					} else {
 						successCount.Add(1)
 					}
@@ -362,26 +404,31 @@ func newBulkPoolHealthCheckExecutor(db *pgxpool.Pool, rdb *redis.Client, vault *
 		wg.Wait()
 
 		summary := fmt.Sprintf(
-			"Bulk health probe complete — reachable: %d, unreachable: %d (total: %d). No state changes made.",
-			successCount.Load(), failureCount.Load(), len(creds),
+			"Bulk health probe complete — healthy keys: %d, quota/balance failures: %d, structural probe errors (ignored): %d, unique keys probed: %d (from %d total credential rows). No state changes made.",
+			successCount.Load(), failureCount.Load(), structuralCount.Load(), len(uniqueKeys), len(creds),
 		)
 		logger.Info("bulk_pool_health_check finished",
 			zap.String("run_id", execCtx.RunID),
-			zap.Int64("reachable", successCount.Load()),
-			zap.Int64("unreachable", failureCount.Load()),
+			zap.Int("total_credential_rows", len(creds)),
+			zap.Int("unique_keys_probed", len(uniqueKeys)),
+			zap.Int64("healthy_keys", successCount.Load()),
+			zap.Int64("quota_balance_failures", failureCount.Load()),
+			zap.Int64("structural_probe_errors", structuralCount.Load()),
 		)
 		return summary, nil
 	}
 }
 
 // probeCredential sends a capability- and provider-adaptive HTTP health probe
-// for a single credential and returns (isHealthy, *errorString).
-func probeCredential(ctx context.Context, client *http.Client, c *database.CredentialWithPool, apiKey string) (bool, *string) {
+// for a single credential and returns (isHealthy, httpStatusCode, *errorString).
+// The statusCode is returned separately so callers can apply IsQuotaOrBalanceError
+// to distinguish genuine quota/auth failures from structural probe errors.
+func probeCredential(ctx context.Context, client *http.Client, c *database.CredentialWithPool, apiKey string) (bool, int, *string) {
 	var req *http.Request
 	var buildErr error
 
 	if c.Provider == "ollama" {
-		// Ollama: use /api/tags endpoint
+		// Ollama: use /api/tags endpoint (lightweight, no model inference needed)
 		urlStr := strings.TrimRight(c.BaseURL, "/") + "/api/tags"
 		req, buildErr = http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
 		if buildErr == nil {
@@ -394,7 +441,7 @@ func probeCredential(ctx context.Context, client *http.Client, c *database.Crede
 			_ = json.Unmarshal(c.Capabilities, &caps)
 		}
 
-		// Resolve wildcard patterns
+		// Resolve wildcard patterns to a concrete model name
 		testModel := c.ModelPattern
 		if strings.Contains(testModel, "*") {
 			switch {
@@ -412,7 +459,7 @@ func probeCredential(ctx context.Context, client *http.Client, c *database.Crede
 		probeReq, err := BuildAdaptiveProbeRequest(c.BaseURL, apiKey, c.Provider, testModel, caps)
 		if err != nil {
 			errStr := fmt.Sprintf("failed to build adaptive probe request: %v", err)
-			return false, &errStr
+			return false, 0, &errStr
 		}
 
 		req, buildErr = http.NewRequestWithContext(ctx, probeReq.Method, probeReq.URL, bytes.NewReader(probeReq.Body))
@@ -425,22 +472,24 @@ func probeCredential(ctx context.Context, client *http.Client, c *database.Crede
 
 	if buildErr != nil {
 		errStr := fmt.Sprintf("failed to build HTTP request: %v", buildErr)
-		return false, &errStr
+		return false, 0, &errStr
 	}
 
 	resp, doErr := client.Do(req)
 	if doErr != nil {
+		// Network/timeout errors: return status 0 so IsQuotaOrBalanceError returns false.
+		// These are connectivity issues, not credential failures.
 		errStr := fmt.Sprintf("connection error: %v", doErr)
-		return false, &errStr
+		return false, 0, &errStr
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return true, nil
+		return true, resp.StatusCode, nil
 	}
 
 	limitReader := io.LimitReader(resp.Body, 512)
 	respBytes, _ := io.ReadAll(limitReader)
 	errStr := fmt.Sprintf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBytes)))
-	return false, &errStr
+	return false, resp.StatusCode, &errStr
 }
