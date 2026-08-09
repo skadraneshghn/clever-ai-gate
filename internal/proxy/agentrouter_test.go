@@ -44,6 +44,117 @@ func TestTranslateOpenAIToAgentRouter(t *testing.T) {
 	}
 }
 
+func TestTranslateCoalescesConsecutiveUserMessages(t *testing.T) {
+	// Kilo/Cline sends multiple consecutive user messages (context, files, question).
+	// Anthropic API requires strict user/assistant alternation.
+	openAIRaw := []byte(`{
+		"model": "agentrouter/gpt-5.6-sol",
+		"messages": [
+			{"role": "system", "content": "You are a coding assistant."},
+			{"role": "user", "content": "Here is file1.go:\npackage main"},
+			{"role": "user", "content": "Here is file2.go:\npackage utils"},
+			{"role": "user", "content": "What does this project do?"}
+		],
+		"stream": true
+	}`)
+
+	agentBody, err := TranslateOpenAIToAgentRouter(openAIRaw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(agentBody, &parsed); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	// System should be extracted
+	if parsed["system"] != "You are a coding assistant." {
+		t.Errorf("unexpected system: %v", parsed["system"])
+	}
+
+	// Three consecutive user messages should be coalesced into one
+	msgs := parsed["messages"].([]interface{})
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 coalesced message, got %d", len(msgs))
+	}
+
+	msg := msgs[0].(map[string]interface{})
+	if msg["role"] != "user" {
+		t.Errorf("expected role 'user', got '%v'", msg["role"])
+	}
+
+	// Content should be a content array with 3 text blocks
+	content, ok := msg["content"].([]interface{})
+	if !ok {
+		t.Fatalf("expected content to be array after coalescing, got %T", msg["content"])
+	}
+	if len(content) != 3 {
+		t.Errorf("expected 3 content blocks, got %d", len(content))
+	}
+}
+
+func TestTranslateHandlesArraySystemContent(t *testing.T) {
+	// Some tools send system messages with array content format
+	openAIRaw := []byte(`{
+		"model": "agentrouter/claude-3-5-sonnet-20241022",
+		"messages": [
+			{"role": "system", "content": [{"type": "text", "text": "You are a coding assistant with project context."}]},
+			{"role": "user", "content": "What does this do?"}
+		],
+		"stream": true
+	}`)
+
+	agentBody, err := TranslateOpenAIToAgentRouter(openAIRaw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(agentBody, &parsed); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	// System should be extracted from array content
+	if parsed["system"] != "You are a coding assistant with project context." {
+		t.Errorf("expected extracted system text, got '%v'", parsed["system"])
+	}
+}
+
+func TestTranslateHandlesNullContent(t *testing.T) {
+	// Assistant messages with tool_calls often have null content
+	openAIRaw := []byte(`{
+		"model": "agentrouter/claude-3-5-sonnet-20241022",
+		"messages": [
+			{"role": "user", "content": "Run the tests"},
+			{"role": "assistant", "content": null},
+			{"role": "user", "content": "OK the tests passed"}
+		],
+		"stream": true
+	}`)
+
+	agentBody, err := TranslateOpenAIToAgentRouter(openAIRaw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(agentBody, &parsed); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	msgs := parsed["messages"].([]interface{})
+	// Should have user, assistant, user (3 messages, properly alternating)
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages with null assistant preserved, got %d", len(msgs))
+	}
+
+	msg1 := msgs[1].(map[string]interface{})
+	if msg1["role"] != "assistant" {
+		t.Errorf("expected assistant role preserved, got '%v'", msg1["role"])
+	}
+}
+
 func TestTranslateAgentRouterResponseToOpenAI(t *testing.T) {
 	anthropicRaw := []byte(`{
 		"id": "msg_013Z55f4k5g6h7j8",

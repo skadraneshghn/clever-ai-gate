@@ -32,10 +32,13 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 	_, err := jsonparser.ArrayEach(raw, func(value []byte, dataType jsonparser.ValueType, offset int, err error) {
 		role, _ := jsonparser.GetString(value, "role")
 
-		// Handle content — can be string or array
-		contentBytes, _, _, _ := jsonparser.Get(value, "content")
+		// Handle content — can be string, array, or null
+		contentBytes, dt, _, _ := jsonparser.Get(value, "content")
 		var contentVal interface{}
-		if len(contentBytes) > 0 && contentBytes[0] == '[' {
+		if dt == jsonparser.Null || len(contentBytes) == 0 {
+			// null or missing content (e.g. assistant messages with only tool_calls)
+			contentVal = ""
+		} else if len(contentBytes) > 0 && contentBytes[0] == '[' {
 			var rawArr []interface{}
 			if err := json.Unmarshal(contentBytes, &rawArr); err == nil {
 				contentVal = rawArr
@@ -48,20 +51,48 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 		}
 
 		if role == "system" || role == "developer" {
-			if str, ok := contentVal.(string); ok && str != "" {
-				systemPrompts = append(systemPrompts, str)
+			// Extract text from system messages regardless of content format
+			sysText := extractTextFromContent(contentVal)
+			if sysText != "" {
+				systemPrompts = append(systemPrompts, sysText)
 			}
 			return
 		}
 
+		// Map OpenAI roles to Anthropic roles
 		anthropicRole := role
+		if anthropicRole == "tool" {
+			// tool results in OpenAI become user messages in Anthropic
+			anthropicRole = "user"
+		}
 		if anthropicRole != "user" && anthropicRole != "assistant" {
 			anthropicRole = "user"
 		}
 
+		// Skip empty content for non-assistant messages
+		if contentVal == "" && anthropicRole != "assistant" {
+			return
+		}
+
+		// Build Anthropic content — ensure it's always a proper content block
+		var anthropicContent interface{}
+		switch v := contentVal.(type) {
+		case string:
+			if v == "" {
+				// Empty assistant message (e.g. before tool_calls) — use minimal text
+				anthropicContent = " "
+			} else {
+				anthropicContent = v
+			}
+		case []interface{}:
+			anthropicContent = v
+		default:
+			anthropicContent = fmt.Sprintf("%v", contentVal)
+		}
+
 		anthropicMsgs = append(anthropicMsgs, map[string]interface{}{
 			"role":    anthropicRole,
-			"content": contentVal,
+			"content": anthropicContent,
 		})
 	}, "messages")
 
@@ -69,9 +100,15 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 		return raw, fmt.Errorf("failed to parse messages for agentrouter translation: %w", err)
 	}
 
+	// Coalesce consecutive same-role messages — Anthropic API requires strict
+	// user/assistant alternation. Kilo/Cursor/Cline commonly send multiple
+	// consecutive user messages (project context, file contents, question).
+	anthropicMsgs = coalesceMessages(anthropicMsgs)
+
 	maxTokens, _ := jsonparser.GetInt(raw, "max_tokens")
 	if maxTokens <= 0 {
-		maxTokens = 4096
+		// Coding assistants need larger output buffers than the Anthropic default
+		maxTokens = 16384
 	}
 
 	stream, _ := jsonparser.GetBoolean(raw, "stream")
@@ -93,6 +130,89 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 	}
 
 	return json.Marshal(out)
+}
+
+// extractTextFromContent extracts plain text from OpenAI content values,
+// handling both string and array-of-content-block formats.
+func extractTextFromContent(contentVal interface{}) string {
+	switch v := contentVal.(type) {
+	case string:
+		return v
+	case []interface{}:
+		var parts []string
+		for _, item := range v {
+			if block, ok := item.(map[string]interface{}); ok {
+				if t, _ := block["type"].(string); t == "text" {
+					if text, ok := block["text"].(string); ok && text != "" {
+						parts = append(parts, text)
+					}
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return fmt.Sprintf("%v", contentVal)
+	}
+}
+
+// coalesceMessages merges consecutive messages with the same role into a single
+// message, as required by Anthropic's Messages API (strict user/assistant alternation).
+// Content from multiple messages is combined into a single content array.
+func coalesceMessages(msgs []map[string]interface{}) []map[string]interface{} {
+	if len(msgs) <= 1 {
+		return msgs
+	}
+
+	var result []map[string]interface{}
+	for _, msg := range msgs {
+		role, _ := msg["role"].(string)
+		content := msg["content"]
+
+		if len(result) > 0 {
+			lastRole, _ := result[len(result)-1]["role"].(string)
+			if lastRole == role {
+				// Same role — merge content into previous message
+				result[len(result)-1]["content"] = mergeContent(
+					result[len(result)-1]["content"], content,
+				)
+				continue
+			}
+		}
+
+		result = append(result, msg)
+	}
+
+	return result
+}
+
+// mergeContent combines two Anthropic content values into a single content array.
+// Handles string and []interface{} content types.
+func mergeContent(existing, incoming interface{}) interface{} {
+	toBlocks := func(v interface{}) []interface{} {
+		switch c := v.(type) {
+		case string:
+			if c == "" || c == " " {
+				return nil
+			}
+			return []interface{}{map[string]interface{}{"type": "text", "text": c}}
+		case []interface{}:
+			return c
+		default:
+			s := fmt.Sprintf("%v", v)
+			if s == "" {
+				return nil
+			}
+			return []interface{}{map[string]interface{}{"type": "text", "text": s}}
+		}
+	}
+
+	blocks := toBlocks(existing)
+	blocks = append(blocks, toBlocks(incoming)...)
+
+	if len(blocks) == 0 {
+		return " "
+	}
+	return blocks
 }
 
 // translateAgentRouterResponseToOpenAI converts Anthropic /v1/messages non-streaming
