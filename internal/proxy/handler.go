@@ -66,17 +66,18 @@ func NewHandler(client *http.Client, cacheStore *cache.Store, logger *zap.Logger
 
 // proxyContext carries extracted fields through the hot-path without allocations.
 type proxyContext struct {
-	model        string
-	isStream     bool
-	isNvidia     bool // True when model uses nvidia/ prefix — triggers reasoning injection
-	isOneMinAI   bool // True when model uses 1min/ prefix — triggers body/response translation
-	isCloudflare bool // True when model uses cloudflare/ prefix — triggers prefix stripping
-	isSarvam     bool // True when model uses sarvam/ prefix — triggers prefix stripping
-	isPuter      bool // True when model uses puter/ prefix — triggers prefix stripping
-	body         []byte
-	credential   *credentials.AcquireResult
-	pool         *credentials.BalancedChannelPool
-	tenantID     string
+	model         string
+	isStream      bool
+	isNvidia      bool // True when model uses nvidia/ prefix — triggers reasoning injection
+	isOneMinAI    bool // True when model uses 1min/ prefix — triggers body/response translation
+	isCloudflare  bool // True when model uses cloudflare/ prefix — triggers prefix stripping
+	isSarvam      bool // True when model uses sarvam/ prefix — triggers prefix stripping
+	isPuter       bool // True when model uses puter/ prefix — triggers prefix stripping
+	isAgentRouter bool // True when model uses agentrouter/ prefix — triggers sanitization
+	body          []byte
+	credential    *credentials.AcquireResult
+	pool          *credentials.BalancedChannelPool
+	tenantID      string
 }
 
 // Handle processes incoming AI requests on the hot-path.
@@ -245,6 +246,20 @@ func (h *Handler) Handle(c *gin.Context) {
 		)
 	}
 
+	// --- AgentRouter Prefix Detection ---
+	// Models prefixed with "agentrouter/" are routed to AgentRouter.org.
+	// The prefix is stripped from the JSON body before forwarding so the
+	// upstream AgentRouter receives the clean model ID (e.g. "gpt-4o").
+	// The request sanitizer (OmniRoute Issue #1921 fix) strips unsupported
+	// OpenAI fields that AgentRouter's diverse upstream backends reject.
+	isAgentRouter := false
+	if strings.HasPrefix(model, "agentrouter/") {
+		isAgentRouter = true
+		h.logger.Debug("agentrouter model detected",
+			zap.String("model", model),
+		)
+	}
+
 	// --- Access log: first thing we know enough to emit a useful Info entry ---
 	// This fires for EVERY request and is the primary tool for diagnosing
 	// Kilo Code instability: you can see exactly what model/tenant/path was
@@ -263,6 +278,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		zap.Bool("is_cloudflare", isCloudflare),
 		zap.Bool("is_sarvam", isSarvam),
 		zap.Bool("is_puter", isPuter),
+		zap.Bool("is_agentrouter", isAgentRouter),
 		zap.Int("body_bytes", len(body)),
 		zap.String("client_ip", c.ClientIP()),
 	)
@@ -365,19 +381,36 @@ func (h *Handler) Handle(c *gin.Context) {
 		body = bytes.Replace(body, oldToken, newToken, 1)
 	}
 
+	// --- AgentRouter Payload Sanitization ---
+	// For AgentRouter-prefixed models the "agentrouter/" routing prefix must be
+	// stripped from the JSON "model" field so AgentRouter receives the clean
+	// model ID (e.g. "gpt-4o" instead of "agentrouter/gpt-4o").
+	// Uses the same single-pass O(n) byte-level replacement.
+	// Note: The deep request sanitization (stripping unsupported OpenAI fields,
+	// normalizing developer role, etc.) is performed in forwardRequest, gated on
+	// cred.Provider == "agentrouter", so it covers BOTH the prefixed and the
+	// clean-alias routing forms.
+	if isAgentRouter {
+		upstreamModel := strings.TrimPrefix(model, "agentrouter/")
+		oldToken := []byte(`"` + model + `"`)
+		newToken := []byte(`"` + upstreamModel + `"`)
+		body = bytes.Replace(body, oldToken, newToken, 1)
+	}
+
 	// Step 5-8: Attempt with automatic failover
 	// Note: The FULL body (not scanSlice) is forwarded to the upstream provider.
 	// Only the metadata extraction was bounded — the binary payload is piped as-is.
 	pctx := &proxyContext{
-		model:        model,
-		isStream:     isStream,
-		isNvidia:     isNvidia,
-		isOneMinAI:   isOneMinAI,
-		isCloudflare: isCloudflare,
-		isSarvam:     isSarvam,
-		isPuter:      isPuter,
-		body:         body,
-		pool:         pool,
+		model:         model,
+		isStream:      isStream,
+		isNvidia:      isNvidia,
+		isOneMinAI:    isOneMinAI,
+		isCloudflare:  isCloudflare,
+		isSarvam:      isSarvam,
+		isPuter:       isPuter,
+		isAgentRouter: isAgentRouter,
+		body:          body,
+		pool:          pool,
 	}
 
 	// Retrieve tenant ID from context (set by auth middleware)
@@ -903,6 +936,18 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		bodyBytes = sanitizePuterRequest(bodyBytes)
 	}
 
+	// --- AgentRouter Request Sanitization (OmniRoute Issue #1921 Fix) ---
+	// AgentRouter proxies requests to diverse upstream backends (DeepSeek, Claude,
+	// Llama, Mistral, etc.) that reject unrecognized OpenAI fields with 400 Bad
+	// Request. The sanitizer strips unsupported fields (store, user, metadata, etc.),
+	// normalizes the "developer" role to "system", and handles stream_options.
+	// This runs for BOTH routing forms (prefixed "agentrouter/..." and clean alias)
+	// because it is invoked from the hot-path gated on the resolved credential's
+	// provider, not on the model prefix.
+	if cred.Provider == "agentrouter" {
+		bodyBytes = sanitizeAgentRouterRequest(bodyBytes)
+	}
+
 	upstreamURL = h.rewriter.RewriteURL(cred.Provider, cred.BaseURL, c.Request.URL.Path, modelName)
 
 	// --- 1min.ai Streaming ---
@@ -1335,6 +1380,21 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 		}
 		// Also try just the provider namespace key "puter"
 		if val, found := h.cache.Get(cache.PoolKey("puter")); found {
+			return val, true
+		}
+	}
+
+	// Handle AgentRouter slash-separated model names (e.g. "agentrouter/gpt-4o")
+	if strings.HasPrefix(model, "agentrouter/") {
+		slashParts := strings.Split(model, "/")
+		for i := len(slashParts) - 1; i >= 1; i-- {
+			prefix := strings.Join(slashParts[:i], "/")
+			if val, found := h.cache.Get(cache.PoolKey(prefix)); found {
+				return val, true
+			}
+		}
+		// Also try just the provider namespace key "agentrouter"
+		if val, found := h.cache.Get(cache.PoolKey("agentrouter")); found {
 			return val, true
 		}
 	}

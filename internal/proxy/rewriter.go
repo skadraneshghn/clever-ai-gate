@@ -75,6 +75,9 @@ func NewRewriter() *Rewriter {
 	// Puter.com: natively OpenAI-compatible
 	r.pathTransformers["puter"] = passthroughPath
 
+	// AgentRouter.org: OpenAI-compatible AI API aggregator
+	r.pathTransformers["agentrouter"] = passthroughPath
+
 	return r
 }
 

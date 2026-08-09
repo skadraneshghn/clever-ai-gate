@@ -685,6 +685,61 @@ func (h *CredentialHandler) RegisterPuterProvider(c *gin.Context) {
 	})
 }
 
+// RegisterAgentRouterProvider auto-discovers all models available on AgentRouter.org
+// under an API key, creates model pools for each, and binds the credential to all
+// of them in one transaction. Multiple keys can be added for round-robin rotation
+// with automatic 429/401 failover.
+//
+// AgentRouter.org is an AI API aggregator that exposes an OpenAI-compatible endpoint.
+// The gateway applies request sanitization (OmniRoute Issue #1921 fix) to strip
+// unsupported fields that AgentRouter's diverse upstream backends reject.
+//
+// @Summary      Auto-discover AgentRouter Models
+// @Description  Submits an AgentRouter key, fetches the model catalog, and registers all models automatically
+// @Tags         Credentials
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        body  body      dto.DiscoverAgentRouterRequest  true  "AgentRouter provider details (api_key required)"
+// @Success      200   {object}  dto.DiscoverProviderResponse
+// @Failure      400   {object}  dto.ErrorResponse
+// @Failure      500   {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/providers/agentrouter [post]
+func (h *CredentialHandler) RegisterAgentRouterProvider(c *gin.Context) {
+	var req dto.DiscoverAgentRouterRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
+		return
+	}
+
+	if req.APIKey == "" {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "api_key is required for AgentRouter auto-discovery"})
+		return
+	}
+
+	if req.Weight <= 0 {
+		req.Weight = 1
+	}
+
+	count, models, err := credentials.DiscoverAndRegisterAgentRouterModels(
+		c.Request.Context(),
+		h.db,
+		h.vault,
+		req.APIKey,
+		req.Weight,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "AgentRouter auto-discovery failed", Details: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.DiscoverProviderResponse{
+		Message:       fmt.Sprintf("Successfully synchronized %d AgentRouter models", count),
+		ModelsCount:   count,
+		DiscoveredIDs: models,
+	})
+}
+
 
 // RefreshAllProviders re-runs auto-discovery for every distinct provider key
 // already registered in the database. This is the "sync all" action: it reads
@@ -701,6 +756,7 @@ func (h *CredentialHandler) RegisterPuterProvider(c *gin.Context) {
 //   - cloudflare → DiscoverAndRegisterCloudflareModels
 //   - sarvam    → DiscoverAndRegisterSarvamModels
 //   - puter     → DiscoverAndRegisterPuterModels
+//   - agentrouter → DiscoverAndRegisterAgentRouterModels
 //   - all others → DiscoverAndRegisterCustomModels (any OpenAI-compatible)
 //
 // Results are aggregated across all provider accounts and returned as a single
@@ -816,6 +872,10 @@ func (h *CredentialHandler) RefreshAllProviders(c *gin.Context) {
 
 		case "puter":
 			count, discovered, discErr = credentials.DiscoverAndRegisterPuterModels(
+				ctx, h.db, h.vault, apiKey, weight)
+
+		case "agentrouter":
+			count, discovered, discErr = credentials.DiscoverAndRegisterAgentRouterModels(
 				ctx, h.db, h.vault, apiKey, weight)
 
 		default:

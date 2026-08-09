@@ -149,6 +149,8 @@
       endpoint = '/api/v1/admin/providers/sarvam';
     } else if (autoDiscoverForm.provider === 'puter') {
       endpoint = '/api/v1/admin/providers/puter';
+    } else if (autoDiscoverForm.provider === 'agentrouter') {
+      endpoint = '/api/v1/admin/providers/agentrouter';
     } else {
       endpoint = '/api/v1/admin/providers/custom';
     }
@@ -185,6 +187,7 @@
           : autoDiscoverForm.provider === 'cloudflare' ? 'Cloudflare Workers AI'
           : autoDiscoverForm.provider === 'sarvam' ? 'Sarvam AI'
           : autoDiscoverForm.provider === 'puter' ? 'Puter.com'
+          : autoDiscoverForm.provider === 'agentrouter' ? 'AgentRouter'
           : autoDiscoverForm.provider.toUpperCase();
         appState.addToast('success', `Successfully synchronized ${data.models_count || 0} ${displayName} models`);
         showAddProviderModal = false;
@@ -321,6 +324,7 @@
       case 'cloudflare': return 'badge-cloudflare';
       case 'sarvam': return 'badge-sarvam';
       case 'puter': return 'badge-puter';
+      case 'agentrouter': return 'badge-agentrouter';
       case 'custom': return 'badge-custom';
       default: return 'badge-default';
     }
@@ -552,6 +556,7 @@
         <option value="cloudflare">Cloudflare Workers AI</option>
         <option value="sarvam">Sarvam AI</option>
         <option value="puter">Puter.com</option>
+        <option value="agentrouter">AgentRouter.org</option>
         <option value="google">Google</option>
         <option value="custom">Custom</option>
       </Input>
@@ -581,6 +586,8 @@
           autoDiscoverForm.base_url = 'https://api.sarvam.ai';
         } else if (autoDiscoverForm.provider === 'puter') {
           autoDiscoverForm.base_url = 'https://api.puter.com/puterai/openai/v1';
+        } else if (autoDiscoverForm.provider === 'agentrouter') {
+          autoDiscoverForm.base_url = 'https://agentrouter.org/v1';
         } else {
           autoDiscoverForm.base_url = '';
         }
@@ -596,6 +603,7 @@
         <option value="cloudflare">Cloudflare Workers AI</option>
         <option value="sarvam">Sarvam AI</option>
         <option value="puter">Puter.com</option>
+        <option value="agentrouter">AgentRouter.org</option>
         <option value="custom">OpenAI-Compatible (Custom)</option>
       </Input>
 
@@ -629,6 +637,12 @@
         </div>
       {/if}
 
+      {#if autoDiscoverForm.provider === 'agentrouter'}
+        <div class="rounded-lg border border-teal-500/20 bg-teal-500/5 px-4 py-3 text-xs text-teal-400 leading-relaxed">
+          🌐 <strong>AgentRouter.org</strong> is an AI API aggregator. Enter your API Key to auto-discover all available models. Standard OpenAI requests are automatically sanitized upstream (Issue #1921 fix). Get your API key at <a href="https://agentrouter.org" target="_blank" rel="noopener noreferrer" class="underline">agentrouter.org</a>.
+        </div>
+      {/if}
+
       {#if autoDiscoverForm.provider === 'custom'}
         <Input type="text" label="Label (optional)" placeholder="e.g. Together AI, DeepInfra" bind:value={autoDiscoverForm.label} />
       {/if}
@@ -658,12 +672,13 @@
             autoDiscoverForm.provider === '1minai' ? '1min.ai API key...' :
             autoDiscoverForm.provider === 'sarvam' ? 'Sarvam API key (api-subscription-key)...' :
             autoDiscoverForm.provider === 'puter' ? 'Puter Auth Token...' :
+            autoDiscoverForm.provider === 'agentrouter' ? 'AgentRouter API key (sk-...)...' :
             'Bearer API key...'
           } 
           bind:value={autoDiscoverForm.api_key} 
         />
         
-        {#if autoDiscoverForm.provider !== 'openrouter' && autoDiscoverForm.provider !== '1minai' && autoDiscoverForm.provider !== 'sarvam' && autoDiscoverForm.provider !== 'puter'}
+        {#if autoDiscoverForm.provider !== 'openrouter' && autoDiscoverForm.provider !== '1minai' && autoDiscoverForm.provider !== 'sarvam' && autoDiscoverForm.provider !== 'puter' && autoDiscoverForm.provider !== 'agentrouter'}
           <Input type="text" label="Base URL" placeholder={autoDiscoverForm.provider === 'custom' ? 'https://api.together.xyz/v1' : ''} bind:value={autoDiscoverForm.base_url} />
         {/if}
       {/if}
@@ -708,6 +723,8 @@
       <option value="1minai">1min.ai</option>
       <option value="cloudflare">Cloudflare Workers AI</option>
       <option value="sarvam">Sarvam AI</option>
+      <option value="puter">Puter.com</option>
+      <option value="agentrouter">AgentRouter.org</option>
       <option value="google">Google</option>
       <option value="custom">Custom</option>
     </Input>
@@ -841,5 +858,12 @@
     background: rgba(59, 130, 246, 0.12);
     color: #60a5fa;
     border: 1px solid rgba(59, 130, 246, 0.25);
+  }
+
+  /* AgentRouter brand badge — cyan/teal tone */
+  :global(.badge-agentrouter) {
+    background: rgba(20, 184, 166, 0.12);
+    color: #2dd4bf;
+    border: 1px solid rgba(20, 184, 166, 0.25);
   }
 </style>
