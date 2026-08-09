@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -62,11 +63,27 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 					if description != "" {
 						toolObj["description"] = description
 					}
+
+					var parsedSchema interface{}
 					if schema != nil {
-						toolObj["input_schema"] = schema
-					} else {
-						toolObj["input_schema"] = map[string]interface{}{"type": "object"}
+						switch s := schema.(type) {
+						case json.RawMessage:
+							if len(s) > 0 && !bytes.Equal(s, []byte("null")) {
+								_ = json.Unmarshal(s, &parsedSchema)
+							}
+						case string:
+							if s != "" && s != "null" {
+								_ = json.Unmarshal([]byte(s), &parsedSchema)
+							}
+						case map[string]interface{}:
+							parsedSchema = s
+						}
 					}
+
+					if parsedSchema == nil {
+						parsedSchema = map[string]interface{}{"type": "object"}
+					}
+					toolObj["input_schema"] = parsedSchema
 					anthropicTools = append(anthropicTools, toolObj)
 				}
 			}
@@ -253,6 +270,22 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 
 	// Coalesce consecutive same-role messages
 	anthropicMsgs = coalesceMessages(anthropicMsgs)
+
+	// Ensure messages array is non-empty and starts with 'user' role
+	if len(anthropicMsgs) == 0 {
+		anthropicMsgs = append(anthropicMsgs, map[string]interface{}{
+			"role":    "user",
+			"content": "Hello",
+		})
+	} else if role, _ := anthropicMsgs[0]["role"].(string); role != "user" {
+		anthropicMsgs = append([]map[string]interface{}{
+			{
+				"role":    "user",
+				"content": "Hello",
+			},
+		}, anthropicMsgs...)
+	}
+
 
 	maxTokens, _ := jsonparser.GetInt(raw, "max_tokens")
 	if maxTokens <= 0 {
