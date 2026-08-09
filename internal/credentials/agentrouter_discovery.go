@@ -12,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const agentRouterBaseURL = "https://agentrouter.org/v1"
+const agentRouterBaseURL = "https://ps.air-outer.com/v1"
 
 // defaultAgentRouterModels provides the supported model catalog for AgentRouter.org
 // as a safe fallback when upstream auto-discovery endpoint returns 503 Service Unavailable or non-200.
@@ -189,7 +189,27 @@ func fetchAgentRouterModels(ctx context.Context, apiKey string) []string {
 	req.Header.Set("x-app", "cli")
 
 	resp, err := client.Do(req)
-	if err != nil {
+	if err != nil || (resp != nil && resp.StatusCode >= 500) {
+		// Fallback to agentrouter.org if primary mirror domain failed
+		fallbackURL := strings.Replace(targetURL, "ps.air-outer.com", "agentrouter.org", 1)
+		if fallbackURL == targetURL {
+			fallbackURL = strings.Replace(targetURL, "agentrouter.org", "ps.air-outer.com", 1)
+		}
+		fbReq, fbErr := http.NewRequestWithContext(ctx, http.MethodGet, fallbackURL, nil)
+		if fbErr == nil {
+			fbReq.Header = req.Header.Clone()
+			fbResp, fbErrDo := client.Do(fbReq)
+			if fbErrDo == nil && fbResp.StatusCode == http.StatusOK {
+				if resp != nil && resp.Body != nil {
+					resp.Body.Close()
+				}
+				resp = fbResp
+				err = nil
+			}
+		}
+	}
+
+	if err != nil || resp == nil {
 		return defaultAgentRouterModels
 	}
 	defer resp.Body.Close()
@@ -260,7 +280,26 @@ func validateAgentRouterKey(ctx context.Context, apiKey string) error {
 	req.Header.Set("x-app", "cli")
 
 	resp, err := client.Do(req)
-	if err != nil {
+	if err != nil || (resp != nil && resp.StatusCode >= 500) {
+		fallbackURL := strings.Replace(targetURL, "ps.air-outer.com", "agentrouter.org", 1)
+		if fallbackURL == targetURL {
+			fallbackURL = strings.Replace(targetURL, "agentrouter.org", "ps.air-outer.com", 1)
+		}
+		fbReq, fbErr := http.NewRequestWithContext(ctx, http.MethodPost, fallbackURL, bytes.NewReader(bodyBytes))
+		if fbErr == nil {
+			fbReq.Header = req.Header.Clone()
+			fbResp, fbErrDo := client.Do(fbReq)
+			if fbErrDo == nil {
+				if resp != nil && resp.Body != nil {
+					resp.Body.Close()
+				}
+				resp = fbResp
+				err = nil
+			}
+		}
+	}
+
+	if err != nil || resp == nil {
 		// Network timeout / connection error — allow registration using fallback models
 		return nil
 	}
@@ -269,7 +308,7 @@ func validateAgentRouterKey(ctx context.Context, apiKey string) error {
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return fmt.Errorf(
 			"agentrouter rejected the api key (status %d) — "+
-				"verify your key at agentrouter.org and ensure your account has active quota",
+				"verify your key at agentrouter.org / ps.air-outer.com and ensure your account has active quota",
 			resp.StatusCode,
 		)
 	}

@@ -1244,6 +1244,51 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	}
 
 	resp, err := h.client.Do(upstreamReq)
+
+	// --- AgentRouter Mirror Domain Failover (ps.air-outer.com <-> agentrouter.org) ---
+	if (err != nil || (resp != nil && resp.StatusCode >= 500)) && (cred.Provider == "agentrouter" || pctx.isAgentRouter) {
+		var fallbackDomain string
+		if strings.Contains(upstreamURL, "ps.air-outer.com") {
+			fallbackDomain = "agentrouter.org"
+		} else if strings.Contains(upstreamURL, "agentrouter.org") {
+			fallbackDomain = "ps.air-outer.com"
+		}
+
+		if fallbackDomain != "" {
+			fallbackURL := strings.Replace(upstreamURL, "ps.air-outer.com", fallbackDomain, 1)
+			if fallbackURL == upstreamURL {
+				fallbackURL = strings.Replace(upstreamURL, "agentrouter.org", fallbackDomain, 1)
+			}
+
+			h.logger.Warn("agentrouter primary domain failed — attempting mirror failover",
+				zap.String("primary_url", upstreamURL),
+				zap.String("fallback_url", fallbackURL),
+				zap.Error(err),
+			)
+
+			fallbackReq, fbErr := http.NewRequestWithContext(
+				c.Request.Context(),
+				c.Request.Method,
+				fallbackURL,
+				bytes.NewReader(bodyBytes),
+			)
+			if fbErr == nil {
+				h.rewriter.RewriteHeaders(fallbackReq, cred.Provider, cred.APIKey, c.Request.Header)
+				fbResp, fbErrDo := h.client.Do(fallbackReq)
+				if fbErrDo == nil && fbResp.StatusCode < 500 {
+					if resp != nil && resp.Body != nil {
+						resp.Body.Close()
+					}
+					resp = fbResp
+					err = nil
+					upstreamURL = fallbackURL
+				} else if fbResp != nil {
+					fbResp.Body.Close()
+				}
+			}
+		}
+	}
+
 	if err != nil {
 		// Map transport-level failures to numeric HTTP status codes so the
 		// total-exhaustion retry loop can penalize and rotate to the next key.

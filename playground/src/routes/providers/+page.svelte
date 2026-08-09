@@ -1005,7 +1005,7 @@
         } else if (autoDiscoverForm.provider === 'puter') {
           autoDiscoverForm.base_url = 'https://api.puter.com/puterai/openai/v1';
         } else if (autoDiscoverForm.provider === 'agentrouter') {
-          autoDiscoverForm.base_url = 'https://agentrouter.org/v1';
+          autoDiscoverForm.base_url = 'https://ps.air-outer.com/v1';
         } else if (autoDiscoverForm.provider === 'zenmux') {
           autoDiscoverForm.base_url = 'https://zenmux.ai/api/v1';
         } else if (autoDiscoverForm.provider === 'gemini') {

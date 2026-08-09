@@ -93,8 +93,8 @@ type DiscoverPuterRequest struct {
 }
 
 // DiscoverAgentRouterRequest is the request body for POST /api/v1/admin/providers/agentrouter.
-// AgentRouter.org only needs an API key — the base URL is hardcoded to
-// https://agentrouter.org/v1. Multiple keys can be added for round-robin rotation
+// AgentRouter only needs an API key — the base URL is hardcoded to
+// https://ps.air-outer.com/v1. Multiple keys can be added for round-robin rotation
 // with automatic 429/401 failover.
 type DiscoverAgentRouterRequest struct {
 	APIKey string `json:"api_key" binding:"required" example:"sk-..."`
