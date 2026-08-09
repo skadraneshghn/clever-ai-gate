@@ -329,3 +329,63 @@ func TestTranslateOpenAIToAgentRouterWithTools(t *testing.T) {
 	}
 }
 
+func TestTranslateOpenAIToAgentRouterEmptyToolIDAndObjectArgs(t *testing.T) {
+	openAIRaw := []byte(`{
+		"model": "agentrouter/gpt-5.6-sol",
+		"messages": [
+			{"role": "user", "content": "Read file"},
+			{
+				"role": "assistant",
+				"content": "",
+				"tool_calls": [
+					{
+						"id": "",
+						"type": "function",
+						"function": {
+							"name": "read",
+							"arguments": {"filePath": "/path/to/file.txt"}
+						}
+					}
+				]
+			}
+		]
+	}`)
+
+	agentBody, err := TranslateOpenAIToAgentRouter(openAIRaw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(agentBody, &parsed); err != nil {
+		t.Fatalf("failed to parse json: %v", err)
+	}
+
+	msgs := parsed["messages"].([]interface{})
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+
+	astMsg := msgs[1].(map[string]interface{})
+	blocks := astMsg["content"].([]interface{})
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 tool_use block, got %d", len(blocks))
+	}
+
+	toolUse := blocks[0].(map[string]interface{})
+	if toolUse["type"] != "tool_use" {
+		t.Errorf("expected type tool_use, got %v", toolUse["type"])
+	}
+
+	idStr, _ := toolUse["id"].(string)
+	if idStr == "" {
+		t.Errorf("expected auto-generated non-empty id for tool_use, got empty string")
+	}
+
+	inputObj, ok := toolUse["input"].(map[string]interface{})
+	if !ok || inputObj["filePath"] != "/path/to/file.txt" {
+		t.Errorf("expected filePath in input schema object, got %v", toolUse["input"])
+	}
+}
+
+

@@ -15,7 +15,7 @@ import (
 // Key translations:
 //  1. System and developer role messages are combined into Anthropic's top-level "system" prompt.
 //  2. OpenAI tools are translated to Anthropic tools (parameters -> input_schema).
-//  3. Assistant tool_calls are converted to Anthropic tool_use content blocks.
+//  3. Assistant tool_calls are converted to Anthropic tool_use content blocks (ensuring non-empty IDs).
 //  4. User tool response messages (role: "tool") are converted to Anthropic tool_result blocks.
 //  5. Reasoning content (reasoning_content / thinking) is preserved.
 //  6. "max_tokens" is defaulted to 16384 if missing (Anthropic requires max_tokens).
@@ -31,34 +31,39 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 	var systemPrompts []string
 	var anthropicMsgs []map[string]interface{}
 
-	// Parse tools array if present
+	// Parse tools array if present — handles both OpenAI and Anthropic format
 	var anthropicTools []map[string]interface{}
 	toolsBytes, dtTools, _, _ := jsonparser.Get(raw, "tools")
 	if dtTools == jsonparser.Array && len(toolsBytes) > 0 {
-		var openAITools []struct {
-			Type     string `json:"type"`
-			Function struct {
-				Name        string          `json:"name"`
-				Description string          `json:"description,omitempty"`
-				Parameters  json.RawMessage `json:"parameters,omitempty"`
-			} `json:"function"`
-		}
-		if err := json.Unmarshal(toolsBytes, &openAITools); err == nil {
-			for _, t := range openAITools {
-				if t.Type == "function" && t.Function.Name != "" {
+		var rawTools []map[string]interface{}
+		if err := json.Unmarshal(toolsBytes, &rawTools); err == nil {
+			for _, t := range rawTools {
+				var name, description string
+				var schema interface{}
+
+				if fn, ok := t["function"].(map[string]interface{}); ok {
+					name, _ = fn["name"].(string)
+					description, _ = fn["description"].(string)
+					schema = fn["parameters"]
+				} else {
+					name, _ = t["name"].(string)
+					description, _ = t["description"].(string)
+					if params, ok := t["parameters"]; ok {
+						schema = params
+					} else if inSchema, ok := t["input_schema"]; ok {
+						schema = inSchema
+					}
+				}
+
+				if name != "" {
 					toolObj := map[string]interface{}{
-						"name": t.Function.Name,
+						"name": name,
 					}
-					if t.Function.Description != "" {
-						toolObj["description"] = t.Function.Description
+					if description != "" {
+						toolObj["description"] = description
 					}
-					if len(t.Function.Parameters) > 0 {
-						var schema interface{}
-						if json.Unmarshal(t.Function.Parameters, &schema) == nil {
-							toolObj["input_schema"] = schema
-						} else {
-							toolObj["input_schema"] = map[string]interface{}{"type": "object"}
-						}
+					if schema != nil {
+						toolObj["input_schema"] = schema
 					} else {
 						toolObj["input_schema"] = map[string]interface{}{"type": "object"}
 					}
@@ -105,14 +110,14 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 				ID       string `json:"id"`
 				Type     string `json:"type"`
 				Function struct {
-					Name      string `json:"name"`
-					Arguments string `json:"arguments"`
+					Name      string          `json:"name"`
+					Arguments json.RawMessage `json:"arguments"`
 				} `json:"function"`
 			} `json:"tool_calls,omitempty"`
 		}
 
 		if err := json.Unmarshal(msgsBytes, &openAIMsgs); err == nil {
-			for _, msg := range openAIMsgs {
+			for msgIdx, msg := range openAIMsgs {
 				// Handle system/developer roles
 				if msg.Role == "system" || msg.Role == "developer" {
 					sysText := parseRawContentToText(msg.Content)
@@ -124,10 +129,14 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 
 				// Handle tool response message (role == "tool")
 				if msg.Role == "tool" {
+					toolCallID := msg.ToolCallID
+					if toolCallID == "" {
+						toolCallID = fmt.Sprintf("call_unknown_%d", msgIdx)
+					}
 					toolResultContent := parseRawContentToText(msg.Content)
 					toolResultBlock := map[string]interface{}{
 						"type":        "tool_result",
-						"tool_use_id": msg.ToolCallID,
+						"tool_use_id": toolCallID,
 						"content":     toolResultContent,
 					}
 					anthropicMsgs = append(anthropicMsgs, map[string]interface{}{
@@ -160,16 +169,35 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 					blocks = append(blocks, parsedBlocks...)
 				}
 
-				// Tool calls (if assistant)
+				// Tool calls (if assistant) — ensure non-empty ID and robust arguments parsing
 				if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
-					for _, tc := range msg.ToolCalls {
+					for tcIdx, tc := range msg.ToolCalls {
+						toolID := tc.ID
+						if toolID == "" {
+							toolID = fmt.Sprintf("call_%d_%d_%d", time.Now().UnixNano(), msgIdx, tcIdx)
+						}
+
+						var rawArgs interface{}
 						var argsMap interface{}
-						if err := json.Unmarshal([]byte(tc.Function.Arguments), &argsMap); err != nil {
+						if len(tc.Function.Arguments) > 0 {
+							if json.Unmarshal(tc.Function.Arguments, &rawArgs) == nil {
+								switch v := rawArgs.(type) {
+								case string:
+									_ = json.Unmarshal([]byte(v), &argsMap)
+								case map[string]interface{}:
+									argsMap = v
+								default:
+									argsMap = v
+								}
+							}
+						}
+						if argsMap == nil {
 							argsMap = map[string]interface{}{}
 						}
+
 						blocks = append(blocks, map[string]interface{}{
 							"type":  "tool_use",
-							"id":    tc.ID,
+							"id":    toolID,
 							"name":  tc.Function.Name,
 							"input": argsMap,
 						})
@@ -200,6 +228,7 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 			}
 		}
 	}
+
 
 	// Coalesce consecutive same-role messages
 	anthropicMsgs = coalesceMessages(anthropicMsgs)
