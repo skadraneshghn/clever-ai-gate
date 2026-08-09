@@ -127,13 +127,23 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 			if provider == "agentrouter" && len(data) > 0 && sseEventType != "ping" {
 				blockType, _, _, _ := jsonparser.Get(data, "content_block", "type")
 				hasToolCalls := bytes.Contains(translated, []byte(`"tool_calls"`))
-				sp.logger.Info("agentrouter SSE event",
+				logFields := []zap.Field{
 					zap.String("event", sseEventType),
 					zap.ByteString("block_type", blockType),
 					zap.Bool("has_tool_calls", hasToolCalls),
 					zap.Int("raw_len", len(data)),
 					zap.Int("translated_len", len(translated)),
-				)
+				}
+				// For content_block_start, log the full raw data to see tool_use id/name
+				if sseEventType == "content_block_start" {
+					// Truncate to 1000 bytes to avoid huge logs
+					truncData := data
+					if len(truncData) > 1000 {
+						truncData = truncData[:1000]
+					}
+					logFields = append(logFields, zap.ByteString("raw_data", truncData))
+				}
+				sp.logger.Info("agentrouter SSE event", logFields...)
 			}
 
 			if len(translated) > 0 {
