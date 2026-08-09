@@ -106,14 +106,7 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 			Content          json.RawMessage `json:"content"`
 			ReasoningContent string          `json:"reasoning_content,omitempty"`
 			ToolCallID       string          `json:"tool_call_id,omitempty"`
-			ToolCalls        []struct {
-				ID       string `json:"id"`
-				Type     string `json:"type"`
-				Function struct {
-					Name      string          `json:"name"`
-					Arguments json.RawMessage `json:"arguments"`
-				} `json:"function"`
-			} `json:"tool_calls,omitempty"`
+			ToolCalls        json.RawMessage `json:"tool_calls,omitempty"`
 		}
 
 		if err := json.Unmarshal(msgsBytes, &openAIMsgs); err == nil {
@@ -134,6 +127,9 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 						toolCallID = fmt.Sprintf("call_unknown_%d", msgIdx)
 					}
 					toolResultContent := parseRawContentToText(msg.Content)
+					if toolResultContent == "" {
+						toolResultContent = "Done"
+					}
 					toolResultBlock := map[string]interface{}{
 						"type":        "tool_result",
 						"tool_use_id": toolCallID,
@@ -169,38 +165,64 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 					blocks = append(blocks, parsedBlocks...)
 				}
 
-				// Tool calls (if assistant) — ensure non-empty ID and robust arguments parsing
+				// Tool calls (if assistant) — ensure non-empty name, non-empty ID, and robust arguments parsing
 				if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
-					for tcIdx, tc := range msg.ToolCalls {
-						toolID := tc.ID
-						if toolID == "" {
-							toolID = fmt.Sprintf("call_%d_%d_%d", time.Now().UnixNano(), msgIdx, tcIdx)
-						}
+					var rawToolCalls []map[string]interface{}
+					if json.Unmarshal(msg.ToolCalls, &rawToolCalls) == nil {
+						for tcIdx, tcMap := range rawToolCalls {
+							// 1. Extract name (check function.name and top-level name)
+							var toolName string
+							if fnMap, ok := tcMap["function"].(map[string]interface{}); ok {
+								toolName, _ = fnMap["name"].(string)
+							}
+							if toolName == "" {
+								toolName, _ = tcMap["name"].(string)
+							}
+							if toolName == "" {
+								toolName = "unknown_tool" // Fallback non-empty name
+							}
 
-						var rawArgs interface{}
-						var argsMap interface{}
-						if len(tc.Function.Arguments) > 0 {
-							if json.Unmarshal(tc.Function.Arguments, &rawArgs) == nil {
+							// 2. Extract ID (check id field)
+							toolID, _ := tcMap["id"].(string)
+							if toolID == "" {
+								toolID = fmt.Sprintf("call_%d_%d_%d", time.Now().UnixNano(), msgIdx, tcIdx)
+							}
+
+							// 3. Extract arguments / input schema
+							var argsInput interface{}
+							var rawArgs interface{}
+
+							if fnMap, ok := tcMap["function"].(map[string]interface{}); ok && fnMap["arguments"] != nil {
+								rawArgs = fnMap["arguments"]
+							} else if tcMap["arguments"] != nil {
+								rawArgs = tcMap["arguments"]
+							} else if tcMap["input"] != nil {
+								rawArgs = tcMap["input"]
+							}
+
+							if rawArgs != nil {
 								switch v := rawArgs.(type) {
 								case string:
-									_ = json.Unmarshal([]byte(v), &argsMap)
+									if v != "" {
+										_ = json.Unmarshal([]byte(v), &argsInput)
+									}
 								case map[string]interface{}:
-									argsMap = v
+									argsInput = v
 								default:
-									argsMap = v
+									argsInput = v
 								}
 							}
-						}
-						if argsMap == nil {
-							argsMap = map[string]interface{}{}
-						}
+							if argsInput == nil {
+								argsInput = map[string]interface{}{}
+							}
 
-						blocks = append(blocks, map[string]interface{}{
-							"type":  "tool_use",
-							"id":    toolID,
-							"name":  tc.Function.Name,
-							"input": argsMap,
-						})
+							blocks = append(blocks, map[string]interface{}{
+								"type":  "tool_use",
+								"id":    toolID,
+								"name":  toolName,
+								"input": argsInput,
+							})
+						}
 					}
 				}
 
@@ -228,7 +250,6 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 			}
 		}
 	}
-
 
 	// Coalesce consecutive same-role messages
 	anthropicMsgs = coalesceMessages(anthropicMsgs)
