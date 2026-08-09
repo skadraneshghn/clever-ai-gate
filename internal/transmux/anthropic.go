@@ -16,8 +16,9 @@ import (
 //   - message_stop        → stream termination
 //   - ping                → keepalive
 type AnthropicTransmuxer struct {
-	eventType  string
-	blockType  string // "text" or "thinking"
+	eventType string
+	blockType string // "text", "thinking", "tool_use"
+	toolIndex int    // tool call index counter for OpenAI tool_calls
 }
 
 // NewAnthropicTransmuxer creates a new Anthropic format translator.
@@ -34,18 +35,22 @@ func (t *AnthropicTransmuxer) SetEventType(eventType string) {
 func (t *AnthropicTransmuxer) TranslateChunk(data []byte) ([]byte, error) {
 	switch t.eventType {
 	case "message_start":
-		// Initial message — we could extract the model info, but OpenAI format
-		// doesn't require it in streaming. Skip.
+		t.toolIndex = 0
+		t.blockType = ""
 		return nil, nil
 
 	case "content_block_start":
-		// Detect block type: "text" or "thinking"
-		blockType, _, _, err := jsonparser.Get(data, "content_block", "type")
+		blockTypeBytes, _, _, err := jsonparser.Get(data, "content_block", "type")
 		if err == nil {
-			t.blockType = string(blockType)
+			t.blockType = string(blockTypeBytes)
 		}
 
-		// For thinking blocks, extract initial thinking text if present
+		if t.blockType == "tool_use" {
+			toolID, _ := jsonparser.GetString(data, "content_block", "id")
+			toolName, _ := jsonparser.GetString(data, "content_block", "name")
+			return buildToolCallStartDelta(t.toolIndex, toolID, toolName), nil
+		}
+
 		if t.blockType == "thinking" {
 			thinking, _, _, err := jsonparser.Get(data, "content_block", "thinking")
 			if err == nil && len(thinking) > 0 {
@@ -53,7 +58,6 @@ func (t *AnthropicTransmuxer) TranslateChunk(data []byte) ([]byte, error) {
 			}
 		}
 
-		// For text blocks, extract initial text if present
 		if t.blockType == "text" {
 			text, _, _, err := jsonparser.Get(data, "content_block", "text")
 			if err == nil && len(text) > 0 {
@@ -64,7 +68,6 @@ func (t *AnthropicTransmuxer) TranslateChunk(data []byte) ([]byte, error) {
 		return nil, nil
 
 	case "content_block_delta":
-		// Extract the delta content based on delta type
 		deltaType, _, _, _ := jsonparser.Get(data, "delta", "type")
 
 		switch string(deltaType) {
@@ -83,16 +86,19 @@ func (t *AnthropicTransmuxer) TranslateChunk(data []byte) ([]byte, error) {
 			}
 
 		case "input_json_delta":
-			// Tool use delta — forward as content for now
-			partial, _, _, err := jsonparser.Get(data, "delta", "partial_json")
+			// Tool use argument delta → OpenAI tool_calls delta
+			partial, err := jsonparser.GetString(data, "delta", "partial_json")
 			if err == nil && len(partial) > 0 {
-				return buildDelta(partial, false, ""), nil
+				return buildToolCallInputDelta(t.toolIndex, []byte(partial)), nil
 			}
+
 		}
 		return nil, nil
 
 	case "content_block_stop":
-		// Block finished — no output needed
+		if t.blockType == "tool_use" {
+			t.toolIndex++
+		}
 		t.blockType = ""
 		return nil, nil
 
@@ -133,6 +139,7 @@ func (t *AnthropicTransmuxer) TranslateChunk(data []byte) ([]byte, error) {
 		return nil, nil
 	}
 }
+
 
 // Close releases resources.
 func (t *AnthropicTransmuxer) Close() {}

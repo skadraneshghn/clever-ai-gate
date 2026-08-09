@@ -207,3 +207,125 @@ func TestTranslateAgentRouterResponseToOpenAI(t *testing.T) {
 		t.Errorf("unexpected usage numbers: %v", usage)
 	}
 }
+
+func TestTranslateOpenAIToAgentRouterWithTools(t *testing.T) {
+	openAIRaw := []byte(`{
+		"model": "agentrouter/claude-3-5-sonnet-20241022",
+		"messages": [
+			{"role": "user", "content": "List files in directory"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{
+						"id": "call_999",
+						"type": "function",
+						"function": {
+							"name": "list_dir",
+							"arguments": "{\"path\":\"/workspace\"}"
+						}
+					}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_999",
+				"content": "file1.go\nfile2.go"
+			}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "list_dir",
+					"description": "Lists contents of a directory",
+					"parameters": {
+						"type": "object",
+						"properties": {
+							"path": {"type": "string"}
+						}
+					}
+				}
+			}
+		],
+		"tool_choice": "auto"
+	}`)
+
+	agentBody, err := TranslateOpenAIToAgentRouter(openAIRaw)
+	if err != nil {
+		t.Fatalf("unexpected error during translation: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(agentBody, &parsed); err != nil {
+		t.Fatalf("failed to parse translated json: %v", err)
+	}
+
+	tools, ok := parsed["tools"].([]interface{})
+	if !ok || len(tools) != 1 {
+		t.Fatalf("expected 1 tool in anthropic payload, got %v", parsed["tools"])
+	}
+
+	tool0 := tools[0].(map[string]interface{})
+	if tool0["name"] != "list_dir" {
+		t.Errorf("expected tool name 'list_dir', got '%v'", tool0["name"])
+	}
+	if tool0["input_schema"] == nil {
+		t.Errorf("expected input_schema to be populated")
+	}
+
+	toolChoice, ok := parsed["tool_choice"].(map[string]interface{})
+	if !ok || toolChoice["type"] != "auto" {
+		t.Errorf("expected tool_choice auto, got %v", parsed["tool_choice"])
+	}
+
+	msgs, ok := parsed["messages"].([]interface{})
+	if !ok {
+		t.Fatalf("expected messages array")
+	}
+
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 turns (user, assistant, user with tool_result), got %d", len(msgs))
+	}
+
+	// Turn 1: Assistant with tool_use
+	astMsg := msgs[1].(map[string]interface{})
+	if astMsg["role"] != "assistant" {
+		t.Errorf("expected role assistant, got %v", astMsg["role"])
+	}
+	astBlocks := astMsg["content"].([]interface{})
+	toolUseFound := false
+	for _, b := range astBlocks {
+		block := b.(map[string]interface{})
+		if block["type"] == "tool_use" {
+			toolUseFound = true
+			if block["id"] != "call_999" || block["name"] != "list_dir" {
+				t.Errorf("unexpected tool_use block: %v", block)
+			}
+		}
+	}
+	if !toolUseFound {
+		t.Errorf("expected tool_use block in assistant content")
+	}
+
+	// Turn 2: User with tool_result
+	usrMsg := msgs[2].(map[string]interface{})
+	if usrMsg["role"] != "user" {
+		t.Errorf("expected role user for tool result, got %v", usrMsg["role"])
+	}
+	usrBlocks := usrMsg["content"].([]interface{})
+	toolResultFound := false
+	for _, b := range usrBlocks {
+		block := b.(map[string]interface{})
+		if block["type"] == "tool_result" {
+			toolResultFound = true
+			if block["tool_use_id"] != "call_999" || block["content"] != "file1.go\nfile2.go" {
+				t.Errorf("unexpected tool_result block: %v", block)
+			}
+		}
+	}
+	if !toolResultFound {
+		t.Errorf("expected tool_result block in user content")
+	}
+}
+

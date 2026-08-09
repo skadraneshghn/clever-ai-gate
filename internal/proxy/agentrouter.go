@@ -14,9 +14,12 @@ import (
 //
 // Key translations:
 //  1. System and developer role messages are combined into Anthropic's top-level "system" prompt.
-//  2. User and assistant messages are mapped into Anthropic's "messages" array.
-//  3. "max_tokens" is defaulted to 4096 if missing (Anthropic requires max_tokens).
-//  4. Model prefix "agentrouter/" is stripped so AgentRouter receives the clean model name.
+//  2. OpenAI tools are translated to Anthropic tools (parameters -> input_schema).
+//  3. Assistant tool_calls are converted to Anthropic tool_use content blocks.
+//  4. User tool response messages (role: "tool") are converted to Anthropic tool_result blocks.
+//  5. Reasoning content (reasoning_content / thinking) is preserved.
+//  6. "max_tokens" is defaulted to 16384 if missing (Anthropic requires max_tokens).
+//  7. Model prefix "agentrouter/" is stripped so AgentRouter receives the clean model name.
 func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 	if len(raw) == 0 {
 		return raw, nil
@@ -28,86 +31,181 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 	var systemPrompts []string
 	var anthropicMsgs []map[string]interface{}
 
-	// Parse messages array
-	_, err := jsonparser.ArrayEach(raw, func(value []byte, dataType jsonparser.ValueType, offset int, err error) {
-		role, _ := jsonparser.GetString(value, "role")
-
-		// Handle content — can be string, array, or null
-		contentBytes, dt, _, _ := jsonparser.Get(value, "content")
-		var contentVal interface{}
-		if dt == jsonparser.Null || len(contentBytes) == 0 {
-			// null or missing content (e.g. assistant messages with only tool_calls)
-			contentVal = ""
-		} else if len(contentBytes) > 0 && contentBytes[0] == '[' {
-			var rawArr []interface{}
-			if err := json.Unmarshal(contentBytes, &rawArr); err == nil {
-				contentVal = rawArr
-			} else {
-				contentVal = string(contentBytes)
+	// Parse tools array if present
+	var anthropicTools []map[string]interface{}
+	toolsBytes, dtTools, _, _ := jsonparser.Get(raw, "tools")
+	if dtTools == jsonparser.Array && len(toolsBytes) > 0 {
+		var openAITools []struct {
+			Type     string `json:"type"`
+			Function struct {
+				Name        string          `json:"name"`
+				Description string          `json:"description,omitempty"`
+				Parameters  json.RawMessage `json:"parameters,omitempty"`
+			} `json:"function"`
+		}
+		if err := json.Unmarshal(toolsBytes, &openAITools); err == nil {
+			for _, t := range openAITools {
+				if t.Type == "function" && t.Function.Name != "" {
+					toolObj := map[string]interface{}{
+						"name": t.Function.Name,
+					}
+					if t.Function.Description != "" {
+						toolObj["description"] = t.Function.Description
+					}
+					if len(t.Function.Parameters) > 0 {
+						var schema interface{}
+						if json.Unmarshal(t.Function.Parameters, &schema) == nil {
+							toolObj["input_schema"] = schema
+						} else {
+							toolObj["input_schema"] = map[string]interface{}{"type": "object"}
+						}
+					} else {
+						toolObj["input_schema"] = map[string]interface{}{"type": "object"}
+					}
+					anthropicTools = append(anthropicTools, toolObj)
+				}
 			}
-		} else {
-			strVal, _ := jsonparser.GetString(value, "content")
-			contentVal = strVal
 		}
-
-		if role == "system" || role == "developer" {
-			// Extract text from system messages regardless of content format
-			sysText := extractTextFromContent(contentVal)
-			if sysText != "" {
-				systemPrompts = append(systemPrompts, sysText)
-			}
-			return
-		}
-
-		// Map OpenAI roles to Anthropic roles
-		anthropicRole := role
-		if anthropicRole == "tool" {
-			// tool results in OpenAI become user messages in Anthropic
-			anthropicRole = "user"
-		}
-		if anthropicRole != "user" && anthropicRole != "assistant" {
-			anthropicRole = "user"
-		}
-
-		// Skip empty content for non-assistant messages
-		if contentVal == "" && anthropicRole != "assistant" {
-			return
-		}
-
-		// Build Anthropic content — ensure it's always a proper content block
-		var anthropicContent interface{}
-		switch v := contentVal.(type) {
-		case string:
-			if v == "" {
-				// Empty assistant message (e.g. before tool_calls) — use minimal text
-				anthropicContent = " "
-			} else {
-				anthropicContent = v
-			}
-		case []interface{}:
-			anthropicContent = v
-		default:
-			anthropicContent = fmt.Sprintf("%v", contentVal)
-		}
-
-		anthropicMsgs = append(anthropicMsgs, map[string]interface{}{
-			"role":    anthropicRole,
-			"content": anthropicContent,
-		})
-	}, "messages")
-
-	if err != nil {
-		return raw, fmt.Errorf("failed to parse messages for agentrouter translation: %w", err)
 	}
 
-	// Coalesce consecutive same-role messages — Anthropic API requires strict
-	// user/assistant alternation. Kilo/Cursor/Cline commonly send multiple
-	// consecutive user messages (project context, file contents, question).
+	// Parse tool_choice if present
+	var anthropicToolChoice interface{}
+	tcBytes, dtChoice, _, _ := jsonparser.Get(raw, "tool_choice")
+	if dtChoice == jsonparser.String {
+		tcStr := string(tcBytes)
+		if tcStr == "auto" {
+			anthropicToolChoice = map[string]interface{}{"type": "auto"}
+		} else if tcStr == "any" || tcStr == "required" {
+			anthropicToolChoice = map[string]interface{}{"type": "any"}
+		}
+	} else if dtChoice == jsonparser.Object {
+		var openAITC struct {
+			Type     string `json:"type"`
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		}
+		if json.Unmarshal(tcBytes, &openAITC) == nil && openAITC.Function.Name != "" {
+			anthropicToolChoice = map[string]interface{}{
+				"type": "tool",
+				"name": openAITC.Function.Name,
+			}
+		}
+	}
+
+	// Parse messages array
+	msgsBytes, dtMsgs, _, _ := jsonparser.Get(raw, "messages")
+	if dtMsgs == jsonparser.Array {
+		var openAIMsgs []struct {
+			Role             string          `json:"role"`
+			Content          json.RawMessage `json:"content"`
+			ReasoningContent string          `json:"reasoning_content,omitempty"`
+			ToolCallID       string          `json:"tool_call_id,omitempty"`
+			ToolCalls        []struct {
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls,omitempty"`
+		}
+
+		if err := json.Unmarshal(msgsBytes, &openAIMsgs); err == nil {
+			for _, msg := range openAIMsgs {
+				// Handle system/developer roles
+				if msg.Role == "system" || msg.Role == "developer" {
+					sysText := parseRawContentToText(msg.Content)
+					if sysText != "" {
+						systemPrompts = append(systemPrompts, sysText)
+					}
+					continue
+				}
+
+				// Handle tool response message (role == "tool")
+				if msg.Role == "tool" {
+					toolResultContent := parseRawContentToText(msg.Content)
+					toolResultBlock := map[string]interface{}{
+						"type":        "tool_result",
+						"tool_use_id": msg.ToolCallID,
+						"content":     toolResultContent,
+					}
+					anthropicMsgs = append(anthropicMsgs, map[string]interface{}{
+						"role":    "user",
+						"content": []interface{}{toolResultBlock},
+					})
+					continue
+				}
+
+				// Map role
+				anthropicRole := msg.Role
+				if anthropicRole != "user" && anthropicRole != "assistant" {
+					anthropicRole = "user"
+				}
+
+				// Build content blocks for assistant or user
+				var blocks []interface{}
+
+				// Reasoning content (if assistant)
+				if msg.Role == "assistant" && msg.ReasoningContent != "" {
+					blocks = append(blocks, map[string]interface{}{
+						"type":     "thinking",
+						"thinking": msg.ReasoningContent,
+					})
+				}
+
+				// Text / array content
+				parsedBlocks := parseRawContentToBlocks(msg.Content)
+				if len(parsedBlocks) > 0 {
+					blocks = append(blocks, parsedBlocks...)
+				}
+
+				// Tool calls (if assistant)
+				if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+					for _, tc := range msg.ToolCalls {
+						var argsMap interface{}
+						if err := json.Unmarshal([]byte(tc.Function.Arguments), &argsMap); err != nil {
+							argsMap = map[string]interface{}{}
+						}
+						blocks = append(blocks, map[string]interface{}{
+							"type":  "tool_use",
+							"id":    tc.ID,
+							"name":  tc.Function.Name,
+							"input": argsMap,
+						})
+					}
+				}
+
+				var anthropicContent interface{}
+				if len(blocks) == 0 {
+					if anthropicRole == "assistant" {
+						anthropicContent = " "
+					} else {
+						continue // skip empty user messages
+					}
+				} else if len(blocks) == 1 {
+					if textBlock, ok := blocks[0].(map[string]interface{}); ok && textBlock["type"] == "text" {
+						anthropicContent = textBlock["text"]
+					} else {
+						anthropicContent = blocks
+					}
+				} else {
+					anthropicContent = blocks
+				}
+
+				anthropicMsgs = append(anthropicMsgs, map[string]interface{}{
+					"role":    anthropicRole,
+					"content": anthropicContent,
+				})
+			}
+		}
+	}
+
+	// Coalesce consecutive same-role messages
 	anthropicMsgs = coalesceMessages(anthropicMsgs)
 
 	maxTokens, _ := jsonparser.GetInt(raw, "max_tokens")
 	if maxTokens <= 0 {
-		// Coding assistants need larger output buffers than the Anthropic default
 		maxTokens = 16384
 	}
 
@@ -121,6 +219,13 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 		"stream":     stream,
 	}
 
+	if len(anthropicTools) > 0 {
+		out["tools"] = anthropicTools
+		if anthropicToolChoice != nil {
+			out["tool_choice"] = anthropicToolChoice
+		}
+	}
+
 	if temperature > 0 {
 		out["temperature"] = temperature
 	}
@@ -129,7 +234,60 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 		out["system"] = strings.Join(systemPrompts, "\n\n")
 	}
 
+	// Check for thinking options
+	thinkingBytes, dtThink, _, _ := jsonparser.Get(raw, "thinking")
+	if dtThink == jsonparser.Object {
+		var thinkObj interface{}
+		if json.Unmarshal(thinkingBytes, &thinkObj) == nil {
+			out["thinking"] = thinkObj
+		}
+	}
+
 	return json.Marshal(out)
+}
+
+// parseRawContentToText extracts plain text from OpenAI message content,
+// handling both raw string and content block array formats.
+func parseRawContentToText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var str string
+	if json.Unmarshal(raw, &str) == nil {
+		return str
+	}
+	var blocks []map[string]interface{}
+	if json.Unmarshal(raw, &blocks) == nil {
+		var parts []string
+		for _, b := range blocks {
+			if t, _ := b["type"].(string); t == "text" {
+				if txt, ok := b["text"].(string); ok && txt != "" {
+					parts = append(parts, txt)
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return string(raw)
+}
+
+// parseRawContentToBlocks converts raw message content into an array of content blocks.
+func parseRawContentToBlocks(raw json.RawMessage) []interface{} {
+	if len(raw) == 0 {
+		return nil
+	}
+	var str string
+	if json.Unmarshal(raw, &str) == nil {
+		if str == "" {
+			return nil
+		}
+		return []interface{}{map[string]interface{}{"type": "text", "text": str}}
+	}
+	var rawBlocks []interface{}
+	if json.Unmarshal(raw, &rawBlocks) == nil {
+		return rawBlocks
+	}
+	return nil
 }
 
 // extractTextFromContent extracts plain text from OpenAI content values,

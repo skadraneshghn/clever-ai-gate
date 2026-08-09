@@ -132,6 +132,42 @@ func buildUsageDelta(finishReason string, promptTokens, completionTokens int) []
 	return result
 }
 
+// buildToolCallStartDelta constructs an OpenAI-compatible SSE chunk for initiating a tool call.
+func buildToolCallStartDelta(toolIndex int, callID, name string) []byte {
+	buf := getBuffer()
+	defer putBuffer(buf)
+
+	buf.WriteString(`{"id":"chatcmpl-gate","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":`)
+	writeInt(buf, toolIndex)
+	buf.WriteString(`,"id":"`)
+	escapeJSONString(buf, []byte(callID))
+	buf.WriteString(`","type":"function","function":{"name":"`)
+	escapeJSONString(buf, []byte(name))
+	buf.WriteString(`","arguments":""}}]},"finish_reason":null}]}`)
+
+	result := make([]byte, buf.Len())
+	copy(result, buf.Bytes())
+	return result
+}
+
+// buildToolCallInputDelta constructs an OpenAI-compatible SSE chunk for streaming tool call arguments.
+func buildToolCallInputDelta(toolIndex int, argsDelta []byte) []byte {
+	buf := getBuffer()
+	defer putBuffer(buf)
+
+	buf.WriteString(`{"id":"chatcmpl-gate","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":`)
+	writeInt(buf, toolIndex)
+	buf.WriteString(`,"function":{"arguments":`)
+	buf.WriteByte('"')
+	escapeJSONString(buf, argsDelta)
+	buf.WriteByte('"')
+	buf.WriteString(`}}]},"finish_reason":null}]}`)
+
+	result := make([]byte, buf.Len())
+	copy(result, buf.Bytes())
+	return result
+}
+
 // escapeJSONString writes a JSON-escaped version of s into buf.
 // This handles the minimum required escaping without reflection.
 func escapeJSONString(buf *bytes.Buffer, s []byte) {
