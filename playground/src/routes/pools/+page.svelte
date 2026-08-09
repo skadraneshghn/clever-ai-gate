@@ -2,7 +2,8 @@
   import { onMount } from 'svelte';
   import { 
     Cpu, Plus, RefreshCw, Shield, AlertTriangle, Trash2, Pencil, X, Sparkles,
-    ArrowLeft, Search, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Heart
+    ArrowLeft, Search, ChevronDown, ChevronUp, Play, CheckCircle, XCircle, Heart,
+    SlidersHorizontal, ArrowUpDown, Activity, ShieldOff
   } from '@lucide/svelte';
   import { appState } from '$lib/state.svelte.js';
   import Button from '$lib/components/Button.svelte';
@@ -26,8 +27,84 @@
 
   // ─── Local State ──────────────────────────────────────────────────────────
   let pools = $state([]);
+  let totalCount = $state(0);
   let loading = $state(false);
   let error = $state('');
+
+  // Pagination / lazy-loading
+  const PAGE_SIZE = 100;
+  let currentPage = $state(0);
+  let hasMore = $state(false);
+  let loadingMore = $state(false);
+
+  // Filtering & Sorting
+  let searchQuery = $state('');
+  let filterStrategy = $state('');
+  let filterCapabilities = $state([]);
+  let filterFallback = $state('');
+  let filterCredentials = $state('');
+  let filterHealth = $state('');
+  let sortBy = $state('model_pattern');
+  let sortOrder = $state('asc');
+  let showAdvancedFilters = $state(false);
+  let searchTimer = null;
+
+  function toggleCapabilityFilter(capKey) {
+    if (filterCapabilities.includes(capKey)) {
+      filterCapabilities = filterCapabilities.filter(k => k !== capKey);
+    } else {
+      filterCapabilities = [...filterCapabilities, capKey];
+    }
+    reloadPools();
+  }
+
+  function clearFilters() {
+    searchQuery = '';
+    filterStrategy = '';
+    filterCapabilities = [];
+    filterFallback = '';
+    filterCredentials = '';
+    filterHealth = '';
+    sortBy = 'model_pattern';
+    sortOrder = 'asc';
+    reloadPools();
+  }
+
+  function handleHeaderSort(colKey) {
+    if (!colKey) return;
+    if (sortBy === colKey) {
+      sortOrder = sortOrder === 'asc' ? 'desc' : 'asc';
+    } else {
+      sortBy = colKey;
+      sortOrder = 'asc';
+    }
+    reloadPools();
+  }
+
+  // Virtualization
+  const ROW_HEIGHT = 45;
+  const OVERSCAN = 8;
+  let scrollTop = $state(0);
+  let viewportHeight = $state(0);
+  let vscrollEl;
+
+  let visibleRange = $derived.by(() => {
+    const loaded = pools.length;
+    if (loaded === 0 || viewportHeight === 0) {
+      return { start: 0, end: 0, padTop: 0, padBottom: 0 };
+    }
+    const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
+    const visibleCount = Math.ceil(viewportHeight / ROW_HEIGHT) + OVERSCAN * 2;
+    const end = Math.min(loaded, start + visibleCount);
+    return {
+      start,
+      end,
+      padTop: start * ROW_HEIGHT,
+      padBottom: (loaded - end) * ROW_HEIGHT
+    };
+  });
+
+  let visibleItems = $derived(pools.slice(visibleRange.start, visibleRange.end));
 
   // Details View state
   let selectedPool = $state(null);
@@ -66,39 +143,193 @@
   let showBulkDeletePoolsConfirm = $state(false);
   let bulkDeletePoolsLoading = $state(false);
 
+  // Bulk selection and activation state
+  let showBulkActivatePoolsConfirm = $state(false);
+  let bulkActivatePoolsLoading = $state(false);
+
+  // Bulk health-check state
+  let isBulkTesting = $state(false);
+
+  async function triggerBulkHealthCheck() {
+    if (isBulkTesting) return;
+    isBulkTesting = true;
+    appState.apiLoading = true;
+    try {
+      const res = await fetch('/api/v1/admin/pools/bulk-test', {
+        method: 'POST',
+        headers: adminHeaders()
+      });
+      const result = await res.json();
+      if (res.ok) {
+        appState.addToast('success', result.message || 'Bulk health check queued in background job cluster!');
+      } else {
+        appState.addToast('error', result.error || `Request failed (${res.status})`);
+      }
+    } catch (err) {
+      appState.addToast('error', `Network error: ${err.message}`);
+    } finally {
+      isBulkTesting = false;
+      appState.apiLoading = false;
+    }
+  }
+
+  // Purge zero-health pools state
+  let showPurgeConfirm = $state(false);
+  let isPurging = $state(false);
+
+  async function purgeUnhealthyPools() {
+    isPurging = true;
+    appState.apiLoading = true;
+    try {
+      const res = await fetch('/api/v1/admin/pools/purge-unhealthy', {
+        method: 'POST',
+        headers: adminHeaders()
+      });
+      const result = await res.json();
+      if (res.ok) {
+        appState.addToast('success', result.message || `${result.deleted} unhealthy pool(s) purged.`);
+        showPurgeConfirm = false;
+        reloadPools();
+      } else {
+        appState.addToast('error', result.error || `Purge failed (${res.status})`);
+      }
+    } catch (err) {
+      appState.addToast('error', `Network error: ${err.message}`);
+    } finally {
+      isPurging = false;
+      appState.apiLoading = false;
+    }
+  }
+
+  /** Returns colour class for a health percentage value */
+  function healthColor(pct) {
+    if (pct === null || pct === undefined) return '#64748b'; // no creds → grey
+    if (pct === 0) return '#ef4444';    // 0% → red
+    if (pct < 100) return '#f59e0b';   // partial → amber
+    return '#22c55e';                   // 100% → green
+  }
+
   // Auto-fetch when adminKey changes
   $effect(() => {
-    if (appState.adminKey.trim() && !selectedPool) {
-      loadPools();
+    const key = appState.getAdminKey();
+    if (key && !selectedPool && pools.length === 0 && !loading) {
+      reloadPools();
     }
   });
+
+  onMount(() => {
+    if (appState.getAdminKey()) {
+      reloadPools();
+    }
+  });
+
+  // Debounced search/filter → reload first page
+  function onSearchInput() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => reloadPools(), 300);
+  }
 
   // ─── API Helper Headers ───────────────────────────────────────────────────
   function adminHeaders() {
     return {
-      'Authorization': `Bearer ${appState.adminKey.trim()}`,
+      'Authorization': `Bearer ${appState.getAdminKey()}`,
       'Content-Type': 'application/json'
     };
   }
 
-  async function loadPools() {
+  async function loadPoolsPage(page) {
+    try {
+      const params = new URLSearchParams();
+      params.append('limit', String(PAGE_SIZE));
+      params.append('offset', String(page * PAGE_SIZE));
+      
+      if (searchQuery.trim()) params.append('search', searchQuery.trim());
+      if (filterStrategy) params.append('strategy', filterStrategy);
+      
+      if (filterFallback === 'has_fallback') {
+        params.append('has_fallback', 'true');
+      } else if (filterFallback === 'no_fallback') {
+        params.append('has_fallback', 'false');
+      }
+
+      if (filterCredentials === 'has_keys') {
+        params.append('has_credentials', 'true');
+      } else if (filterCredentials === 'no_keys') {
+        params.append('has_credentials', 'false');
+      }
+
+      if (filterHealth && filterHealth !== 'all') {
+        params.append('health_status', filterHealth);
+      }
+
+      if (filterCapabilities.length > 0) {
+        params.append('capabilities', filterCapabilities.join(','));
+      }
+
+      if (sortBy) params.append('sort_by', sortBy);
+      if (sortOrder) params.append('sort_order', sortOrder);
+
+      const res = await fetch(`/api/v1/admin/pools?${params.toString()}`, { headers: adminHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        const rows = data.data ?? data;
+        return { rows, total: data.total ?? rows.length };
+      }
+      const err = await res.json();
+      return { error: err.error || `Error ${res.status}` };
+    } catch (e) {
+      return { error: `Network error: ${e.message}` };
+    }
+  }
+
+  async function reloadPools() {
     loading = true;
     error = '';
+    currentPage = 0;
     appState.apiLoading = true;
     try {
-      const res = await fetch('/api/v1/admin/pools', { headers: adminHeaders() });
-      if (res.ok) {
-        pools = await res.json();
-        selectedPoolIds = selectedPoolIds.filter(id => pools.some(p => p.id === id));
+      const result = await loadPoolsPage(0);
+      if (result.error) {
+        error = result.error;
       } else {
-        const err = await res.json();
-        error = err.error || `Error ${res.status}`;
+        pools = result.rows;
+        totalCount = result.total;
+        hasMore = result.rows.length < result.total;
+        selectedPoolIds = selectedPoolIds.filter(id => pools.some(p => p.id === id));
+        if (vscrollEl) vscrollEl.scrollTop = 0;
       }
-    } catch (e) {
-      error = `Network error: ${e.message}`;
     } finally {
       loading = false;
       appState.apiLoading = false;
+    }
+  }
+
+  async function loadMore() {
+    if (loadingMore || !hasMore) return;
+    loadingMore = true;
+    appState.apiLoading = true;
+    const nextPage = currentPage + 1;
+    try {
+      const result = await loadPoolsPage(nextPage);
+      if (result.error) {
+        appState.addToast('error', result.error);
+      } else {
+        pools = [...pools, ...result.rows];
+        currentPage = nextPage;
+        hasMore = pools.length < result.total;
+      }
+    } finally {
+      loadingMore = false;
+      appState.apiLoading = false;
+    }
+  }
+
+  function onVScroll(e) {
+    scrollTop = e.target.scrollTop;
+    // Trigger lazy load when near the bottom of the loaded list
+    const remaining = pools.length * ROW_HEIGHT - (scrollTop + viewportHeight);
+    if (hasMore && !loadingMore && remaining < ROW_HEIGHT * 10) {
+      loadMore();
     }
   }
 
@@ -260,7 +491,7 @@
       if (res.status === 201 || res.ok) {
         appState.addToast('success', 'Model pool created successfully');
         showAddModal = false;
-        loadPools();
+        reloadPools();
       } else {
         const err = await res.json();
         appState.addToast('error', err.details || err.error || 'Failed to create pool');
@@ -310,7 +541,7 @@
           selectedPool.strategy = editForm.strategy;
           selectedPool.fallback_pool_id = payload.fallback_pool_id;
         }
-        loadPools();
+        reloadPools();
       } else {
         const err = await res.json();
         appState.addToast('error', err.details || err.error || 'Failed to update pool');
@@ -344,7 +575,7 @@
           selectedPool = null;
         }
         deleteTargetId = null;
-        loadPools();
+        reloadPools();
       } else {
         const err = await res.json();
         appState.addToast('error', err.details || err.error || 'Failed to delete pool');
@@ -380,7 +611,7 @@
           selectedPool = null;
         }
         selectedPoolIds = [];
-        loadPools();
+        reloadPools();
       } else {
         const err = await res.json();
         appState.addToast('error', err.details || err.error || 'Failed to delete pools');
@@ -393,16 +624,50 @@
     }
   }
 
+  function confirmBulkActivatePools() {
+    showBulkActivatePoolsConfirm = true;
+  }
+
+  async function activatePoolsBulk() {
+    bulkActivatePoolsLoading = true;
+    appState.apiLoading = true;
+    try {
+      const res = await fetch('/api/v1/admin/pools/bulk-activate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...adminHeaders()
+        },
+        body: JSON.stringify({ ids: selectedPoolIds })
+      });
+      if (res.ok) {
+        const result = await res.json();
+        appState.addToast('success', result.message || `Activated all credentials across ${selectedPoolIds.length} pools successfully`);
+        showBulkActivatePoolsConfirm = false;
+        selectedPoolIds = [];
+        reloadPools();
+      } else {
+        const err = await res.json();
+        appState.addToast('error', err.details || err.error || 'Failed to activate credentials');
+      }
+    } catch (e) {
+      appState.addToast('error', `Network error: ${e.message}`);
+    } finally {
+      bulkActivatePoolsLoading = false;
+      appState.apiLoading = false;
+    }
+  }
+
   function connectAdminKey() {
     const key = appState.adminKey.trim();
     if (!key) return;
     localStorage.setItem('cag_admin_key', key);
-    loadPools();
+    reloadPools();
   }
 
   onMount(() => {
     if (appState.adminKey.trim() && !selectedPool) {
-      loadPools();
+      reloadPools();
     }
   });
 </script>
@@ -410,7 +675,7 @@
 <header class="header flex items-center justify-between px-6 py-4 border-b shrink-0">
   <div class="flex items-center gap-3">
     {#if selectedPool}
-      <Button variant="ghost" size="sm" onclick={() => { selectedPool = null; loadPools(); }} title="Back to pools list">
+      <Button variant="ghost" size="sm" onclick={() => { selectedPool = null; reloadPools(); }} title="Back to pools list">
         <ArrowLeft size={16} />
       </Button>
       <Cpu size={20} class="text-[#f97316]" />
@@ -419,7 +684,7 @@
       <Cpu size={20} class="text-[#f97316]" />
       <span class="font-bold text-base">Model Routing Pools</span>
       {#if appState.adminKey.trim()}
-        <span class="text-xs font-bold text-secondary bg-gray-500/10 border border-gray-500/20 px-2.5 py-0.5 rounded-full uppercase">{pools.length} pools</span>
+        <span class="text-xs font-bold text-secondary bg-gray-500/10 border border-gray-500/20 px-2.5 py-0.5 rounded-full uppercase">{totalCount} pools</span>
       {/if}
     {/if}
   </div>
@@ -432,18 +697,49 @@
         </Button>
       {:else}
         {#if selectedPoolIds.length > 0}
+          <Button variant="success" size="sm" onclick={confirmBulkActivatePools} title="Activate all credentials/tokens in selected pools">
+            <Activity size={14} />
+            Activate Selected ({selectedPoolIds.length})
+          </Button>
           <Button variant="danger" size="sm" onclick={confirmBulkDeletePools} title="Delete selected pools">
             <Trash2 size={14} />
             Delete Selected ({selectedPoolIds.length})
           </Button>
         {/if}
-        <Button variant="secondary" size="sm" onclick={() => { loadPools(); appState.addToast('info', 'Refreshing capabilities...'); }} title="Re-classify all model capabilities">
+        <Button variant="secondary" size="sm" onclick={() => { reloadPools(); appState.addToast('info', 'Refreshing capabilities...'); }} title="Re-classify all model capabilities">
           <Sparkles size={14} />
           Refresh Capabilities
         </Button>
-        <Button variant="secondary" size="sm" onclick={() => { loadPools(); appState.addToast('info', 'Refreshing pools list...'); }}>
+        <Button variant="secondary" size="sm" onclick={() => { reloadPools(); appState.addToast('info', 'Refreshing pools list...'); }}>
           <RefreshCw size={14} />
           Refresh
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          onclick={triggerBulkHealthCheck}
+          disabled={isBulkTesting}
+          title="Run a live health check on every model credential across all pools via background job"
+        >
+          {#if isBulkTesting}
+            <svg class="animate-spin" style="width:14px;height:14px;" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4v0z"></path>
+            </svg>
+            Scheduling...
+          {:else}
+            <Activity size={14} />
+            Bulk Test All Models
+          {/if}
+        </Button>
+        <Button
+          variant="danger"
+          size="sm"
+          onclick={() => showPurgeConfirm = true}
+          title="Permanently delete all model pools where 0% of credentials are healthy, removing them from the proxy API"
+        >
+          <ShieldOff size={14} />
+          Purge 0% Pools
         </Button>
         <Button variant="primary" size="sm" onclick={openAddModal}>
           <Plus size={14} />
@@ -619,7 +915,7 @@
               <span class="text-xs font-bold uppercase tracking-wider text-[#a78bfa]">Enable</span>
             </label>
           </div>
-          <div class="relative">
+          <div class="relative flex items-center">
             <input 
               type="text" 
               class="input-box p-3 pl-9 text-sm rounded-xl border w-full {logsFilters.use_semantic ? 'border-[#a78bfa] focus:border-[#a78bfa]' : ''}" 
@@ -628,7 +924,9 @@
               disabled={!logsFilters.use_semantic}
               onkeydown={(e) => { if (e.key === 'Enter') handleFilterChange(); }}
             />
-            <Sparkles size={14} class="absolute left-3 top-3.5 {logsFilters.use_semantic ? 'text-[#a78bfa]' : 'opacity-30'}" />
+            <div class="absolute left-3 inset-y-0 flex items-center pointer-events-none z-10 {logsFilters.use_semantic ? 'text-[#a78bfa]' : 'opacity-30'}">
+              <Sparkles size={14} />
+            </div>
           </div>
         </div>
       </div>
@@ -785,21 +1083,196 @@
     </Card>
   </div>
 {:else}
-  <!-- Pools data grid -->
-  <div class="providers-grid-wrap flex-grow overflow-auto p-6">
+  <!-- Pools data grid (virtualized + lazy-loaded) -->
+  <div class="providers-grid-wrap flex flex-col flex-grow overflow-hidden">
+    <!-- Filter / search toolbar -->
+    <div class="flex flex-col border-b shrink-0 bg-[var(--card-bg)] shadow-sm">
+      <!-- Main Row: Search & Action Buttons -->
+      <div class="flex items-center gap-3 px-6 py-4 flex-wrap">
+        <div class="relative flex items-center flex-grow max-w-md">
+          <div class="absolute left-3.5 inset-y-0 flex items-center pointer-events-none z-10 text-secondary opacity-70">
+            <Search size={16} />
+          </div>
+          <input
+            type="text"
+            class="filter-search-input"
+            placeholder="Search model pattern, strategy..."
+            bind:value={searchQuery}
+            oninput={onSearchInput}
+          />
+        </div>
+        
+        <Button 
+          variant="outline" 
+          size="sm" 
+          onclick={() => showAdvancedFilters = !showAdvancedFilters}
+          class="flex items-center gap-2 border-[var(--border-color)] hover:border-[#f97316] h-[46px] rounded-xl px-4"
+        >
+          <SlidersHorizontal size={14} class={showAdvancedFilters ? 'text-[#f97316]' : ''} />
+          <span class="text-sm font-semibold">Advanced Filters</span>
+          {#if showAdvancedFilters}
+            <ChevronUp size={14} />
+          {:else}
+            <ChevronDown size={14} />
+          {/if}
+        </Button>
+
+        {#if searchQuery || filterStrategy || filterFallback || filterCredentials || filterHealth || filterCapabilities.length > 0}
+          <Button 
+            variant="ghost" 
+            size="sm" 
+            onclick={clearFilters}
+            class="text-xs text-secondary hover:text-red-500 flex items-center gap-1 h-[46px] rounded-xl px-3"
+          >
+            <X size={13} />
+            Reset Filters
+          </Button>
+        {/if}
+
+        <span class="text-xs text-secondary ml-auto font-medium">
+          {#if totalCount > 0}
+            Showing {pools.length} of {totalCount}
+            {#if loadingMore}<span class="opacity-60"> · loading more…</span>{/if}
+          {:else if searchQuery || filterStrategy || filterFallback || filterCredentials || filterHealth || filterCapabilities.length > 0}
+            No matches found
+          {/if}
+        </span>
+      </div>
+
+      <!-- Expandable Advanced Filters Panel -->
+      {#if showAdvancedFilters}
+        <div 
+          class="filter-panel"
+        >
+          <!-- Grid for dropdown selectors -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+            <!-- Strategy Filter -->
+            <div class="flex flex-col gap-1">
+              <label class="filter-label">Strategy</label>
+              <select 
+                class="filter-select"
+                bind:value={filterStrategy}
+                onchange={reloadPools}
+              >
+                <option value="">All Strategies</option>
+                <option value="round-robin">round-robin</option>
+                <option value="weighted-round-robin">weighted-round-robin</option>
+                <option value="random">random</option>
+              </select>
+            </div>
+
+            <!-- Fallback Filter -->
+            <div class="flex flex-col gap-1">
+              <label class="filter-label">Fallback Status</label>
+              <select 
+                class="filter-select"
+                bind:value={filterFallback}
+                onchange={reloadPools}
+              >
+                <option value="">All Pools</option>
+                <option value="has_fallback">Has Fallback Pool</option>
+                <option value="no_fallback">No Fallback Pool</option>
+              </select>
+            </div>
+
+            <!-- Credentials Count Filter -->
+            <div class="flex flex-col gap-1">
+              <label class="filter-label">API Keys Count</label>
+              <select 
+                class="filter-select"
+                bind:value={filterCredentials}
+                onchange={reloadPools}
+              >
+                <option value="">All Pools</option>
+                <option value="has_keys">Active (Has Keys)</option>
+                <option value="no_keys">Empty (No Keys)</option>
+              </select>
+            </div>
+
+            <!-- Health Status Filter -->
+            <div class="flex flex-col gap-1">
+              <label class="filter-label">Key Health Status</label>
+              <select 
+                class="filter-select"
+                bind:value={filterHealth}
+                onchange={reloadPools}
+              >
+                <option value="">All Health</option>
+                <option value="healthy">All Keys Healthy</option>
+                <option value="unhealthy">Has Unhealthy Key(s)</option>
+                <option value="empty">No Keys</option>
+              </select>
+            </div>
+
+            <!-- Sort By -->
+            <div class="flex flex-col gap-1">
+              <label class="filter-label">Sort By</label>
+              <select 
+                class="filter-select"
+                bind:value={sortBy}
+                onchange={reloadPools}
+              >
+                <option value="model_pattern">Model Pattern</option>
+                <option value="id">Pool ID</option>
+                <option value="created_at">Date Created</option>
+                <option value="credential_count">Keys Count</option>
+                <option value="health_percent">Health %</option>
+              </select>
+            </div>
+
+            <!-- Sort Order -->
+            <div class="flex flex-col gap-1">
+              <label class="filter-label">Sort Direction</label>
+              <button 
+                class="filter-direction-btn"
+                onclick={() => { sortOrder = sortOrder === 'asc' ? 'desc' : 'asc'; reloadPools(); }}
+              >
+                <ArrowUpDown size={14} class="text-[#f97316]" />
+                <span>{sortOrder === 'asc' ? 'Ascending' : 'Descending'}</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Capability Badges Selection -->
+          <div class="flex flex-col gap-2 border-t border-[var(--border-color)] pt-3">
+            <span class="filter-label">Filter by Model Capabilities</span>
+            <div class="flex flex-wrap gap-2">
+              {#each Object.entries(CAPABILITY_BADGES) as [key, badge]}
+                {@const isSelected = filterCapabilities.includes(key)}
+                <button
+                  type="button"
+                  onclick={() => toggleCapabilityFilter(key)}
+                  class="filter-cap-btn"
+                  class:active={isSelected}
+                  style="
+                    --cap-color: {badge.color};
+                    --cap-bg: {badge.bg};
+                    --cap-border: {badge.border};
+                  "
+                >
+                  <span class="cap-dot"></span>
+                  {badge.label}
+                </button>
+              {/each}
+            </div>
+          </div>
+        </div>
+      {/if}
+    </div>
+
     {#if loading}
-      <div class="providers-loading flex flex-col items-center justify-center h-64">
+      <div class="providers-loading flex flex-col items-center justify-center flex-grow">
         <div class="animate-spin text-[#f97316] text-xl">⟳</div>
         <p class="text-sm mt-2 text-secondary">Loading routing pools...</p>
       </div>
     {:else if error}
-      <div class="providers-loading flex flex-col items-center justify-center h-64">
+      <div class="providers-loading flex flex-col items-center justify-center flex-grow">
         <AlertTriangle size={40} class="text-red-500 mb-2" />
         <p class="text-red-500 text-sm font-semibold">{error}</p>
-        <Button variant="primary" class="mt-4" onclick={loadPools}>Retry</Button>
+        <Button variant="primary" class="mt-4" onclick={reloadPools}>Retry</Button>
       </div>
     {:else if pools.length === 0}
-      <div class="providers-loading flex flex-col items-center justify-center h-64">
+      <div class="providers-loading flex flex-col items-center justify-center flex-grow">
         <Cpu size={48} class="opacity-20 mb-4" />
         <p class="opacity-50 text-sm text-secondary">No model pools registered yet.</p>
         <Button variant="primary" class="mt-4" onclick={openAddModal}>
@@ -807,14 +1280,16 @@
         </Button>
       </div>
     {:else}
-      <div class="providers-table-container">
-        <table class="providers-table">
-          <thead>
-            <tr>
-              <th style="width: 40px; text-align: center;">
+      <!-- Virtualized table -->
+      <div class="pools-table-container flex flex-col flex-grow overflow-hidden">
+        <!-- Fixed header -->
+        <div class="pools-table-header">
+          <div class="pools-table-row pools-table-headrow">
+            <div style="width: 40px; display: flex; align-items: center; justify-content: center;">
+              <label class="ios-checkbox-wrapper" title="Select all pools">
                 <input
                   type="checkbox"
-                  class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
+                  class="ios-checkbox-input"
                   checked={selectedPoolIds.length === pools.length && pools.length > 0}
                   onchange={(e) => {
                     if (e.target.checked) {
@@ -824,66 +1299,162 @@
                     }
                   }}
                 />
-              </th>
-              <th style="font-size: 11px;">ID</th>
-              <th style="font-size: 11px;">Model Pattern</th>
-              <th style="font-size: 11px;">Capabilities</th>
-              <th style="font-size: 11px;">Strategy</th>
-              <th style="font-size: 11px;">Fallback Pool ID</th>
-              <th style="font-size: 11px; text-align: center;">Credentials</th>
-              <th style="font-size: 11px; text-align: center;">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each pools as pool (pool.id)}
-              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-              <!-- svelte-ignore a11y_click_events_have_key_events -->
-              <tr class="provider-row cursor-pointer" onclick={() => openPoolDetails(pool)}>
-                <td style="text-align: center; width: 40px;" onclick={(e) => e.stopPropagation()}>
-                  <input
-                    type="checkbox"
-                    class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
-                    value={pool.id}
-                    bind:group={selectedPoolIds}
-                    onclick={(e) => e.stopPropagation()}
-                  />
-                </td>
-                <td class="font-mono text-xs opacity-60">#{pool.id}</td>
-                <td class="font-bold text-sm text-[#f97316]">{pool.model_pattern}</td>
-                <td>
-                  <div class="flex flex-wrap gap-1">
-                    {#each capabilityKeys(pool.capabilities) as key}
-                      {@const badge = CAPABILITY_BADGES[key]}
-                      <span style="display:inline-block; padding:2px 7px; border-radius:5px; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; color:{badge.color}; background:{badge.bg}; border:1px solid {badge.border};">
-                        {badge.label}
+                <span class="ios-checkbox-box"></span>
+              </label>
+            </div>
+            <button type="button" class="th-sort-btn text-left" onclick={() => handleHeaderSort('id')}>
+              <span>ID</span>
+              {#if sortBy === 'id'}
+                <span class="sort-icon text-[#f97316]">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+              {:else}
+                <span class="sort-icon opacity-30">↕</span>
+              {/if}
+            </button>
+            <button type="button" class="th-sort-btn text-left" onclick={() => handleHeaderSort('model_pattern')}>
+              <span>Model Pattern</span>
+              {#if sortBy === 'model_pattern'}
+                <span class="sort-icon text-[#f97316]">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+              {:else}
+                <span class="sort-icon opacity-30">↕</span>
+              {/if}
+            </button>
+            <button type="button" class="th-sort-btn text-left" onclick={() => handleHeaderSort('capabilities')}>
+              <span>Capabilities</span>
+              {#if sortBy === 'capabilities'}
+                <span class="sort-icon text-[#f97316]">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+              {:else}
+                <span class="sort-icon opacity-30">↕</span>
+              {/if}
+            </button>
+            <button type="button" class="th-sort-btn text-left" onclick={() => handleHeaderSort('strategy')}>
+              <span>Strategy</span>
+              {#if sortBy === 'strategy'}
+                <span class="sort-icon text-[#f97316]">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+              {:else}
+                <span class="sort-icon opacity-30">↕</span>
+              {/if}
+            </button>
+            <button type="button" class="th-sort-btn text-left" onclick={() => handleHeaderSort('fallback_pool_id')}>
+              <span>Fallback Pool ID</span>
+              {#if sortBy === 'fallback_pool_id'}
+                <span class="sort-icon text-[#f97316]">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+              {:else}
+                <span class="sort-icon opacity-30">↕</span>
+              {/if}
+            </button>
+            <button type="button" class="th-sort-btn text-center justify-center" onclick={() => handleHeaderSort('credentials_count')}>
+              <span>Credentials</span>
+              {#if sortBy === 'credentials_count'}
+                <span class="sort-icon text-[#f97316]">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+              {:else}
+                <span class="sort-icon opacity-30">↕</span>
+              {/if}
+            </button>
+            <button type="button" class="th-sort-btn text-center justify-center" onclick={() => handleHeaderSort('health_pct')}>
+              <span>Health</span>
+              {#if sortBy === 'health_pct'}
+                <span class="sort-icon text-[#f97316]">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+              {:else}
+                <span class="sort-icon opacity-30">↕</span>
+              {/if}
+            </button>
+            <div class="th-sort-btn text-center justify-center cursor-default">Actions</div>
+          </div>
+        </div>
+        <!-- Virtualized scroll body -->
+        <div
+          class="pools-table-body"
+          bind:this={vscrollEl}
+          bind:clientHeight={viewportHeight}
+          onscroll={onVScroll}
+        >
+          <div style="height: {pools.length * ROW_HEIGHT}px; position: relative;">
+            <div style="position: absolute; top: {visibleRange.padTop}px; left: 0; right: 0;">
+              {#each visibleItems as pool (pool.id)}
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div class="pools-table-row pool-row cursor-pointer"
+                  style="height: {ROW_HEIGHT}px; {pool.credential_count > 0 && pool.health_percent === 0 ? 'opacity:0.55;' : ''}"
+                  onclick={() => openPoolDetails(pool)}
+                >
+                  <div style="width: 40px; display: flex; align-items: center; justify-content: center;" onclick={(e) => e.stopPropagation()}>
+                    <label class="ios-checkbox-wrapper" onclick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        class="ios-checkbox-input"
+                        value={pool.id}
+                        bind:group={selectedPoolIds}
+                        onclick={(e) => e.stopPropagation()}
+                      />
+                      <span class="ios-checkbox-box"></span>
+                    </label>
+                  </div>
+                  <div class="font-mono text-xs opacity-60">#{pool.id}</div>
+                  <div class="font-bold text-sm text-[#f97316]">{pool.model_pattern}</div>
+                  <div>
+                    <div class="flex gap-1.5 items-center overflow-hidden">
+                      {#each capabilityKeys(pool.capabilities) as key}
+                        {@const badge = CAPABILITY_BADGES[key]}
+                        <span style="display:inline-flex; align-items:center; padding:3.5px 8px; border-radius:6px; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; line-height:1.2; color:{badge.color}; background:{badge.bg}; border:1px solid {badge.border};">
+                          {badge.label}
+                        </span>
+                      {/each}
+                      {#if capabilityKeys(pool.capabilities).length === 0}
+                        <span class="text-xs opacity-30">—</span>
+                      {/if}
+                    </div>
+                  </div>
+                  <div>
+                    <span class="provider-badge {pool.strategy === 'round-robin' ? 'badge-openai' : 'badge-anthropic'}">
+                      {pool.strategy}
+                    </span>
+                  </div>
+                  <div class="font-mono text-sm">{pool.fallback_pool_id !== null && pool.fallback_pool_id !== undefined ? `#${pool.fallback_pool_id}` : '—'}</div>
+                  <div class="font-mono text-sm text-center">{pool.credential_count || 0} keys</div>
+                  <!-- Health percentage mini-bar -->
+                  <div class="flex flex-col items-center justify-center gap-0.5" style="min-width:72px;">
+                    {#if pool.credential_count === 0}
+                      <span class="text-xs opacity-30">no keys</span>
+                    {:else}
+                      {@const pct = pool.health_percent ?? 0}
+                      {@const color = healthColor(pct)}
+                      <div style="
+                        width: 64px; height: 5px;
+                        background: rgba(100,116,139,0.18);
+                        border-radius: 3px; overflow: hidden;
+                      ">
+                        <div style="
+                          width: {pct}%; height: 100%;
+                          background: {color};
+                          border-radius: 3px;
+                          transition: width 0.4s ease;
+                        "></div>
+                      </div>
+                      <span style="font-size:10px; font-weight:700; color:{color}; font-variant-numeric: tabular-nums;">
+                        {pool.healthy_count ?? 0}/{pool.credential_count} · {Math.round(pct)}%
                       </span>
-                    {/each}
-                    {#if capabilityKeys(pool.capabilities).length === 0}
-                      <span class="text-xs opacity-30">—</span>
                     {/if}
                   </div>
-                </td>
-                <td>
-                  <span class="provider-badge {pool.strategy === 'round-robin' ? 'badge-openai' : 'badge-anthropic'}">
-                    {pool.strategy}
-                  </span>
-                </td>
-                <td class="font-mono text-sm">{pool.fallback_pool_id !== null && pool.fallback_pool_id !== undefined ? `#${pool.fallback_pool_id}` : '—'}</td>
-                <td class="font-mono text-sm text-center">{pool.credential_count || 0} keys</td>
-                <td>
-                  <div class="flex items-center justify-center gap-1">
-                    <Button variant="ghost" size="sm" onclick={(e) => openEditModal(pool, e)} title="Edit pool">
-                      <Pencil size={15} />
-                    </Button>
-                    <Button variant="ghost" size="sm" onclick={(e) => confirmDelete(pool.id, e)} title="Delete pool">
-                      <Trash2 size={15} class="text-red-500" />
-                    </Button>
+                  <div onclick={(e) => e.stopPropagation()}>
+                    <div class="flex items-center justify-center gap-1">
+                      <Button variant="ghost" size="sm" onclick={(e) => openEditModal(pool, e)} title="Edit pool">
+                        <Pencil size={15} />
+                      </Button>
+                      <Button variant="ghost" size="sm" onclick={(e) => confirmDelete(pool.id, e)} title="Delete pool">
+                        <Trash2 size={15} class="text-red-500" />
+                      </Button>
+                    </div>
                   </div>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+                </div>
+              {/each}
+            </div>
+          </div>
+          {#if loadingMore}
+            <div class="flex items-center justify-center py-3 text-secondary text-sm">
+              <span class="animate-spin mr-2">⟳</span> Loading more...
+            </div>
+          {/if}
+        </div>
       </div>
     {/if}
   </div>
@@ -1013,7 +1584,220 @@
   {/snippet}
 </Modal>
 
+<!-- ─── BULK ACTIVATE POOLS CONFIRMATION DIALOG ─────────────────────────────────────────── -->
+<Modal bind:show={showBulkActivatePoolsConfirm} title="Activate Pool Credentials?">
+  <div class="flex flex-col items-center gap-4 text-center">
+    <Activity size={48} class="text-[#10b981] mb-2" />
+    <p class="text-sm text-secondary">
+      Are you sure you want to activate all provider credentials (tokens) across the {selectedPoolIds.length} selected model pools?
+    </p>
+    <p class="text-xs text-secondary leading-normal">This will set all keys in these pools to healthy, clear their error messages, and hot-reload the gateways.</p>
+  </div>
+
+  {#snippet footer()}
+    <div class="flex justify-center gap-3 w-full">
+      <Button variant="outline" onclick={() => { showBulkActivatePoolsConfirm = false; }}>Cancel</Button>
+      <Button variant="success" onclick={activatePoolsBulk} disabled={bulkActivatePoolsLoading}>
+        {#if bulkActivatePoolsLoading}
+          <span class="animate-spin">⟳</span>
+        {:else}
+          Activate ({selectedPoolIds.length})
+        {/if}
+      </Button>
+    </div>
+  {/snippet}
+</Modal>
+
+<!-- ─── PURGE UNHEALTHY POOLS CONFIRMATION DIALOG ──────────────────────── -->
+<Modal bind:show={showPurgeConfirm} title="Purge All 0% Health Pools?">
+  <div class="flex flex-col items-center gap-4 text-center">
+    <ShieldOff size={48} class="text-red-500 mb-2" />
+    <p class="text-sm text-secondary">
+      This will <strong>permanently delete</strong> every model pool where
+      <strong class="text-red-500">0% of credentials are healthy</strong>
+      (or the pool has no credentials at all).
+      Those model patterns are <strong>immediately removed</strong> from the
+      OpenAI-compatible proxy API across all cluster nodes.
+    </p>
+    <p class="text-xs text-red-500 font-bold">This action is permanent and cannot be undone.</p>
+  </div>
+
+  {#snippet footer()}
+    <div class="flex justify-center gap-3 w-full">
+      <Button variant="outline" onclick={() => showPurgeConfirm = false}>Cancel</Button>
+      <Button variant="danger" onclick={purgeUnhealthyPools} disabled={isPurging}>
+        {#if isPurging}
+          <span class="animate-spin">⟳</span> Purging...
+        {:else}
+          <ShieldOff size={14} /> Purge 0% Pools
+        {/if}
+      </Button>
+    </div>
+  {/snippet}
+</Modal>
+
 <style>
+  /* Advanced Filters Redesign */
+  .filter-search-input {
+    width: 100%;
+    height: 42px;
+    padding: 0 16px 0 40px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-primary);
+    background-color: var(--frame-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    transition: all 0.25s ease;
+    outline: none;
+    box-sizing: border-box;
+  }
+  .filter-search-input::placeholder {
+    color: var(--text-secondary);
+    opacity: 0.6;
+  }
+  .filter-search-input:focus {
+    border-color: #f97316;
+    box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.15);
+  }
+
+  .filter-select {
+    width: 100%;
+    height: 42px;
+    padding: 0 36px 0 14px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-primary);
+    background-color: var(--frame-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    outline: none;
+    box-sizing: border-box;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%23475569' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+    background-position: right 14px center;
+    background-repeat: no-repeat;
+    background-size: 18px 18px;
+  }
+  .filter-select:focus {
+    border-color: #f97316;
+    box-shadow: 0 0 0 4px rgba(249, 115, 22, 0.15);
+  }
+  .filter-select:hover {
+    border-color: #94a3b8;
+  }
+
+  .filter-direction-btn {
+    width: 100%;
+    height: 46px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #0f172a; /* Force dark text */
+    background-color: #ffffff !important; /* Force light background */
+    border: 2px solid #cbd5e1;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02);
+  }
+  .filter-direction-btn:hover {
+    border-color: #94a3b8;
+    background-color: #f8fafc !important;
+  }
+
+  .filter-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #475569; /* Slate 600 */
+    margin-bottom: 6px;
+  }
+
+  .filter-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 20px 24px;
+    border-top: 1px solid #cbd5e1;
+    background-color: #f8fafc; /* Beautiful soft light-gray panel background */
+    animation: fadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  .filter-cap-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    height: 38px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    border: 2px solid #cbd5e1;
+    color: #475569; /* Slate 600 */
+    background-color: #ffffff !important; /* Force white background when not selected */
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+  }
+  .filter-cap-btn:hover {
+    border-color: #94a3b8;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.03);
+  }
+  .filter-cap-btn.active {
+    color: var(--cap-color) !important;
+    background-color: var(--cap-bg) !important;
+    border-color: var(--cap-color) !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  }
+  .cap-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background-color: #cbd5e1; /* default gray */
+    transition: background-color 0.2s ease;
+  }
+  .filter-cap-btn.active .cap-dot {
+    background-color: var(--cap-color);
+  }
+
+  /* Support Dark Theme adaptation */
+  :global(.dark) .filter-search-input,
+  :global(.dark) .filter-select,
+  :global(.dark) .filter-direction-btn,
+  :global(.dark) .filter-cap-btn {
+    background-color: #1e1e24 !important;
+    color: #f4f4f5 !important;
+    border-color: rgba(255, 255, 255, 0.15) !important;
+  }
+  :global(.dark) .filter-search-input::placeholder {
+    color: #71717a;
+  }
+  :global(.dark) .filter-search-input:focus,
+  :global(.dark) .filter-select:focus {
+    border-color: #f97316 !important;
+    background-color: #1e1e24 !important;
+  }
+  :global(.dark) .filter-panel {
+    background-color: #15151a !important;
+    border-color: rgba(255, 255, 255, 0.1) !important;
+  }
+  :global(.dark) .filter-label {
+    color: #a1a1aa !important;
+  }
+  :global(.dark) .filter-cap-btn:not(.active) {
+    color: #a1a1aa !important;
+  }
+
   .detail-page-container {
     min-height: 0;
   }
@@ -1055,5 +1839,69 @@
     max-height: 520px;
     overflow-y: auto;
     border: 1px solid var(--border-color);
+  }
+
+  /* ─── Virtualized table ─── */
+  .pools-table-header {
+    flex-shrink: 0;
+    overflow-x: auto;
+    background-color: var(--card-bg);
+    border-bottom: 2px solid var(--border-color);
+  }
+  .pools-table-body {
+    flex-grow: 1;
+    overflow-y: auto;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .pools-table-row {
+    display: grid;
+    grid-template-columns: 40px 70px 1fr 1.6fr 130px 120px 90px 110px;
+    align-items: center;
+    min-width: 900px;
+  }
+  .pools-table-headrow {
+    padding: 0;
+  }
+  .pools-table-headrow > div,
+  .th-sort-btn {
+    padding: 12px 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 700;
+    font-size: 11px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    transition: color 0.15s;
+    user-select: none;
+  }
+  .th-sort-btn:hover {
+    color: #f97316;
+  }
+  .sort-icon {
+    font-size: 11px;
+    line-height: 1;
+  }
+  .pools-table-row.pool-row {
+    border-bottom: 1px solid var(--border-color);
+    transition: background-color 0.15s;
+    background-color: var(--card-bg);
+  }
+  .pools-table-row.pool-row:hover {
+    background-color: var(--item-hover);
+  }
+  .pools-table-row.pool-row > div {
+    padding: 12px 16px;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

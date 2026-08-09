@@ -22,6 +22,8 @@ type PoolResponse struct {
 	FallbackPoolID  *int                 `json:"fallback_pool_id,omitempty" example:"2"`
 	Capabilities    map[string]bool      `json:"capabilities,omitempty"`
 	CredentialCount int                  `json:"credential_count,omitempty" example:"3"`
+	HealthyCount    int                  `json:"healthy_count,omitempty" example:"2"`
+	HealthPercent   *float64             `json:"health_percent,omitempty" example:"66.7"`
 	Credentials     []CredentialResponse `json:"credentials,omitempty"`
 	CreatedAt       string               `json:"created_at" example:"2024-01-15T10:30:00Z"`
 }
@@ -71,6 +73,26 @@ type MetricsResponse struct {
 	QueueDepth     int     `json:"telemetry_queue_depth" example:"150"`
 }
 
+// PaginatedCredentialsResponse wraps a page of credentials together with the
+// total matching count, enabling cursor-free pagination and virtualized
+// rendering on the admin dashboard.
+type PaginatedCredentialsResponse struct {
+	Data   []CredentialResponse `json:"data"`
+	Total  int                  `json:"total" example:"1234"`
+	Limit  int                  `json:"limit" example:"100"`
+	Offset int                  `json:"offset" example:"0"`
+}
+
+// PaginatedPoolsResponse wraps a page of model pools together with the total
+// matching count, enabling cursor-free pagination and virtualized rendering on
+// the admin dashboard.
+type PaginatedPoolsResponse struct {
+	Data   []PoolResponse `json:"data"`
+	Total  int            `json:"total" example:"1234"`
+	Limit  int            `json:"limit" example:"100"`
+	Offset int            `json:"offset" example:"0"`
+}
+
 // MaskAPIKey returns a masked version of an API key showing only prefix and last 4 chars.
 func MaskAPIKey(key string) string {
 	if len(key) <= 8 {
@@ -79,3 +101,4 @@ func MaskAPIKey(key string) string {
 	// Show first 3 chars and last 4 chars
 	return key[:3] + "..." + key[len(key)-4:]
 }
+

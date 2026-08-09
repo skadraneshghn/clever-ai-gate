@@ -218,6 +218,14 @@ func (b *Broadcaster) handleEvent(payload string, getPool func(pattern string) P
 	}
 }
 
+// RDB returns the underlying redis.Client singleton for coordination.
+func (b *Broadcaster) RDB() *redis.Client {
+	if b == nil {
+		return nil
+	}
+	return b.rdb
+}
+
 // Stop shuts down the broadcaster and subscriber.
 func (b *Broadcaster) Stop() {
 	if b == nil {

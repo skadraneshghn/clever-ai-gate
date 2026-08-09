@@ -18,6 +18,29 @@
     appState.models.filter(m => m.id.toLowerCase().includes(modelSearchQuery.toLowerCase()))
   );
 
+  function parseErrorObj(content) {
+    if (!content) return null;
+    let str = content.trim();
+    if (str.startsWith('Error: ')) {
+      str = str.substring(7).trim();
+    }
+    if (str.startsWith('{') && str.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(str);
+        const errObj = parsed.error || parsed;
+        return {
+          message: errObj.message || parsed.message || str,
+          type: errObj.type || parsed.type || 'gateway_error',
+          code: errObj.code || parsed.code || '',
+          raw: content
+        };
+      } catch (e) {
+        return null;
+      }
+    }
+    return null;
+  }
+
   // Automatically scroll chat container to bottom when messages list updates
   $effect(() => {
     if (appState.messages.length > 0 && chatScrollElement) {
@@ -100,42 +123,57 @@
       
       <h1 class="text-3xl font-extrabold tracking-tight mb-8 text-primary">What's on your mind today?</h1>
 
-      <!-- Prompt Card (Pill styled) -->
-      <Card variant="filled" padding="md" class="prompt-pill-card mb-8">
+      <!-- Prompt Card (Modern Chat Input Box) -->
+      <div class="prompt-pill-card mb-8">
         <textarea 
-          class="prompt-textarea w-full text-base outline-none resize-none" 
+          class="prompt-textarea w-full outline-none resize-none" 
           placeholder="Ask me anything..." 
           rows="3"
           bind:value={appState.inputText}
           onkeydown={(e) => { if(e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); appState.submitPrompt(); } }}
         ></textarea>
         
-        <div class="flex items-center justify-between pt-3 border-t border-[var(--border-color)]">
-          <div class="flex items-center gap-2">
+        <div class="prompt-toolbar flex items-center justify-between pt-3 mt-2 border-t border-[var(--border-color)]">
+          <!-- Left actions: Selected Model Badge & Feature Toggles -->
+          <div class="flex items-center gap-2 flex-wrap">
             <button 
-              class="deeper-btn flex items-center gap-1.5 text-xs font-bold uppercase px-3.5 py-1.5 rounded-full border {appState.isDeeperResearch ? 'active' : ''}" 
+              type="button"
+              class="model-badge-btn flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl border text-xs font-semibold transition-all cursor-pointer" 
+              onclick={() => appState.handleModelPickerClick()}
+              title="Change Selected Model"
+            >
+              <Cpu size={14} class="text-[#f97316]" />
+              <span class="truncate max-w-[200px] text-primary">{appState.selectedModel || 'Select Model'}</span>
+              <ChevronDown size={13} class="opacity-60" />
+            </button>
+
+            <button 
+              type="button"
+              class="deeper-btn flex items-center gap-1.5 text-xs font-semibold px-3.5 py-1.5 rounded-xl border transition-all cursor-pointer {appState.isDeeperResearch ? 'active' : ''}" 
               onclick={() => appState.isDeeperResearch = !appState.isDeeperResearch}
+              title="Toggle Web Search"
             >
               <Globe size={13} />
-              Deeper Research
+              <span>Web Search</span>
             </button>
-            <Button variant="ghost" size="sm" class="action-icon-btn"><Search size={16} /></Button>
-            <Button variant="ghost" size="sm" class="action-icon-btn"><Cpu size={16} /></Button>
           </div>
           
+          <!-- Right actions: Attachments & Send Button -->
           <div class="flex items-center gap-2">
-            <Button variant="ghost" size="sm" class="action-icon-btn"><Paperclip size={16} /></Button>
-            <Button variant="ghost" size="sm" class="action-icon-btn"><Mic size={16} /></Button>
+            <Button variant="ghost" size="sm" class="action-icon-btn p-2 text-secondary hover:text-primary" title="Attach file"><Paperclip size={16} /></Button>
+            <Button variant="ghost" size="sm" class="action-icon-btn p-2 text-secondary hover:text-primary" title="Voice input"><Mic size={16} /></Button>
             <button 
-              class="send-circle-btn flex items-center justify-center rounded-full w-9 h-9 text-white bg-[#f97316]" 
+              type="button"
+              class="send-btn flex items-center justify-center gap-2 px-4.5 h-10 rounded-xl font-bold text-xs text-white transition-all shadow-md cursor-pointer" 
               onclick={() => appState.submitPrompt()} 
               disabled={!appState.inputText.trim() || !appState.apiKey}
             >
-              <Send size={15} />
+              <span>Send</span>
+              <Send size={14} />
             </button>
           </div>
         </div>
-      </Card>
+      </div>
 
       <!-- Bottom Presets Row -->
       <div class="presets-container flex gap-3 justify-center flex-wrap max-w-3xl">
@@ -169,7 +207,19 @@
                 <div class="text-sm italic leading-relaxed whitespace-pre-wrap">{msg.reasoning_content}</div>
               </div>
             {/if}
-            <div class="leading-relaxed whitespace-pre-wrap text-base">{msg.content || (appState.isSending && !msg.reasoning_content ? 'Connecting...' : '')}</div>
+
+            {#if msg.role === 'assistant' && parseErrorObj(msg.content)}
+              {@const err = parseErrorObj(msg.content)}
+              <div class="flex flex-col gap-2 p-3.5 rounded-xl bg-red-500/10 border border-red-500/20 text-red-500">
+                <div class="flex items-center justify-between text-xs font-bold uppercase tracking-wider">
+                  <span class="flex items-center gap-1.5"><XCircle size={14} /> {err.type}</span>
+                  {#if err.code}<span class="opacity-75">Code: {err.code}</span>{/if}
+                </div>
+                <div class="text-sm font-semibold text-primary">{err.message}</div>
+              </div>
+            {:else}
+              <div class="leading-relaxed whitespace-pre-wrap text-base">{msg.content || (appState.isSending && !msg.reasoning_content ? 'Connecting...' : '')}</div>
+            {/if}
           </Card>
         </div>
       {/each}
@@ -180,30 +230,55 @@
 <!-- Floating bottom input bar -->
 {#if appState.messages.length > 0}
   <div class="bottom-input-container">
-    <Card variant="filled" padding="md" class="prompt-pill-card">
+    <div class="prompt-pill-card">
       <textarea 
-        class="prompt-textarea w-full text-base outline-none resize-none" 
+        class="prompt-textarea w-full outline-none resize-none" 
         placeholder="Ask me anything..." 
-        rows="1"
+        rows="2"
         bind:value={appState.inputText}
         onkeydown={(e) => { if(e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); appState.submitPrompt(); } }}
       ></textarea>
-      <div class="flex items-center justify-between pt-3 border-t border-[var(--border-color)]">
-        <div class="flex items-center gap-2">
-          <Button variant="ghost" size="sm" class="action-icon-btn"><Paperclip size={16} /></Button>
-          <Button variant="ghost" size="sm" class="action-icon-btn"><Mic size={16} /></Button>
+      <div class="prompt-toolbar flex items-center justify-between pt-3 mt-2 border-t border-[var(--border-color)]">
+        <div class="flex items-center gap-2 flex-wrap">
+          <button 
+            type="button"
+            class="model-badge-btn flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all cursor-pointer" 
+            onclick={() => appState.handleModelPickerClick()}
+            title="Change Selected Model"
+          >
+            <Cpu size={14} class="text-[#f97316]" />
+            <span class="truncate max-w-[180px] text-primary">{appState.selectedModel || 'Select Model'}</span>
+            <ChevronDown size={13} class="opacity-60" />
+          </button>
+          
+          <button 
+            type="button"
+            class="deeper-btn flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl border transition-all cursor-pointer {appState.isDeeperResearch ? 'active' : ''}" 
+            onclick={() => appState.isDeeperResearch = !appState.isDeeperResearch}
+            title="Toggle Web Search"
+          >
+            <Globe size={13} />
+            <span>Web Search</span>
+          </button>
         </div>
-        <button 
-          class="send-circle-btn flex items-center justify-center rounded-full w-9 h-9 text-white bg-[#f97316]" 
-          onclick={() => appState.submitPrompt()} 
-          disabled={!appState.inputText.trim() || appState.isSending}
-        >
-          <Send size={15} />
-        </button>
+
+        <div class="flex items-center gap-2">
+          <Button variant="ghost" size="sm" class="action-icon-btn p-2 text-secondary hover:text-primary" title="Attach file"><Paperclip size={16} /></Button>
+          <Button variant="ghost" size="sm" class="action-icon-btn p-2 text-secondary hover:text-primary" title="Voice input"><Mic size={16} /></Button>
+          <button 
+            type="button"
+            class="send-btn flex items-center justify-center gap-2 px-4.5 h-10 rounded-xl font-bold text-xs text-white transition-all shadow-md cursor-pointer" 
+            onclick={() => appState.submitPrompt()} 
+            disabled={!appState.inputText.trim() || appState.isSending}
+          >
+            <span>Send</span>
+            <Send size={14} />
+          </button>
+        </div>
       </div>
-    </Card>
-    <div class="footer-disclaimer text-xs opacity-60 mt-3 text-center text-secondary">
-      Cognivo can make mistakes. Check important info.
+    </div>
+    <div class="footer-disclaimer text-xs opacity-60 mt-3 text-center text-secondary font-medium">
+      Cognivo AI Gateway can process across multiple providers. Check important info.
     </div>
   </div>
 {:else}
@@ -228,21 +303,20 @@
     box-sizing: border-box;
   }
 
-  :global(.prompt-pill-card) {
+  .prompt-pill-card {
     width: 100%;
     max-width: 800px;
-    border-radius: 24px !important;
-    background-color: var(--card-bg) !important;
-    border: 1px solid var(--border-color) !important;
-    box-shadow: 0 10px 40px var(--shadow-color) !important;
-    transition: border-color 0.25s ease, box-shadow 0.25s ease;
-    padding: 18px 24px !important;
+    border-radius: 20px;
+    background-color: var(--card-bg);
+    border: 1px solid var(--border-color);
+    box-shadow: 0 12px 32px var(--shadow-color);
+    transition: all 0.25s ease;
+    padding: 16px 20px;
     box-sizing: border-box;
   }
-
-  :global(.prompt-pill-card:focus-within) {
-    border-color: #f97316 !important;
-    box-shadow: 0 10px 40px rgba(249, 115, 22, 0.08), 0 0 0 3px rgba(249, 115, 22, 0.12) !important;
+  .prompt-pill-card:focus-within {
+    border-color: #f97316;
+    box-shadow: 0 12px 36px rgba(249, 115, 22, 0.12), 0 0 0 3px rgba(249, 115, 22, 0.15);
   }
 
   .prompt-textarea {
@@ -253,14 +327,61 @@
     font-family: inherit;
     font-size: 15px;
     color: var(--text-primary);
-    line-height: 1.6;
+    line-height: 1.5;
     outline: none;
-    padding: 0;
+    padding: 4px 0;
     margin: 0;
   }
   .prompt-textarea::placeholder {
     color: var(--text-secondary);
-    opacity: 0.5;
+    opacity: 0.55;
+  }
+
+  /* Model Badge Selector inside toolbar */
+  .model-badge-btn {
+    background-color: var(--frame-bg);
+    border-color: var(--border-color);
+    color: var(--text-primary);
+  }
+  .model-badge-btn:hover {
+    border-color: #f97316;
+    background-color: rgba(249, 115, 22, 0.06);
+  }
+
+  /* Deeper Research / Web Search Toggle */
+  .deeper-btn {
+    background-color: var(--frame-bg);
+    border-color: var(--border-color);
+    color: var(--text-secondary);
+  }
+  .deeper-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--text-secondary);
+  }
+  .deeper-btn.active {
+    background-color: rgba(59, 130, 246, 0.1);
+    border-color: #3b82f6;
+    color: #3b82f6;
+  }
+
+  /* Modern Send Button */
+  .send-btn {
+    background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+    box-shadow: 0 4px 14px rgba(249, 115, 22, 0.35);
+    border: none;
+  }
+  .send-btn:hover:not(:disabled) {
+    transform: translateY(-1px) scale(1.02);
+    box-shadow: 0 6px 20px rgba(249, 115, 22, 0.45);
+    filter: brightness(1.08);
+  }
+  .send-btn:active:not(:disabled) {
+    transform: translateY(0) scale(1);
+  }
+  .send-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    box-shadow: none;
   }
 
   .presets-container {

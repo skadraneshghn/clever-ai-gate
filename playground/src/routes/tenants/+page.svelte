@@ -37,7 +37,14 @@
 
   // Auto-fetch when adminKey changes
   $effect(() => {
-    if (appState.adminKey.trim()) {
+    const key = appState.getAdminKey();
+    if (key && tenants.length === 0 && !loading) {
+      loadTenants();
+    }
+  });
+
+  onMount(() => {
+    if (appState.getAdminKey()) {
       loadTenants();
     }
   });
@@ -45,7 +52,7 @@
   // ─── API Helper Headers ───────────────────────────────────────────────────
   function adminHeaders() {
     return {
-      'Authorization': `Bearer ${appState.adminKey.trim()}`,
+      'Authorization': `Bearer ${appState.getAdminKey()}`,
       'Content-Type': 'application/json'
     };
   }

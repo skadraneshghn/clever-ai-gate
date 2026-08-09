@@ -1,6 +1,7 @@
 <script>
   let {
     type = 'text', // 'text' | 'password' | 'number' | 'textarea' | 'select'
+    size = 'md',   // 'sm' | 'md' | 'lg'
     value = $bindable(''),
     label = '',
     placeholder = '',
@@ -28,7 +29,7 @@
     {#if type === 'textarea'}
       <textarea
         id={inputId}
-        class="input-field textarea-field"
+        class="input-field textarea-field input-size-{size}"
         class:has-error={error}
         {placeholder}
         {disabled}
@@ -41,7 +42,7 @@
     {:else if type === 'select'}
       <select
         id={inputId}
-        class="input-field select-field"
+        class="input-field select-field input-size-{size}"
         class:has-error={error}
         {disabled}
         bind:value={value}
@@ -60,7 +61,7 @@
       <input
         {type}
         id={inputId}
-        class="input-field"
+        class="input-field input-size-{size}"
         class:has-error={error}
         {placeholder}
         {disabled}
@@ -101,17 +102,35 @@
 
   .input-field {
     width: 100%;
-    padding: 12px 16px;
-    font-size: 14px;
-    line-height: 1.5;
     font-family: inherit;
     color: var(--text-primary);
     background-color: var(--frame-bg);
     border: 1px solid var(--border-color);
-    border-radius: 12px;
     transition: all 0.2s ease;
     box-sizing: border-box;
     outline: none;
+  }
+
+  /* Sizes 1:1 with Button.svelte */
+  .input-size-sm {
+    height: var(--input-h-sm, 34px);
+    padding: 0 12px;
+    font-size: 13px;
+    border-radius: 8px;
+  }
+
+  .input-size-md {
+    height: var(--input-h-md, 40px);
+    padding: 0 14px;
+    font-size: 14px;
+    border-radius: 10px;
+  }
+
+  .input-size-lg {
+    height: var(--input-h-lg, 48px);
+    padding: 0 16px;
+    font-size: 15px;
+    border-radius: 12px;
   }
 
   .input-field::placeholder {
@@ -133,7 +152,10 @@
 
   .textarea-field {
     resize: vertical;
+    height: auto !important;
     min-height: 80px;
+    padding: 10px 14px;
+    line-height: 1.5;
   }
 
   .select-field {

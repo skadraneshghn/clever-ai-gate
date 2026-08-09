@@ -1,4 +1,5 @@
 import { browser } from '$app/environment';
+import { goto } from '$app/navigation';
 
 class AppState {
   theme = $state('light');
@@ -86,8 +87,37 @@ class AppState {
 
   constructor() {
     if (browser) {
+      const savedAdminKey = localStorage.getItem('cag_admin_key');
+      if (savedAdminKey) {
+        this.adminKey = savedAdminKey;
+        this.adminApiKey = savedAdminKey;
+      }
+      const savedTenantKey = localStorage.getItem('cag_playground_api_key');
+      if (savedTenantKey) {
+        this.apiKey = savedTenantKey;
+      }
+      const savedTheme = localStorage.getItem('cag_playground_theme');
+      if (savedTheme) {
+        this.theme = savedTheme;
+        this.applyTheme(savedTheme);
+      }
       this.init();
     }
+  }
+
+  getAdminKey() {
+    if (this.adminKey && this.adminKey.trim()) {
+      return this.adminKey.trim();
+    }
+    if (browser) {
+      const saved = localStorage.getItem('cag_admin_key') || '';
+      if (saved) {
+        this.adminKey = saved;
+        this.adminApiKey = saved;
+      }
+      return saved;
+    }
+    return '';
   }
 
   async init() {
@@ -97,16 +127,21 @@ class AppState {
         const data = await res.json();
         if (data.tenant_key) {
           localStorage.setItem('cag_playground_api_key', data.tenant_key);
+          if (!this.apiKey) this.apiKey = data.tenant_key;
         }
         if (data.admin_key) {
           localStorage.setItem('cag_admin_key', data.admin_key);
+          if (!this.adminKey) {
+            this.adminKey = data.admin_key;
+            this.adminApiKey = data.admin_key;
+          }
         }
       }
     } catch (e) {
       console.warn('Failed to load default config from backend:', e);
     }
 
-    const savedKey = localStorage.getItem('cag_playground_api_key');
+    const savedKey = this.apiKey || (browser ? localStorage.getItem('cag_playground_api_key') : '');
     if (savedKey) {
       this.statusHUD = 'Verifying...';
       const isValid = await this.loadTenantInfo(savedKey);
@@ -123,18 +158,6 @@ class AppState {
       }
     } else {
       this.showSettingsModal = true;
-    }
-
-    const savedTheme = localStorage.getItem('cag_playground_theme');
-    if (savedTheme) {
-      this.theme = savedTheme;
-      this.applyTheme(savedTheme);
-    }
-
-    const savedAdminKey = localStorage.getItem('cag_admin_key');
-    if (savedAdminKey) {
-      this.adminKey = savedAdminKey;
-      this.adminApiKey = savedAdminKey;
     }
 
     this.isInitializing = false;
@@ -329,6 +352,9 @@ class AppState {
   async selectChat(id) {
     this.currentChatId = id;
     this.apiLoading = true;
+    if (browser) {
+      goto('/playground/chat');
+    }
     try {
       const res = await fetch(`/api/v1/playground/chats/${id}`, {
         headers: {
@@ -350,6 +376,9 @@ class AppState {
     this.currentChatId = null;
     this.messages = [];
     this.inputText = '';
+    if (browser) {
+      goto('/playground/chat');
+    }
   }
 
   async deleteChat(id, e) {
@@ -540,7 +569,7 @@ class AppState {
 
   async startLogsStream() {
     if (this.logsStreaming) return;
-    const key = this.adminKey.trim();
+    const key = this.getAdminKey();
     if (!key) {
       this.logsError = 'Admin API key is required to stream logs.';
       return;
@@ -613,7 +642,7 @@ class AppState {
   }
 
   async downloadTodayLog() {
-    const key = this.adminKey.trim();
+    const key = this.getAdminKey();
     if (!key) { this.logsError = 'Admin API key required.'; return; }
     this.apiLoading = true;
     try {

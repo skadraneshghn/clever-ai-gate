@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,31 +35,35 @@ const metadataScanLimit = 256 * 1024 // 256KB
 // It sits on the hot-path and is designed for zero heap allocations
 // under normal operation using sync.Pool for buffer reuse.
 type Handler struct {
-	client      *http.Client
-	cache       *cache.Store
-	pipeline    *telemetry.Pipeline
-	broadcaster *cluster.Broadcaster // nil when Redis not configured; safe no-op
-	logger      *zap.Logger
-	bufPool     sync.Pool
-	rewriter    *Rewriter
-	stream      *StreamProxy
+	client        *http.Client
+	cache         *cache.Store
+	redisCacheMgr *cache.RedisCacheManager // nil when Redis not configured; all methods nil-safe
+	pipeline      *telemetry.Pipeline
+	broadcaster   *cluster.Broadcaster // nil when Redis not configured; safe no-op
+	logger        *zap.Logger
+	bufPool       sync.Pool
+	rewriter      *Rewriter
+	stream        *StreamProxy
+	AlertManager  *telemetry.AlertManager
 }
 
 // NewHandler creates the proxy handler with all its dependencies.
-// broadcaster may be nil — all Broadcaster methods are nil-safe no-ops.
-func NewHandler(client *http.Client, cacheStore *cache.Store, logger *zap.Logger, pipeline *telemetry.Pipeline, broadcaster *cluster.Broadcaster) *Handler {
+// broadcaster and redisCacheMgr may be nil — all methods are nil-safe no-ops.
+func NewHandler(client *http.Client, cacheStore *cache.Store, redisCacheMgr *cache.RedisCacheManager, logger *zap.Logger, pipeline *telemetry.Pipeline, broadcaster *cluster.Broadcaster, alertManager *telemetry.AlertManager) *Handler {
 	h := &Handler{
-		client:      client,
-		cache:       cacheStore,
-		pipeline:    pipeline,
-		broadcaster: broadcaster,
-		logger:      logger,
+		client:        client,
+		cache:         cacheStore,
+		redisCacheMgr: redisCacheMgr,
+		pipeline:      pipeline,
+		broadcaster:   broadcaster,
+		logger:        logger,
 		bufPool: sync.Pool{
 			New: func() interface{} {
 				return bytes.NewBuffer(make([]byte, 0, 32*1024)) // 32KB initial scratch
 			},
 		},
-		rewriter: NewRewriter(),
+		rewriter:     NewRewriter(),
+		AlertManager: alertManager,
 	}
 	h.stream = NewStreamProxy(client, logger)
 	return h
@@ -66,18 +71,23 @@ func NewHandler(client *http.Client, cacheStore *cache.Store, logger *zap.Logger
 
 // proxyContext carries extracted fields through the hot-path without allocations.
 type proxyContext struct {
-	model         string
-	isStream      bool
-	isNvidia      bool // True when model uses nvidia/ prefix — triggers reasoning injection
-	isOneMinAI    bool // True when model uses 1min/ prefix — triggers body/response translation
-	isCloudflare  bool // True when model uses cloudflare/ prefix — triggers prefix stripping
-	isSarvam      bool // True when model uses sarvam/ prefix — triggers prefix stripping
-	isPuter       bool // True when model uses puter/ prefix — triggers prefix stripping
-	isAgentRouter bool // True when model uses agentrouter/ prefix — triggers sanitization
-	body          []byte
-	credential    *credentials.AcquireResult
-	pool          *credentials.BalancedChannelPool
-	tenantID      string
+	model          string
+	isStream       bool
+	isNvidia       bool // True when model uses nvidia/ prefix — triggers reasoning injection
+	isOneMinAI     bool // True when model uses 1min/ prefix — triggers body/response translation
+	isCloudflare   bool // True when model uses cloudflare/ prefix — triggers prefix stripping
+	isSarvam       bool // True when model uses sarvam/ prefix — triggers prefix stripping
+	isPuter        bool // True when model uses puter/ prefix — triggers prefix stripping
+	isAgentRouter  bool // True when model uses agentrouter/ prefix — triggers sanitization
+	isZenMux       bool // True when model uses zenmux/ prefix — triggers prefix stripping
+	isGemini       bool // True when model routes to the Gemini AI Studio pipeline (gemini/ prefix or standalone gemini-* family) — triggers full body transpilation
+	studioProvider string // Resolved routing label (ProviderGeminiStudio) for gemini requests; "" otherwise. Diagnostic only — the transpiler gate is cred.Provider == ProviderGemini
+	requestedModel string // The original model requested by the client before prefix stripping
+	isJiekou       bool // True when model uses jiekou/ prefix — triggers body model rewrite + parameter clamping
+	body           []byte
+	credential     *credentials.AcquireResult
+	pool           *credentials.BalancedChannelPool
+	tenantID       string
 }
 
 // Handle processes incoming AI requests on the hot-path.
@@ -173,6 +183,8 @@ func (h *Handler) Handle(c *gin.Context) {
 		isStream, _ = jsonparser.GetBoolean(scanSlice, "stream")
 	}
 
+	requestedModel := model
+
 	// --- NVIDIA Prefix Detection ---
 	// Models prefixed with "nvidia/" are routed through the NVIDIA NIM pipeline.
 	// The prefix is stripped for cache lookup but the isNvidia flag triggers
@@ -260,6 +272,72 @@ func (h *Handler) Handle(c *gin.Context) {
 		)
 	}
 
+	// --- ZenMux Prefix Detection ---
+	isZenMux := false
+	if strings.HasPrefix(model, "zenmux/") {
+		isZenMux = true
+		h.logger.Debug("zenmux model detected",
+			zap.String("model", model),
+		)
+	}
+
+	// --- Jiekou.AI Prefix Detection ---
+	// Models prefixed with "jiekou/" are routed to Jiekou.AI, an OpenAI-compatible
+	// proxy for Moonshot/Kimi, DeepSeek and other Chinese model providers.
+	// The prefix must be stripped from the JSON body before forwarding so the
+	// upstream Jiekou API receives the clean model name (e.g. "moonshotai/kimi-k3"
+	// instead of "jiekou/moonshotai/kimi-k3"). Temperature clamping is also applied
+	// because Moonshot/Kimi enforce [0.0, 1.0] while OpenAI allows up to 2.0.
+	isJiekou := false
+	if strings.HasPrefix(model, "jiekou/") {
+		isJiekou = true
+		h.logger.Debug("jiekou.ai model detected",
+			zap.String("model", model),
+		)
+	}
+
+	// --- Request Remapping Engine: Google AI Studio (Gemini) ---
+	// Normalize both routing forms to the optimized gemini_studio pipeline so
+	// Kilo Code agents and standard chat clients bind to the same credential pool:
+	//
+	//   Phase A — Slash-prefixed routes (Kilo Code agent style):
+	//     "gemini/gemini-3.5-flash"  → prefix token "gemini" matches the legacy
+	//     namespace; the prefix is stripped later (see Gemini Payload Preparation)
+	//     and the clean model is forwarded to Google AI Studio.
+	//
+	//   Phase B — Standalone routes (standard chat clients):
+	//     "gemini-3.5-flash"        → bound by model-name family. No prefix to
+	//     strip; the credential's Provider="gemini" field (resolved from the pool)
+	//     activates the transpilation pipeline in forwardRequest.
+	//
+	// Both forms resolve to the ProviderGeminiStudio routing label. The actual
+	// transpilation gate remains cred.Provider == ProviderGemini, which is the
+	// identity stored on every AI Studio key — so gemini_studio is the logical
+	// routing target and gemini is the credential identity.
+	//
+	// Other namespace prefixes (nvidia/, ollama/, cloudflare/, sarvam/, puter/,
+	// zenmux/, 1min/) are intentionally NOT touched here: each has its own dedicated
+	// detection + sanitization block below with prefix-specific invariants
+	// (e.g. nvidia keeps its prefix for pool lookup). A generic slash-split would
+	// break those handlers, so this interceptor is scoped to the gemini family.
+	isGemini := false
+	studioProvider := ""
+	if strings.HasPrefix(model, credentials.ProviderGeminiLegacy+"/") {
+		isGemini = true
+		studioProvider = credentials.ProviderGeminiStudio
+		h.logger.Debug("gemini studio model detected (slash-prefixed)",
+			zap.String("model", model),
+			zap.String("studio_provider", studioProvider),
+		)
+	} else if strings.HasPrefix(model, "gemini-") {
+		isGemini = true
+		studioProvider = credentials.ProviderGeminiStudio
+		h.logger.Debug("gemini studio model detected (standalone)",
+			zap.String("model", model),
+			zap.String("studio_provider", studioProvider),
+		)
+	}
+
 	// --- Access log: first thing we know enough to emit a useful Info entry ---
 	// This fires for EVERY request and is the primary tool for diagnosing
 	// Kilo Code instability: you can see exactly what model/tenant/path was
@@ -279,6 +357,10 @@ func (h *Handler) Handle(c *gin.Context) {
 		zap.Bool("is_sarvam", isSarvam),
 		zap.Bool("is_puter", isPuter),
 		zap.Bool("is_agentrouter", isAgentRouter),
+		zap.Bool("is_zenmux", isZenMux),
+		zap.Bool("is_jiekou", isJiekou),
+		zap.Bool("is_gemini", isGemini),
+		zap.String("studio_provider", studioProvider),
 		zap.Int("body_bytes", len(body)),
 		zap.String("client_ip", c.ClientIP()),
 	)
@@ -317,25 +399,19 @@ func (h *Handler) Handle(c *gin.Context) {
 			)
 		}
 
-		// Fix 1: Strip the routing prefix from the raw JSON bytes.
-		// bytes.Replace is a single-pass O(n) scan — no alloc overhead from
-		// json.Unmarshal/Marshal and no risk of key reordering.
-		// We replace the full quoted token to avoid partial matches.
-		oldToken := []byte(`"` + model + `"`)
-		newToken := []byte(`"` + upstreamModel + `"`)
-		body = bytes.Replace(body, oldToken, newToken, 1)
+		// Strip the routing prefix from the raw JSON bytes in-place.
+		// stripModelPrefixInPlace modifies the buffer directly, avoiding the
+		// full-body heap copy that bytes.Replace would allocate.
+		body = stripModelPrefixInPlace(body, model, "nvidia/")
 	}
 
 	// --- Ollama Payload Sanitization ---
 	// For Ollama-prefixed models the routing prefix must be stripped from the
 	// JSON "model" field so the upstream Ollama server receives the clean model
 	// name it expects (e.g., "llama3:8b" instead of "ollama/llama3:8b").
-	// Uses the same byte-level replacement as NVIDIA — single-pass O(n) scan.
+	// Uses the same in-place byte-level stripping as NVIDIA — zero heap allocation.
 	if isOllama {
-		upstreamModel := strings.TrimPrefix(model, "ollama/")
-		oldToken := []byte(`"` + model + `"`)
-		newToken := []byte(`"` + upstreamModel + `"`)
-		body = bytes.Replace(body, oldToken, newToken, 1)
+		body = stripModelPrefixInPlace(body, model, "ollama/")
 	}
 
 	// --- Cloudflare Payload Sanitization ---
@@ -343,12 +419,16 @@ func (h *Handler) Handle(c *gin.Context) {
 	// stripped from the JSON "model" field so Cloudflare receives the clean
 	// model ID (e.g. "@cf/meta/llama-3.1-8b-instruct" instead of
 	// "cloudflare/@cf/meta/llama-3.1-8b-instruct").
-	// Uses the same single-pass O(n) byte-level replacement.
+	// Uses the same in-place byte-level stripping.
+	//
+	// Unlike nvidia/ollama/sarvam/puter (which use passthroughPath and never
+	// embed the model in the upstream URL), Cloudflare's path transformer
+	// builds /ai/run/{model}, so the local model variable MUST be synchronized
+	// here — otherwise the stale prefix leaks into the URL and Cloudflare
+	// rejects the request with error 7000 ("No route for that URI").
 	if isCloudflare {
-		upstreamModel := strings.TrimPrefix(model, "cloudflare/")
-		oldToken := []byte(`"` + model + `"`)
-		newToken := []byte(`"` + upstreamModel + `"`)
-		body = bytes.Replace(body, oldToken, newToken, 1)
+		body = stripModelPrefixInPlace(body, model, "cloudflare/")
+		model = strings.TrimPrefix(model, "cloudflare/")
 	}
 
 	// --- Sarvam AI Payload Sanitization ---
@@ -362,10 +442,7 @@ func (h *Handler) Handle(c *gin.Context) {
 	// gated on cred.Provider == "sarvam", so it covers BOTH the prefixed and
 	// the clean-alias routing forms.
 	if isSarvam {
-		upstreamModel := strings.TrimPrefix(model, "sarvam/")
-		oldToken := []byte(`"` + model + `"`)
-		newToken := []byte(`"` + upstreamModel + `"`)
-		body = bytes.Replace(body, oldToken, newToken, 1)
+		body = stripModelPrefixInPlace(body, model, "sarvam/")
 	}
 
 	// --- Puter Proactive Completion Optimization ---
@@ -375,10 +452,35 @@ func (h *Handler) Handle(c *gin.Context) {
 
 	// --- Puter Payload Sanitization ---
 	if isPuter {
-		upstreamModel := strings.TrimPrefix(model, "puter/")
-		oldToken := []byte(`"` + model + `"`)
-		newToken := []byte(`"` + upstreamModel + `"`)
-		body = bytes.Replace(body, oldToken, newToken, 1)
+		body = stripModelPrefixInPlace(body, model, "puter/")
+	}
+
+	// --- ZenMux Payload Sanitization ---
+	if isZenMux {
+		body = stripModelPrefixInPlace(body, model, "zenmux/")
+		model = strings.TrimPrefix(model, "zenmux/")
+	}
+
+	// --- Jiekou.AI Payload Sanitization ---
+	// Strip the "jiekou/" routing prefix from the JSON "model" field so the
+	// upstream Jiekou API receives the clean model name it expects.
+	// The full parameter sanitization (temperature clamp, unsupported field
+	// removal) happens in forwardRequest gated on cred.Provider == "jiekou".
+	if isJiekou {
+		body = stripModelPrefixInPlace(body, model, "jiekou/")
+		model = strings.TrimPrefix(model, "jiekou/")
+	}
+
+	// --- Gemini Payload Preparation ---
+	// For Gemini-routed models the routing prefix (if present) is stripped from
+	// both the model name and the JSON body. The actual body transpilation
+	// (OpenAI → Gemini format) is deferred to forwardRequest where we have access
+	// to the credential and can handle errors cleanly within the retry loop.
+	// stripModelPrefixInPlace is a no-op when the model carries no prefix, so the
+	// standalone form ("gemini-3.5-flash") passes through here unchanged.
+	if isGemini {
+		body = stripModelPrefixInPlace(body, model, credentials.ProviderGeminiLegacy+"/")
+		model = strings.TrimPrefix(model, credentials.ProviderGeminiLegacy+"/")
 	}
 
 	// --- AgentRouter Payload Sanitization ---
@@ -399,18 +501,22 @@ func (h *Handler) Handle(c *gin.Context) {
 
 	// Step 5-8: Attempt with automatic failover
 	// Note: The FULL body (not scanSlice) is forwarded to the upstream provider.
-	// Only the metadata extraction was bounded — the binary payload is piped as-is.
 	pctx := &proxyContext{
-		model:         model,
-		isStream:      isStream,
-		isNvidia:      isNvidia,
-		isOneMinAI:    isOneMinAI,
-		isCloudflare:  isCloudflare,
-		isSarvam:      isSarvam,
-		isPuter:       isPuter,
-		isAgentRouter: isAgentRouter,
-		body:          body,
-		pool:          pool,
+		model:          model,
+		isStream:       isStream,
+		isNvidia:       isNvidia,
+		isOneMinAI:     isOneMinAI,
+		isCloudflare:   isCloudflare,
+		isSarvam:       isSarvam,
+		isPuter:        isPuter,
+		isAgentRouter:  isAgentRouter,
+		isZenMux:       isZenMux,
+		isGemini:       isGemini,
+		isJiekou:       isJiekou,
+		studioProvider: studioProvider,
+		requestedModel: requestedModel,
+		body:           body,
+		pool:           pool,
 	}
 
 	// Retrieve tenant ID from context (set by auth middleware)
@@ -521,6 +627,15 @@ retryLoop:
 			}
 		}
 
+		// Check if the credential is rate-limited in Redis before scheduling request (Gemini only)
+		if result.Credential.Provider == "gemini" {
+			if h.isKeyRateLimitedInRedis(c.Request.Context(), result.Credential) {
+				// Local 5-second cooldown to let other concurrent requests cycle to other keys
+				result.FromPool.PenalizeToken(result.Index, 5*time.Second)
+				continue
+			}
+		}
+
 		// Skip credentials we've already tried in this request
 		if triedIndices[result.Index] {
 			continue
@@ -529,10 +644,16 @@ retryLoop:
 		triedCount++
 		pctx.credential = result
 
+		// Increment Redis RPM count if it's Gemini
+		if result.Credential.Provider == "gemini" {
+			h.incrementRedisRPM(c.Request.Context(), result.Credential)
+		}
+
 		h.logger.Info("attempting request with credential",
 			zap.String("request_id", fmt.Sprintf("%v", requestID)),
 			zap.String("model", pctx.model),
 			zap.String("provider", result.Credential.Provider),
+			zap.String("studio_provider", pctx.studioProvider),
 			zap.Int("credential_id", result.Credential.ID),
 			zap.Int("attempt", triedCount),
 			zap.Int("max_attempts", maxAttempts),
@@ -563,14 +684,12 @@ retryLoop:
 				var promptTokens int
 
 				if pctx.isStream && statusCode == http.StatusOK {
-					type streamResult struct {
-						Text   string `json:"text"`
-						Tokens int    `json:"tokens"`
-					}
-					var sResult streamResult
-					if err := json.Unmarshal(errBody, &sResult); err == nil {
-						responseText = sResult.Text
-						completionTokens = sResult.Tokens
+					// Use jsonparser (reflection-free, zero-alloc) instead of
+					// json.Unmarshal which uses reflect and creates heap-escaped
+					// type descriptors on every streaming request.
+					responseText, _ = jsonparser.GetString(errBody, "text")
+					if tok, err := jsonparser.GetInt(errBody, "tokens"); err == nil {
+						completionTokens = int(tok)
 					}
 				} else {
 					responseText = extractResponseText(errBody)
@@ -619,6 +738,21 @@ retryLoop:
 
 		// Increment consecutive failures atomically
 		failures := atomic.AddUint32(&result.Credential.ConsecutiveFailures, 1)
+
+		// Record rotation telemetry
+		if h.AlertManager != nil {
+			errStr := "request failed"
+			if err != nil {
+				errStr = err.Error()
+			} else if len(errBody) > 0 {
+				if len(errBody) > 100 {
+					errStr = string(errBody[:100]) + "..."
+				} else {
+					errStr = string(errBody)
+				}
+			}
+			_ = h.AlertManager.TrackFailover(c.Request.Context(), result.Credential.ID, pctx.model, errStr)
+		}
 
 		cooldownDuration := cooldownForStatus(recStatus)
 		if result.Credential.Provider == "puter" {
@@ -682,14 +816,35 @@ retryLoop:
 		}
 
 		// Fast Fail for 400 Bad Request Payload Issues (not a Puter quota error)
+		//
+		// For Jiekou: the sanitizer (sanitizeJiekouRequest) runs on every forwardRequest
+		// call and fixes known issues (jiekou/ prefix, temperature clamping, role
+		// normalization, etc.). If we get a second consecutive HTTP 400 from Jiekou,
+		// the sanitizer could not fix the root cause — it is a fundamental payload
+		// schema mismatch that rotating credentials will NOT resolve.
+		//
+		// Strategy: allow ONE jiekou 400 through (attempt index 0) as a potential
+		// first-pass sanitizer miss, then break on the second 400 to protect the
+		// remaining pool keys from pointless exhaustion.
+		//
+		// All other providers: abort immediately on first 400.
 		if recStatus == http.StatusBadRequest {
-			h.logger.Error("client payload schema error encountered — aborting rotation to protect pool keys",
-				zap.String("model", pctx.model),
-				zap.String("provider", result.Credential.Provider),
-				zap.Int("status", recStatus),
-				zap.ByteString("error_body", errBody),
-			)
-			break retryLoop
+			jiekou400Count := 0
+			for _, a := range attempts {
+				if a.provider == "jiekou" && a.statusCode == http.StatusBadRequest {
+					jiekou400Count++
+				}
+			}
+			if result.Credential.Provider != "jiekou" || jiekou400Count >= 2 {
+				h.logger.Error("payload schema error — aborting rotation to protect pool keys",
+					zap.String("model", pctx.model),
+					zap.String("provider", result.Credential.Provider),
+					zap.Int("status", recStatus),
+					zap.Int("jiekou_400_count", jiekou400Count),
+					zap.ByteString("error_body", errBody),
+				)
+				break retryLoop
+			}
 		}
 
 		if recStatus == http.StatusTooManyRequests && isSingleKey {
@@ -767,6 +922,11 @@ retryLoop:
 			if isLastResort {
 				pctx.isPuter = false
 				pctx.isCloudflare = true
+				// Mirror the prefix stripping done in Handle()'s isCloudflare
+				// block: cloudflarePath embeds the model in the /ai/run/{model}
+				// URL, so pctx.model must hold the clean ID without the
+				// "cloudflare/" routing prefix.
+				pctx.model = strings.TrimPrefix(cheaperModel, "cloudflare/")
 			}
 
 			// Reset retry counters to try all fallback credentials
@@ -900,23 +1060,30 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	}
 
 	// --- Cloudflare Workers AI Request Body Translation ---
-	// Cloudflare's /ai/run/{model} text-to-image endpoint rejects unknown
-	// OpenAI fields (model, n, size, response_format) with an "Invalid input"
-	// (code 8002) error. We translate image-generation requests down to the
-	// bare {"prompt":"..."} body Cloudflare expects. Chat completions are
-	// served via Cloudflare's OpenAI-compatible /ai/v1 endpoint and pass
-	// through unchanged.
+	// Native @cf/* text-to-image models served via /ai/run/{model} reject unknown
+	// OpenAI fields (model, n, size, response_format) with "Invalid input" (code 8002).
+	// We translate image-generation requests down to bare {"prompt":"..."} for native models.
+	//
+	// Third-party AI Gateway image models (openai/gpt-image-2, recraft/*, krea/*, etc.)
+	// accept the full OpenAI payload natively — pass those through unchanged.
+	//
+	// Chat completions are served via Cloudflare's OpenAI-compatible /ai/v1 endpoint
+	// and pass through unchanged regardless of model type.
 	if cred.Provider == "cloudflare" && isCloudflareImageRequest(c.Request.URL.Path) {
-		translated, ctOverride, trErr := translateCloudflareImageRequest(bodyBytes)
-		if trErr != nil {
-			h.logger.Error("cloudflare request translation failed",
-				zap.String("model", pctx.model),
-				zap.Error(trErr),
-			)
-			return http.StatusInternalServerError, upstreamURL, nil, trErr
+		if isCloudflareNativeImageModel(modelName) {
+			// Native @cf/* model: translate to bare {prompt:...} format
+			translated, ctOverride, trErr := translateCloudflareImageRequest(bodyBytes)
+			if trErr != nil {
+				h.logger.Error("cloudflare native image request translation failed",
+					zap.String("model", pctx.model),
+					zap.Error(trErr),
+				)
+				return http.StatusInternalServerError, upstreamURL, nil, trErr
+			}
+			bodyBytes = translated
+			contentTypeOverride = ctOverride
 		}
-		bodyBytes = translated
-		contentTypeOverride = ctOverride
+		// Third-party AI Gateway image models: pass OpenAI payload through unchanged
 	}
 
 	// --- Sarvam AI Request Sanitization ---
@@ -948,7 +1115,99 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		bodyBytes = sanitizeAgentRouterRequest(bodyBytes)
 	}
 
+	// --- Jiekou.AI Request Sanitization ---
+	// Jiekou proxies Moonshot/Kimi and other Chinese models behind an OpenAI-
+	// compatible API. Two issues cause HTTP 400 "invalid request" errors:
+	//
+	//  1. If any "jiekou/" prefix survived into bodyBytes (e.g., the credential
+	//     was resolved from a clean alias pool without a jiekou/ prefix token in
+	//     pctx.model), strip it now.
+	//
+	//  2. Moonshot/Kimi enforce temperature ∈ [0.0, 1.0]. OpenAI allows up to 2.0.
+	//     Clients (Cline, Cursor, VSCode) commonly send temperature: 1.2 or 1.5.
+	//
+	//  3. Several OpenAI-only fields (logit_bias, user, logprobs, stream_options…)
+	//     are passed through by Jiekou to Moonshot, which then rejects them.
+	if cred.Provider == "jiekou" {
+		bodyBytes = sanitizeJiekouRequest(bodyBytes)
+	}
+
+	// --- NVIDIA Request Sanitization ---
+	// NVIDIA NIM's API schema strictly validates top-level request fields and
+	// rejects unknown OpenAI-specific keys (stream_options, logprobs, service_tier,
+	// etc.) with HTTP 400 "Unsupported parameter(s)". Without this sanitizer the
+	// gateway's 400 fast-fail block would abort after the first attempt and return
+	// a misleading 502 gateway_exhaustion_error to the client.
+	//
+	// Note: reasoning_budget and chat_template_kwargs injection is handled
+	// separately in Handle() via injectNvidiaParams(), gated on
+	// supportsNvidiaReasoning(). The sanitizer here provides defence-in-depth
+	// for all other OpenAI-specific fields that neither reasoning nor standard
+	// NVIDIA models accept.
+	if cred.Provider == "nvidia" {
+		bodyBytes = sanitizeNvidiaRequest(bodyBytes)
+	}
+
+	// --- Gemini AI Studio: SDK-native path ---
+	// Replaces the raw HTTP proxy path for Gemini. The official google.golang.org/genai
+	// SDK handles auth, URL construction, serialization, chunked stream framing, and
+	// thought_signature bypass for Gemini 3+ models. executeGeminiWithSDK writes
+	// the response directly to c.Writer and returns a telemetry blob as errBody.
+	// The early return naturally bypasses URL construction, h.client.Do, and the old
+	// Gemini response translation below — those blocks remain as dead code for rollback.
+	if cred.Provider == "gemini" {
+		sdkStatus, sdkBody, sdkErr := h.executeGeminiWithSDK(c, pctx, cred.APIKey, bodyBytes)
+		if sdkErr != nil {
+			h.logger.Error("gemini sdk executor error",
+				zap.String("model", pctx.model),
+				zap.Error(sdkErr),
+			)
+			return http.StatusInternalServerError, "sdk://gemini", nil, nil
+		}
+		return sdkStatus, "sdk://gemini", sdkBody, nil
+	}
+
+	// --- Gemini AI Studio Request Body Transpilation (LEGACY — unreachable via SDK path) ---
+	// Google AI Studio uses a fundamentally different request format from OpenAI.
+	// The transpiler converts the entire body — messages, tools, generation config,
+	// thinking budget, and safety settings — into Gemini's native generateContent
+	// format. This runs for BOTH the prefixed ("gemini/...") and clean ("gemini-2.5-pro")
+	// routing forms since it is gated on the resolved credential's provider.
+	if cred.Provider == "gemini_legacy_disabled" {
+		geminiBody, trErr := transpileOpenAIToGemini(bodyBytes)
+		if trErr != nil {
+			h.logger.Error("gemini request transpilation failed",
+				zap.String("model", pctx.model),
+				zap.Error(trErr),
+			)
+			return http.StatusBadRequest, upstreamURL, nil, trErr
+		}
+		bodyBytes = geminiBody
+	}
+
 	upstreamURL = h.rewriter.RewriteURL(cred.Provider, cred.BaseURL, c.Request.URL.Path, modelName)
+
+	// --- Gemini URL Adjustments ---
+	// Two fixes applied after URL construction:
+	//
+	//  1. Non-stream URL switch: geminiPath always produces streamGenerateContent?alt=sse
+	//     as a safe default. For non-streaming client requests we switch to the plain
+	//     generateContent endpoint (lower latency, simpler response parsing).
+	//
+	//  2. API key injection: Google AI Studio requires ?key=<apiKey> as a query
+	//     parameter. No Authorization header is used (see rewriter.go).
+	if cred.Provider == "gemini" {
+		if !pctx.isStream {
+			// Switch from streamGenerateContent?alt=sse to generateContent
+			upstreamURL = strings.Replace(upstreamURL, ":streamGenerateContent?alt=sse", ":generateContent", 1)
+		}
+		// Inject API key as query parameter
+		if strings.Contains(upstreamURL, "?") {
+			upstreamURL += "&key=" + cred.APIKey
+		} else {
+			upstreamURL += "?key=" + cred.APIKey
+		}
+	}
 
 	// --- 1min.ai Streaming ---
 	// 1min.ai enables streaming via the ?isStreaming=true query parameter
@@ -1025,7 +1284,7 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	if pctx.isStream && resp.StatusCode == http.StatusOK {
 		c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
 		c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
-		responseText, completionTokens := h.stream.ProxyStream(c, resp, cred.Provider)
+		responseText, completionTokens := h.stream.ProxyStream(c, resp, cred.Provider, pctx.requestedModel)
 
 		// Pack completion tokens and responseText into a temporary json to pass back to the retry worker
 		type streamResult struct {
@@ -1050,6 +1309,8 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		}
 		if translated, ok := translateOllamaResponse(respBody); ok {
 			respBody = translated
+			respBody = h.normalizeNonStreamingReasoning(respBody)
+			respBody = h.rewriteResponseModel(respBody, pctx.requestedModel)
 			for key, vals := range resp.Header {
 				for _, val := range vals {
 					c.Writer.Header().Add(key, val)
@@ -1104,6 +1365,8 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 
 		translated, contentType, trErr := translateOneMinAIResponse(pctx.model, respBody)
 		if trErr == nil && translated != nil {
+			translated = h.normalizeNonStreamingReasoning(translated)
+			translated = h.rewriteResponseModel(translated, pctx.requestedModel)
 			c.Writer.Header().Set("Content-Type", contentType)
 			c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
 			c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
@@ -1128,48 +1391,132 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		return resp.StatusCode, upstreamURL, respBody, nil
 	}
 
-	// --- Cloudflare Workers AI Image Response Translation ---
-	// Cloudflare's /ai/run text-to-image endpoint returns a {success,result}
-	// envelope whose result.image holds a base64-encoded image. We translate
-	// it to the OpenAI images/generations shape so OpenAI-compatible clients
-	// (and this gateway's own chat app) can consume it directly. Chat
-	// completions use the OpenAI-compatible /ai/v1 endpoint and pass through.
+	// --- Gemini AI Studio Non-Streaming Response Translation ---
+	// Google AI Studio's generateContent endpoint returns a completely different
+	// response envelope from OpenAI. For non-streaming requests we translate the
+	// entire response into an OpenAI chat completion JSON so clients are unaware
+	// of the backend format.
+	//
+	// Note: Streaming requests (pctx.isStream) are handled by the transmux layer
+	// in internal/transmux/gemini.go via the ProxyStream path — they never reach
+	// this block.
+	if cred.Provider == "gemini" && !pctx.isStream {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return http.StatusInternalServerError, upstreamURL, nil, readErr
+		}
+
+		// Gemini sometimes returns HTTP 200 with an error payload embedded in the body.
+		// Detect and normalize these before attempting response translation.
+		if errMsg, _, _, detectErr := jsonparser.Get(respBody, "error", "message"); detectErr == nil && len(errMsg) > 0 {
+			normalized := normalizeGeminiError(resp.StatusCode, respBody)
+			h.logger.Warn("gemini returned error in 200 body",
+				zap.String("model", pctx.model),
+				zap.ByteString("error_msg", errMsg),
+			)
+			c.Writer.Header().Set("Content-Type", "application/json")
+			c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+			c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+			c.Writer.WriteHeader(normalized.HTTPStatus)
+			c.Writer.Write(normalized.Body) //nolint:errcheck
+			return normalized.HTTPStatus, upstreamURL, normalized.Body, nil
+		}
+
+		// Translate Gemini generateContent → OpenAI chat completion format
+		translated, trErr := translateGeminiResponse(respBody, pctx.requestedModel)
+		if trErr != nil {
+			h.logger.Warn("gemini non-stream response translation failed, passing raw body",
+				zap.String("model", pctx.model),
+				zap.Error(trErr),
+			)
+			// Fall through with raw body — better than a 502 to the client
+			c.Writer.Header().Set("Content-Type", "application/json")
+			c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+			c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+			c.Writer.WriteHeader(resp.StatusCode)
+			c.Writer.Write(respBody) //nolint:errcheck
+			return resp.StatusCode, upstreamURL, respBody, nil
+		}
+
+		// Apply thinking-tag normalization and model rewriting
+		translated = h.normalizeNonStreamingReasoning(translated)
+		translated = h.rewriteResponseModel(translated, pctx.requestedModel)
+		c.Writer.Header().Set("Content-Type", "application/json")
+		c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+		c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+		c.Writer.WriteHeader(resp.StatusCode)
+		c.Writer.Write(translated) //nolint:errcheck
+		return resp.StatusCode, upstreamURL, translated, nil
+	}
+
+	// --- Cloudflare Workers AI / AI Gateway Image Response Translation ---
+
+	// Two response formats can arrive depending on the model type:
+	//
+	//  Native @cf/* models (/ai/run/{model}):
+	//    Return a Cloudflare-specific envelope: {"success":true,"result":{"image":"<b64>"}}
+	//    → Must be translated to OpenAI format: {"created":0,"data":[{"b64_json":"..."}]}
+	//
+	//  Third-party AI Gateway models (openai/*, recraft/*, krea/*, etc.):
+	//    Already return OpenAI-native format directly: {"created":...,"data":[...]}
+	//    → Pass through to the client unchanged.
 	if cred.Provider == "cloudflare" && isCloudflareImageRequest(c.Request.URL.Path) {
 		respBody, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
 			return http.StatusInternalServerError, upstreamURL, nil, readErr
 		}
 
-		// Cloudflare returns HTTP 200 with success=false for some validation
-		// failures (e.g. invalid input). Route those through the retry loop so
-		// the credential is penalised and a clear error reaches the client.
-		if success, err := jsonparser.GetBoolean(respBody, "success"); err == nil && !success {
-			h.logger.Warn("cloudflare returned internal failure (HTTP 200, success=false)",
-				zap.String("model", pctx.model),
-				zap.ByteString("response", respBody),
-			)
-			return http.StatusBadGateway, upstreamURL, respBody, nil
-		}
+		// Detect native Cloudflare envelope vs. OpenAI-native passthrough.
+		// isCloudflareNativeImageResponse checks for a top-level "success" boolean
+		// which is the canonical marker of the Cloudflare {success, result} envelope.
+		if isCloudflareNativeImageResponse(respBody) {
+			// Native @cf/* envelope: check for success=false failures first
+			if success, err := jsonparser.GetBoolean(respBody, "success"); err == nil && !success {
+				h.logger.Warn("cloudflare returned internal failure (HTTP 200, success=false)",
+					zap.String("model", pctx.model),
+					zap.ByteString("response", respBody),
+				)
+				return http.StatusBadGateway, upstreamURL, respBody, nil
+			}
 
-		translated, contentType, trErr := translateCloudflareImageResponse(respBody)
-		if trErr == nil && translated != nil {
-			c.Writer.Header().Set("Content-Type", contentType)
+			// Translate native Cloudflare envelope → OpenAI format
+			translated, contentType, trErr := translateCloudflareImageResponse(respBody)
+			if trErr == nil && translated != nil {
+				c.Writer.Header().Set("Content-Type", contentType)
+				c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+				c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+				c.Writer.WriteHeader(resp.StatusCode)
+				c.Writer.Write(translated) //nolint:errcheck
+				return resp.StatusCode, upstreamURL, translated, nil
+			}
+			// Translation failed — write original body as fallback
+			h.logger.Warn("cloudflare native image response translation failed, passing through original",
+				zap.String("model", pctx.model),
+				zap.Error(trErr),
+			)
+			for key, vals := range resp.Header {
+				for _, val := range vals {
+					c.Writer.Header().Add(key, val)
+				}
+			}
 			c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
 			c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
 			c.Writer.WriteHeader(resp.StatusCode)
-			c.Writer.Write(translated) //nolint:errcheck
-			return resp.StatusCode, upstreamURL, translated, nil
+			c.Writer.Write(respBody) //nolint:errcheck
+			return resp.StatusCode, upstreamURL, respBody, nil
 		}
-		// Translation failed — write original body as fallback
-		h.logger.Warn("cloudflare response translation failed, passing through original",
+
+		// Third-party AI Gateway image model — response is already OpenAI-native format.
+		// Pass through directly without any translation.
+		h.logger.Debug("cloudflare third-party image model: passing through OpenAI-native response",
 			zap.String("model", pctx.model),
-			zap.Error(trErr),
 		)
 		for key, vals := range resp.Header {
 			for _, val := range vals {
 				c.Writer.Header().Add(key, val)
 			}
 		}
+		c.Writer.Header().Set("Content-Type", "application/json")
 		c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
 		c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
 		c.Writer.WriteHeader(resp.StatusCode)
@@ -1185,6 +1532,10 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	var respBody []byte
 	if isJSON {
 		respBody, _ = io.ReadAll(resp.Body)
+		// Normalize inline <think> tags into structured reasoning_content so
+		// front-ends render a thinking panel instead of raw reasoning text.
+		respBody = h.normalizeNonStreamingReasoning(respBody)
+		respBody = h.rewriteResponseModel(respBody, pctx.requestedModel)
 	}
 
 	for key, vals := range resp.Header {
@@ -1203,6 +1554,88 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		io.Copy(c.Writer, resp.Body) //nolint:errcheck
 		return resp.StatusCode, upstreamURL, nil, nil
 	}
+}
+
+// normalizeNonStreamingReasoning extracts inline <think>…</think> blocks from a
+// non-streaming chat completion's message content and surfaces them as a
+// structured "reasoning_content" field. This lets OpenAI-compatible front-ends
+// (OpenWebUI, LibreChat, Cline, …) render a dedicated thinking panel instead of
+// dumping the raw reasoning as chat text.
+//
+// The function is a fast no-op when:
+//   - the body is not a chat-completion shape (no choices[0].message.content)
+//   - a structured reasoning_content field is already present (e.g. DeepSeek)
+//   - no <think> tag is present in the content
+//
+// Only the "content" and "reasoning_content" keys are patched via jsonparser.Set,
+// preserving every other field on the message object (tool_calls, name, refusal,
+// annotations, …) without a full unmarshal/marshal round-trip.
+func (h *Handler) normalizeNonStreamingReasoning(body []byte) []byte {
+	// GetString (not Get) returns a properly unescaped Go string so json.Marshal
+	// re-encodes it correctly — avoiding the double-escaping (\n → \\n) that raw
+	// jsonparser.Get bytes would cause. Same caveat documented in ollama.go.
+	content, err := jsonparser.GetString(body, "choices", "[0]", "message", "content")
+	if err != nil || len(content) == 0 {
+		return body
+	}
+
+	// Skip if structured reasoning_content is already present — the upstream
+	// already separates thinking for us.
+	if reasoning, rErr := jsonparser.GetString(body, "choices", "[0]", "message", "reasoning_content"); rErr == nil && reasoning != "" {
+		return body
+	}
+
+	// Extract every <think>…</think> block, accumulating reasoning text and the
+	// remaining clean content. Handles multiple blocks and an unclosed trailing
+	// <think> gracefully.
+	var reasoningParts []string
+	var cleanBuilder strings.Builder
+	remaining := content
+	for {
+		startIdx := strings.Index(remaining, "<think>")
+		if startIdx == -1 {
+			cleanBuilder.WriteString(remaining)
+			break
+		}
+		cleanBuilder.WriteString(remaining[:startIdx])
+		afterTag := remaining[startIdx+len("<think>"):]
+		endIdx := strings.Index(afterTag, "</think>")
+		if endIdx == -1 {
+			if trimmed := strings.TrimSpace(afterTag); trimmed != "" {
+				reasoningParts = append(reasoningParts, trimmed)
+			}
+			break
+		}
+		if trimmed := strings.TrimSpace(afterTag[:endIdx]); trimmed != "" {
+			reasoningParts = append(reasoningParts, trimmed)
+		}
+		remaining = afterTag[endIdx+len("</think>"):]
+	}
+
+	if len(reasoningParts) == 0 {
+		return body
+	}
+
+	cleanContent := strings.TrimSpace(cleanBuilder.String())
+	reasoningBlock := strings.Join(reasoningParts, "\n")
+
+	cleanJSON, err := json.Marshal(cleanContent)
+	if err != nil {
+		return body
+	}
+	updated, err := jsonparser.Set(body, cleanJSON, "choices", "[0]", "message", "content")
+	if err != nil {
+		return body
+	}
+	reasoningJSON, err := json.Marshal(reasoningBlock)
+	if err != nil {
+		return body
+	}
+	updated, err = jsonparser.Set(updated, reasoningJSON, "choices", "[0]", "message", "reasoning_content")
+	if err != nil {
+		return body
+	}
+	return updated
 }
 
 // translateOllamaResponse converts a native Ollama non-streaming response body
@@ -1289,7 +1722,15 @@ func translateOllamaResponse(data []byte) ([]byte, bool) {
 
 // findPoolByPrefix searches for a pool matching a model name prefix.
 // E.g., "gpt-4o-2024-05-13" matches pool "gpt-4o".
-// Also handles NVIDIA namespace (e.g., "nvidia/nvidia/nemotron-3-super-120b-a12b").
+//
+// Named-provider blocks handle known slash-prefixed namespaces:
+//
+//	nvidia/, ollama/, 1min/, cloudflare/, sarvam/, puter/, zenmux/, gemini/
+//
+// A generic catch-all at the end applies the same progressive-prefix loop
+// to any other slash-containing model (e.g. "jiekou/baidu/ernie-4.5-300b-a47b-paddle",
+// or custom providers registered via the credential prefix field), so new
+// provider namespaces work automatically without requiring a new hard-coded block.
 func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 	// Handle NVIDIA slash-separated model names (e.g., "nvidia/nvidia/nemotron-3-super-120b-a12b")
 	if strings.HasPrefix(model, "nvidia/") {
@@ -1399,6 +1840,75 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 		}
 	}
 
+	// Handle ZenMux slash-separated model names (e.g. "zenmux/anthropic/claude-3-5-sonnet")
+	if strings.HasPrefix(model, "zenmux/") {
+		slashParts := strings.Split(model, "/")
+		for i := len(slashParts) - 1; i >= 1; i-- {
+			prefix := strings.Join(slashParts[:i], "/")
+			if val, found := h.cache.Get(cache.PoolKey(prefix)); found {
+				return val, true
+			}
+		}
+		// Also try just the provider namespace key "zenmux"
+		if val, found := h.cache.Get(cache.PoolKey("zenmux")); found {
+			return val, true
+		}
+	}
+	// Handle Gemini slash-separated model names (e.g. "gemini/gemini-3.5-flash")
+	if strings.HasPrefix(model, "gemini/") {
+		// 1. Try to match the exact pattern pool first
+		if val, found := h.cache.Get(cache.PoolKey(model)); found {
+			return val, true
+		}
+		// 2. If not found, normalize the model name and try matching that pool
+		cleanModel := strings.TrimPrefix(model, "gemini/")
+		mappedClean := normalizeGeminiModel(cleanModel)
+		mappedPool := "gemini/" + mappedClean
+		if val, found := h.cache.Get(cache.PoolKey(mappedPool)); found {
+			h.logger.Debug("mapping unknown gemini model to fallback pool",
+				zap.String("requested", model),
+				zap.String("mapped", mappedPool),
+			)
+			return val, true
+		}
+		// 3. Progressive path matching fallback
+		slashParts := strings.Split(model, "/")
+		for i := len(slashParts) - 1; i >= 1; i-- {
+			prefix := strings.Join(slashParts[:i], "/")
+			if val, found := h.cache.Get(cache.PoolKey(prefix)); found {
+				return val, true
+			}
+		}
+		// 4. Fallback to generic gemini key namespace
+		if val, found := h.cache.Get(cache.PoolKey("gemini")); found {
+			return val, true
+		}
+	}
+
+	// Generic catch-all for any slash-prefixed model not matched by the
+	// named-provider blocks above (e.g. "jiekou/baidu/ernie-4.5-300b-a47b-paddle",
+	// "mycompany/gpt-4o", or any other custom prefix registered via the
+	// credential prefix field).
+	//
+	// Strategy (mirrors the per-provider blocks):
+	//  1. Try the exact full model string first (already tried above via
+	//     h.cache.Get(cache.PoolKey(model)) in Handle; repeated here for clarity).
+	//  2. Walk progressively shorter slash-joined prefixes longest → shortest.
+	//  3. Try just the first slash token alone (the bare namespace key).
+	if strings.Contains(model, "/") {
+		slashParts := strings.Split(model, "/")
+		for i := len(slashParts) - 1; i >= 1; i-- {
+			prefix := strings.Join(slashParts[:i], "/")
+			if val, found := h.cache.Get(cache.PoolKey(prefix)); found {
+				h.logger.Debug("generic slash-prefix pool match",
+					zap.String("model", model),
+					zap.String("matched_prefix", prefix),
+				)
+				return val, true
+			}
+		}
+	}
+
 	// Try progressively shorter dash-separated prefixes
 	parts := strings.Split(model, "-")
 	for i := len(parts) - 1; i >= 1; i-- {
@@ -1408,6 +1918,27 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 		}
 	}
 	// Try provider-specific patterns (e.g., "gemini-" prefix)
+	if strings.HasPrefix(model, "gemini-") {
+		mappedClean := normalizeGeminiModel(model)
+		if val, found := h.cache.Get(cache.PoolKey(mappedClean)); found {
+			h.logger.Debug("mapping unknown clean gemini model to fallback pool",
+				zap.String("requested", model),
+				zap.String("mapped", mappedClean),
+			)
+			return val, true
+		}
+		// Fall back to the generic gemini studio pool namespace so a standalone
+		// "gemini-<unknown>" request still binds to an AI Studio credential pool
+		// rather than failing with "no routing pool configured". Mirrors the
+		// slash-prefixed branch above so both routing forms share one fallback.
+		if val, found := h.cache.Get(cache.PoolKey(credentials.ProviderGemini)); found {
+			h.logger.Debug("mapping unknown clean gemini model to studio namespace pool",
+				zap.String("requested", model),
+				zap.String("namespace", credentials.ProviderGemini),
+			)
+			return val, true
+		}
+	}
 	for _, prefix := range []string{"gpt-", "claude-", "gemini-", "deepseek-"} {
 		if strings.HasPrefix(model, prefix) {
 			baseModel := strings.TrimSuffix(prefix, "-")
@@ -1494,12 +2025,40 @@ type ModelListResponse struct {
 
 // ListModels returns a list of configured active model pools with their
 // detected capabilities in OpenAI-compatible format.
+//
+// Read order:
+//  1. Redis L2 (< 1ms, shared across all gateway replicas)
+//  2. Ristretto L1 (sub-microsecond, local in-process)
+//  3. Empty list (no DB call — data is always pre-loaded at startup)
 func (h *Handler) ListModels(c *gin.Context) {
-	val, found := h.cache.Get("system:active_models")
-
 	var data []ModelDetail
 	now := time.Now().Unix()
 
+	// --- Tier 1: Redis L2 cache (serves all gateway replicas with single-digit ms) ---
+	if h.redisCacheMgr != nil {
+		var redisModels []cache.ActiveModelEntry
+		found, _ := h.redisCacheMgr.GetJSON(c.Request.Context(), cache.KeyActiveModels, &redisModels)
+		if found && len(redisModels) > 0 {
+			data = make([]ModelDetail, len(redisModels))
+			for i, m := range redisModels {
+				data[i] = ModelDetail{
+					ID:           m.Pattern,
+					Object:       "model",
+					Created:      now,
+					OwnedBy:      "clever-ai-gate",
+					Capabilities: m.Capabilities,
+				}
+			}
+			c.JSON(http.StatusOK, ModelListResponse{
+				Object: "list",
+				Data:   data,
+			})
+			return
+		}
+	}
+
+	// --- Tier 2: Ristretto L1 cache (sub-microsecond, local in-process) ---
+	val, found := h.cache.Get("system:active_models")
 	if found {
 		// New enriched format: []credentials.ActiveModel
 		if models, ok := val.([]credentials.ActiveModel); ok {
@@ -1513,6 +2072,20 @@ func (h *Handler) ListModels(c *gin.Context) {
 					Capabilities: m.Capabilities,
 				}
 			}
+			// Back-fill Redis L2 asynchronously from Ristretto L1 data.
+			// This heals a Redis cache miss without blocking the response.
+			if h.redisCacheMgr != nil && len(models) > 0 {
+				go func(m []credentials.ActiveModel) {
+					entries := make([]cache.ActiveModelEntry, len(m))
+					for i, am := range m {
+						entries[i] = cache.ActiveModelEntry{
+							Pattern:      am.Pattern,
+							Capabilities: am.Capabilities,
+						}
+					}
+					h.redisCacheMgr.SetJSON(context.Background(), cache.KeyActiveModels, entries, cache.DefaultCacheTTL)
+				}(models)
+			}
 		}
 	}
 
@@ -1524,6 +2097,49 @@ func (h *Handler) ListModels(c *gin.Context) {
 		Object: "list",
 		Data:   data,
 	})
+}
+
+// --- In-Place Model Prefix Stripping ---
+
+// stripModelPrefixInPlace removes a routing prefix from the JSON "model" field
+// value directly within the existing byte slice, avoiding the full-body copy
+// that bytes.Replace would allocate.
+//
+// For example, given body containing `"model":"nvidia/glm-5.1"` and
+// prefixToStrip="nvidia/", the result is `"model":"glm-5.1"` with the tail
+// of the body shifted backward to close the gap.
+//
+// The caller must ensure that:
+//   - body has enough capacity (always true when shrinking)
+//   - the model string (fullModel) is an independent copy, NOT an unsafe
+//     view into body — the in-place modification would corrupt such a view.
+//
+// If fullModel does not actually carry prefixToStrip, the body is returned
+// unchanged. This guard makes the function safe to call for routing forms that
+// have no prefix to strip (e.g. a standalone "gemini-3.5-flash" routed through
+// the isGemini path), where the unguarded slice expression below would otherwise
+// compute a bogus upstream model and silently corrupt the request body.
+func stripModelPrefixInPlace(body []byte, fullModel, prefixToStrip string) []byte {
+	if !strings.HasPrefix(fullModel, prefixToStrip) {
+		return body
+	}
+	oldToken := []byte(`"` + fullModel + `"`)
+	upstreamModel := fullModel[len(prefixToStrip):]
+	newToken := []byte(`"` + upstreamModel + `"`)
+
+	idx := bytes.Index(body, oldToken)
+	if idx == -1 {
+		return body
+	}
+
+	diff := len(oldToken) - len(newToken)
+
+	// Shift the tail backward to close the gap left by the shorter replacement.
+	// Go's copy() handles overlapping dst/src correctly when dst < src.
+	copy(body[idx+len(newToken):], body[idx+len(oldToken):])
+	copy(body[idx:], newToken)
+
+	return body[:len(body)-diff]
 }
 
 // --- NVIDIA Reasoning Parameter Injection ---
@@ -1580,8 +2196,22 @@ func injectNvidiaParams(body, scanSlice []byte, logger *zap.Logger) []byte {
 // stripped) supports NVIDIA's reasoning extensions (reasoning_budget,
 // chat_template_kwargs.enable_thinking). Standard models like GLM, Llama-base,
 // and Mistral reject these params with a 500, so they must be excluded.
+//
+// IMPORTANT: Only the final slash-separated segment (the model name itself) is
+// matched against reasoning keywords. Matching the full string would cause false
+// positives when the *organisation/namespace* portion contains a keyword — for
+// example "thinkingmachines/inkling" would incorrectly trigger on "think" inside
+// "thinkingmachines", causing reasoning_budget injection that NVIDIA rejects.
 func supportsNvidiaReasoning(upstreamModel string) bool {
-	lower := strings.ToLower(upstreamModel)
+	// Extract only the model name (last "/"-separated segment).
+	// e.g. "thinkingmachines/inkling"  → "inkling"   (org name excluded)
+	//      "deepseek/deepseek-r1"      → "deepseek-r1" (still matches -r1)
+	//      "nvidia/nemotron-3-super"   → "nemotron-3-super" (still matches nemotron)
+	modelName := upstreamModel
+	if lastSlash := strings.LastIndex(upstreamModel, "/"); lastSlash >= 0 {
+		modelName = upstreamModel[lastSlash+1:]
+	}
+	lower := strings.ToLower(modelName)
 	return strings.Contains(lower, "nemotron") ||
 		strings.Contains(lower, "-r1") ||
 		strings.Contains(lower, "reasoning") ||
@@ -1664,8 +2294,18 @@ func extractResponseText(body []byte) string {
 	if len(body) == 0 {
 		return ""
 	}
-	if content, err := jsonparser.GetString(body, "choices", "[0]", "message", "content"); err == nil {
-		return content
+	var sb strings.Builder
+	if content, err := jsonparser.GetString(body, "choices", "[0]", "message", "content"); err == nil && content != "" {
+		sb.WriteString(content)
+	}
+	if reasoning, err := jsonparser.GetString(body, "choices", "[0]", "message", "reasoning_content"); err == nil && reasoning != "" {
+		if sb.Len() > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(reasoning)
+	}
+	if sb.Len() > 0 {
+		return sb.String()
 	}
 	if content, err := jsonparser.GetString(body, "choices", "[0]", "text"); err == nil {
 		return content
@@ -1822,4 +2462,17 @@ func generateRandomIP() string {
 		rand.Intn(256),
 		rand.Intn(256),
 	)
+}
+
+// rewriteResponseModel modifies the "model" field in a JSON response body to match the user's originally requested model name.
+func (h *Handler) rewriteResponseModel(respBody []byte, requestedModel string) []byte {
+	if len(respBody) == 0 || requestedModel == "" {
+		return respBody
+	}
+	if _, err := jsonparser.GetString(respBody, "model"); err == nil {
+		if updated, err := jsonparser.Set(respBody, []byte(`"`+requestedModel+`"`), "model"); err == nil {
+			return updated
+		}
+	}
+	return respBody
 }

@@ -38,6 +38,7 @@ import (
 	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
 	"github.com/skadraneshghn/clever-ai-gate/internal/database"
 	"github.com/skadraneshghn/clever-ai-gate/internal/health"
+	"github.com/skadraneshghn/clever-ai-gate/internal/jobs"
 	"github.com/skadraneshghn/clever-ai-gate/internal/proxy"
 	"github.com/skadraneshghn/clever-ai-gate/internal/redisclient"
 	"github.com/skadraneshghn/clever-ai-gate/internal/router"
@@ -125,11 +126,32 @@ func main() {
 		logger.Info("redis tenant L2 cache enabled")
 	}
 
-	// --- Step 5: Load routing pools from DB → cache ---
+	// --- Step 4.6: Initialize Redis Cache Manager (L2 for pools/models/providers) ---
+	var rawRedisForCache *redis.Client
+	if redisClient != nil {
+		rawRedisForCache = redisClient.Unwrap()
+	}
+	redisCacheMgr := cache.NewRedisCacheManager(rawRedisForCache, logger)
+
+	// --- Step 5: Load routing pools from DB → cache (+ pre-warm Redis L2) ---
 	syncManager := credentials.NewSyncManager(dbPool, cacheStore, vault, logger)
+	syncManager.SetRedisCacheManager(redisCacheMgr) // attach before LoadInitialState for pre-warming
 	if err := syncManager.LoadInitialState(ctx); err != nil {
 		logger.Fatal("failed to load initial routing state", zap.Error(err))
 	}
+
+	// --- Step 5.5: Subscribe to Redis cache sync events ---
+	// When any cluster node publishes an invalidation event (after pool/credential mutation),
+	// this node clears its Ristretto L1 so the next request re-reads fresh data from Redis L2.
+	redisCacheMgr.SubscribeCacheSync(func() {
+		logger.Info("[CacheSync] Received remote invalidation — reloading local routing state")
+		reloadCtx, reloadCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer reloadCancel()
+		if err := syncManager.LoadInitialState(reloadCtx); err != nil {
+			logger.Error("[CacheSync] Failed to reload state after remote invalidation", zap.Error(err))
+		}
+	})
+	defer redisCacheMgr.Stop()
 
 	// --- Step 6: Start LISTEN/NOTIFY watcher ---
 	syncManager.StartListener()
@@ -165,26 +187,66 @@ func main() {
 	}
 	defer telemetryPipeline.Stop()
 
+	// --- Step 7.5: Initialize key failover telemetry AlertManager ---
+	var alertSupervisor *telemetry.AlertManager
+	if rawRedis != nil {
+		webhookURL := os.Getenv("TELEMETRY_ALERT_WEBHOOK")
+		alertSupervisor = telemetry.NewAlertManager(
+			rawRedis,
+			10,              // Threshold: 10 failovers
+			2*time.Minute,   // Rolling Window: 2 minutes
+			15*time.Minute,  // Cooldown / lock window: 15 minutes
+			webhookURL,
+		)
+		logger.Info("failover alert manager initialized", zap.String("webhook", webhookURL))
+	}
+
 	// --- Step 8: Build HTTP transport and proxy handler ---
-	transport := proxy.BuildOptimizedTransport(cfg)
+	transport, edgeProber := proxy.BuildOptimizedTransport(cfg, logger)
 	httpClient := proxy.BuildHTTPClient(transport)
-	proxyHandler := proxy.NewHandler(httpClient, cacheStore, logger, telemetryPipeline, broadcaster)
+	proxyHandler := proxy.NewHandler(httpClient, cacheStore, redisCacheMgr, logger, telemetryPipeline, broadcaster, alertSupervisor)
+
+	// Start edge IP probing and connection pre-warming
+	edgeProber.Start()
+	edgeProber.StartPreWarming(httpClient)
 
 	// --- Step 9: Initialize health handler ---
 	healthHandler := health.New(dbPool)
 
+	// --- Step 9.5: Initialize Job Scheduler ---
+	var jobScheduler *jobs.Scheduler
+	jobScheduler, err = jobs.NewScheduler(dbPool, rawRedis, vault, logger)
+	if err != nil {
+		logger.Warn("failed to initialize job scheduler, jobs disabled", zap.Error(err))
+		jobScheduler = nil
+	} else {
+		if err := jobScheduler.Start(ctx); err != nil {
+			logger.Warn("failed to start job scheduler", zap.Error(err))
+			jobScheduler = nil
+		} else {
+			defer jobScheduler.Stop()
+			logger.Info("job scheduler started")
+		}
+	}
+
+	// --- Step 9.6: Initialize Model Health Check SSE Broadcaster ---
+	healthCheckBroadcaster := make(chan jobs.HealthCheckSSEEvent, 512)
+
 	// --- Step 10: Build Gin engine with all routes ---
 	engine := router.NewEngine(&router.Dependencies{
-		Config:      cfg,
-		DB:          dbPool,
-		Cache:       cacheStore,
-		TenantCache: tenantCache,
-		Redis:       redisClient,
-		Vault:       vault,
-		Logger:      logger,
-		Health:      healthHandler,
-		Proxy:       proxyHandler,
-		LogHub:      logHub,
+		Config:                 cfg,
+		DB:                     dbPool,
+		Cache:                  cacheStore,
+		TenantCache:            tenantCache,
+		Redis:                  redisClient,
+		RedisCacheMgr:          redisCacheMgr,
+		Vault:                  vault,
+		Logger:                 logger,
+		Health:                 healthHandler,
+		Proxy:                  proxyHandler,
+		LogHub:                 logHub,
+		Scheduler:              jobScheduler,
+		HealthCheckBroadcaster: healthCheckBroadcaster,
 	})
 
 	// --- Step 11: Start HTTP server ---
@@ -225,6 +287,9 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("server forced to shutdown", zap.Error(err))
 	}
+
+	// Stop edge probing and connection pre-warming
+	edgeProber.Stop()
 
 	logger.Info("server stopped gracefully")
 }

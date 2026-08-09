@@ -29,15 +29,18 @@ type ActiveModel struct {
 // When an admin updates a config via the management API, PostgreSQL triggers
 // fire a notification. This manager receives it and atomically swaps the
 // affected routing pool in cache — zero downtime, zero lock contention.
+// The manager also writes to Redis L2 after every Ristretto L1 update so that
+// all gateway replicas share a common fast-path cache via RedisCacheManager.
 type SyncManager struct {
-	pool       *pgxpool.Pool
-	cache      *cache.Store
-	vault      *Vault
-	logger     *zap.Logger
-	pools      atomic.Pointer[map[string]*BalancedChannelPool] // Atomic pointer for lock-free reads
-	ctx        context.Context
-	cancel     context.CancelFunc
-	reloadChan chan string // Queues notifications for debounced reload execution
+	pool           *pgxpool.Pool
+	cache          *cache.Store
+	vault          *Vault
+	logger         *zap.Logger
+	redisCacheMgr  *cache.RedisCacheManager // nil when Redis not configured; all methods nil-safe
+	pools          atomic.Pointer[map[string]*BalancedChannelPool] // Atomic pointer for lock-free reads
+	ctx            context.Context
+	cancel         context.CancelFunc
+	reloadChan     chan string // Queues notifications for debounced reload execution
 }
 
 // NewSyncManager creates a new configuration sync manager.
@@ -58,6 +61,13 @@ func NewSyncManager(pool *pgxpool.Pool, cacheStore *cache.Store, vault *Vault, l
 	return sm
 }
 
+// SetRedisCacheManager attaches an optional Redis cache manager.
+// Called from main.go after both SyncManager and RedisCacheManager are created.
+// Must be called before LoadInitialState to ensure Redis pre-warming works.
+func (sm *SyncManager) SetRedisCacheManager(mgr *cache.RedisCacheManager) {
+	sm.redisCacheMgr = mgr
+}
+
 // LoadInitialState loads all routing pools from the database into cache.
 // Called once at startup before the server starts accepting requests.
 func (sm *SyncManager) LoadInitialState(ctx context.Context) error {
@@ -73,10 +83,9 @@ func (sm *SyncManager) LoadInitialState(ctx context.Context) error {
 		runtimeCreds := make([]*RuntimeCredential, 0, len(creds))
 
 		for _, cr := range creds {
-			if !cr.IsHealthy {
-				continue
-			}
-			// Decrypt the API key
+			// Decrypt the API key — is_healthy is not checked here.
+			// All credentials are loaded into the routing cache.
+			// is_healthy is exclusively controlled by admin action via the API.
 			decryptedKey, err := sm.vault.Decrypt(cr.EncryptedKey)
 			if err != nil {
 				sm.logger.Error("failed to decrypt credential",
@@ -97,7 +106,7 @@ func (sm *SyncManager) LoadInitialState(ctx context.Context) error {
 		}
 
 		if len(runtimeCreds) == 0 {
-			sm.logger.Warn("pool has no healthy credentials",
+			sm.logger.Warn("pool has no credentials",
 				zap.String("model", pr.ModelPattern),
 			)
 			continue
@@ -152,6 +161,18 @@ func (sm *SyncManager) LoadInitialState(ctx context.Context) error {
 	sm.logger.Info("initial routing state loaded",
 		zap.Int("pool_count", len(poolMap)),
 	)
+
+	// Write active models list to Redis L2 so all cluster nodes share it.
+	// Convert to cache.ActiveModelEntry slice (same shape, different package).
+	redisModels := make([]cache.ActiveModelEntry, len(activeModels))
+	for i, am := range activeModels {
+		redisModels[i] = cache.ActiveModelEntry{
+			Pattern:      am.Pattern,
+			Capabilities: am.Capabilities,
+		}
+	}
+	sm.redisCacheMgr.SetJSON(ctx, cache.KeyActiveModels, redisModels, cache.DefaultCacheTTL)
+	sm.redisCacheMgr.SetJSON(ctx, cache.KeyAllPools, redisModels, cache.DefaultCacheTTL)
 
 	// Also load all tenants into cache
 	return sm.loadTenants(ctx)
@@ -229,6 +250,33 @@ func (sm *SyncManager) listen() error {
 		return fmt.Errorf("failed to LISTEN: %w", err)
 	}
 
+	// Keep-alive goroutine: send SELECT 1 every 30 seconds to prevent Clever Cloud
+	// PostgreSQL's network firewall from killing the idle LISTEN TCP connection
+	// (which caused "unexpected EOF" errors every ~60 minutes in logs).
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-sm.ctx.Done():
+				return
+			case <-ticker.C:
+				// Ping the connection to keep it alive through cloud network firewalls.
+				// Using conn.Exec() on the pgx pooled connection is safe here.
+				if _, pingErr := conn.Exec(sm.ctx, "SELECT 1"); pingErr != nil {
+					// Connection is broken — the outer WaitForNotification will also fail.
+					// Log at debug level; the main loop will log the actual error.
+					return
+				}
+			}
+		}
+	}()
+
 	for {
 		notification, err := conn.Conn().WaitForNotification(sm.ctx)
 		if err != nil {
@@ -255,6 +303,7 @@ func (sm *SyncManager) listen() error {
 		}
 	}
 }
+
 
 // debouncer aggregates configuration updates in a sliding 100ms quiet window
 // to prevent notification storms when batch inserts occur (e.g. provider discovery).
@@ -305,12 +354,25 @@ func (sm *SyncManager) debouncer() {
 
 // reloadPools performs a full reload of all routing pools.
 // Uses atomic pointer swap for zero-downtime updates.
+// After reloading Ristretto L1, invalidates Redis L2 so all cluster nodes
+// receive fresh data on their next request.
 func (sm *SyncManager) reloadPools(ctx context.Context) error {
 	if err := sm.LoadInitialState(ctx); err != nil {
 		return err
 	}
-	sm.logger.Info("routing pools hot-reloaded")
+	// Invalidate stale Redis keys and broadcast sync event to all instances.
+	// LoadInitialState already wrote fresh data; this DELs the old keys so any
+	// node that hasn't reloaded yet will get a cache miss and re-read.
+	sm.redisCacheMgr.InvalidateAndPublish(ctx)
+	sm.logger.Info("routing pools hot-reloaded and redis cache refreshed")
 	return nil
+}
+
+// InvalidateRedisCache purges all gateway-level Redis cache keys and broadcasts
+// a sync event so all running instances clear their local Ristretto caches.
+// Called by admin handlers after any mutation that changes pool/model data.
+func (sm *SyncManager) InvalidateRedisCache(ctx context.Context) {
+	sm.redisCacheMgr.InvalidateAndPublish(ctx)
 }
 
 // Stop shuts down the sync manager.

@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -136,6 +137,160 @@ func ListModelPools(ctx context.Context, pool *pgxpool.Pool) ([]*ModelPoolRow, e
 	return pools, nil
 }
 
+// ModelPoolRowWithCount extends ModelPoolRow with the number of credentials
+// attached to the pool and the number of healthy ones, used by the paginated
+// admin pools list.
+type ModelPoolRowWithCount struct {
+	ModelPoolRow
+	CredentialCount int
+	HealthyCount    int
+}
+
+// PoolFilter holds the filtering and sorting parameters for paginated model pools.
+type PoolFilter struct {
+	Search         string
+	Strategy       string
+	Capabilities   []string
+	HasFallback    *bool
+	HasCredentials *bool
+	HealthStatus   string
+	SortBy         string
+	SortOrder      string
+}
+
+// ListModelPoolsPaginated returns a single page of model routing pools
+// together with each pool's credential count and the total number of rows
+// matching the filters (ignoring limit/offset).
+// This powers the paginated / virtualized admin pools list.
+func ListModelPoolsPaginated(ctx context.Context, pool *pgxpool.Pool, limit, offset int, filter PoolFilter) ([]*ModelPoolRowWithCount, int, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	var conditions []string
+	var havingConditions []string
+	var args []interface{}
+	argCount := 1
+
+	if s := strings.TrimSpace(filter.Search); s != "" {
+		conditions = append(conditions, fmt.Sprintf("(mp.model_pattern ILIKE $%d OR mp.strategy ILIKE $%d)", argCount, argCount))
+		args = append(args, "%"+s+"%")
+		argCount++
+	}
+
+	if filter.Strategy != "" {
+		conditions = append(conditions, fmt.Sprintf("mp.strategy = $%d", argCount))
+		args = append(args, filter.Strategy)
+		argCount++
+	}
+
+	if filter.HasFallback != nil {
+		if *filter.HasFallback {
+			conditions = append(conditions, "mp.fallback_pool_id IS NOT NULL")
+		} else {
+			conditions = append(conditions, "mp.fallback_pool_id IS NULL")
+		}
+	}
+
+	if len(filter.Capabilities) > 0 {
+		capsMap := make(map[string]bool)
+		for _, capVal := range filter.Capabilities {
+			if capVal != "" {
+				capsMap[capVal] = true
+			}
+		}
+		if len(capsMap) > 0 {
+			capsBytes, _ := json.Marshal(capsMap)
+			conditions = append(conditions, fmt.Sprintf("mp.capabilities @> $%d::jsonb", argCount))
+			args = append(args, capsBytes)
+			argCount++
+		}
+	}
+
+	if filter.HasCredentials != nil {
+		if *filter.HasCredentials {
+			havingConditions = append(havingConditions, "COUNT(c.id) > 0")
+		} else {
+			havingConditions = append(havingConditions, "COUNT(c.id) = 0")
+		}
+	}
+
+	if filter.HealthStatus != "" {
+		switch filter.HealthStatus {
+		case "healthy":
+			havingConditions = append(havingConditions, "COUNT(c.id) > 0 AND SUM(CASE WHEN NOT c.is_healthy THEN 1 ELSE 0 END) = 0")
+		case "unhealthy":
+			havingConditions = append(havingConditions, "SUM(CASE WHEN NOT c.is_healthy THEN 1 ELSE 0 END) > 0")
+		case "empty":
+			havingConditions = append(havingConditions, "COUNT(c.id) = 0")
+		}
+	}
+
+	sortBy := "mp.model_pattern"
+	if filter.SortBy != "" {
+		switch filter.SortBy {
+		case "id":
+			sortBy = "mp.id"
+		case "created_at":
+			sortBy = "mp.created_at"
+		case "credential_count":
+			sortBy = "credential_count"
+		case "strategy":
+			sortBy = "mp.strategy"
+		case "health_percent":
+			sortBy = "CASE WHEN COUNT(c.id) = 0 THEN -1 ELSE ROUND(100.0 * SUM(CASE WHEN c.is_healthy THEN 1 ELSE 0 END) / COUNT(c.id)) END"
+		}
+	}
+
+	sortOrder := "ASC"
+	if strings.ToLower(filter.SortOrder) == "desc" {
+		sortOrder = "DESC"
+	}
+
+	query := `
+		SELECT mp.id, mp.model_pattern, mp.strategy, mp.fallback_pool_id, mp.capabilities, mp.created_at::text,
+		       COUNT(c.id) AS credential_count,
+		       COALESCE(SUM(CASE WHEN c.is_healthy THEN 1 ELSE 0 END), 0) AS healthy_count,
+		       COUNT(*) OVER() AS total_count
+		FROM model_pools mp
+		LEFT JOIN credentials c ON c.pool_id = mp.id
+	`
+
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	query += " GROUP BY mp.id, mp.model_pattern, mp.strategy, mp.fallback_pool_id, mp.capabilities, mp.created_at"
+
+	if len(havingConditions) > 0 {
+		query += " HAVING " + strings.Join(havingConditions, " AND ")
+	}
+
+	query += fmt.Sprintf(" ORDER BY %s %s LIMIT $%d OFFSET $%d", sortBy, sortOrder, argCount, argCount+1)
+	args = append(args, limit, offset)
+
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to list pools (paginated): %w", err)
+	}
+	defer rows.Close()
+
+	var pools []*ModelPoolRowWithCount
+	total := 0
+	for rows.Next() {
+		p := &ModelPoolRowWithCount{}
+		if err := rows.Scan(&p.ID, &p.ModelPattern, &p.Strategy, &p.FallbackPoolID, &p.Capabilities, &p.CreatedAt, &p.CredentialCount, &p.HealthyCount, &total); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan pool: %w", err)
+		}
+		pools = append(pools, p)
+	}
+	// total stays 0 when there are no rows, which is the correct count.
+	return pools, total, nil
+}
+
 // GetModelPool returns a single model pool by ID.
 func GetModelPool(ctx context.Context, dbPool *pgxpool.Pool, id int) (*ModelPoolRow, error) {
 	row := dbPool.QueryRow(ctx, `
@@ -201,6 +356,28 @@ func DeleteModelPoolsBulk(ctx context.Context, pool *pgxpool.Pool, ids []int) er
 	return nil
 }
 
+// DeleteZeroHealthPools deletes all model pools where every credential is
+// unhealthy (is_healthy = FALSE) or where the pool has no credentials at all.
+// Credentials are cascade-deleted by the foreign key constraint.
+// Returns the number of pools deleted.
+func DeleteZeroHealthPools(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
+	result, err := pool.Exec(ctx, `
+		DELETE FROM model_pools
+		WHERE id IN (
+			SELECT mp.id
+			FROM model_pools mp
+			LEFT JOIN credentials c ON c.pool_id = mp.id
+			GROUP BY mp.id
+			HAVING COUNT(c.id) = 0
+			    OR SUM(CASE WHEN c.is_healthy THEN 1 ELSE 0 END) = 0
+		)
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("failed to purge zero-health pools: %w", err)
+	}
+	return result.RowsAffected(), nil
+}
+
 // --- Credential Queries ---
 
 // CredentialRow represents a provider credential record.
@@ -245,15 +422,17 @@ func ListCredentialsByPool(ctx context.Context, pool *pgxpool.Pool, poolID int) 
 type CredentialWithPool struct {
 	CredentialRow
 	ModelPattern string
+	Capabilities []byte // JSONB raw bytes from model_pools
 }
 
 // ListAllCredentials returns all credentials across all pools, joined with
-// the model_pools table to include the model_pattern string.
+// the model_pools table to include the model_pattern string and capabilities.
 func ListAllCredentials(ctx context.Context, pool *pgxpool.Pool) ([]*CredentialWithPool, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT c.id, c.pool_id, c.provider, c.encrypted_key, c.base_url, c.weight,
 		       c.is_healthy, c.last_error, c.created_at::text,
-		       COALESCE(mp.model_pattern, '') AS model_pattern, c.prefix
+		       COALESCE(mp.model_pattern, '') AS model_pattern, c.prefix,
+		       COALESCE(mp.capabilities, '{}'::jsonb) AS capabilities
 		FROM credentials c
 		LEFT JOIN model_pools mp ON c.pool_id = mp.id
 		ORDER BY c.id
@@ -269,12 +448,79 @@ func ListAllCredentials(ctx context.Context, pool *pgxpool.Pool) ([]*CredentialW
 		if err := rows.Scan(
 			&c.ID, &c.PoolID, &c.Provider, &c.EncryptedKey, &c.BaseURL, &c.Weight,
 			&c.IsHealthy, &c.LastError, &c.CreatedAt, &c.ModelPattern, &c.Prefix,
+			&c.Capabilities,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan credential: %w", err)
 		}
 		creds = append(creds, c)
 	}
 	return creds, nil
+}
+
+// ListCredentialsPaginated returns a single page of credentials joined with
+// their pool model pattern, plus the total number of rows matching the same
+// filters (ignoring limit/offset). This powers the paginated / virtualized
+// admin credentials list.
+//
+//   - limit  <= 0 defaults to 100
+//   - search (non-empty after trim) performs a case-insensitive ILIKE match
+//     across provider, base_url and model_pattern
+//   - provider (non-empty after trim) performs an exact provider filter
+//
+// The total count is obtained via a COUNT(*) OVER() window function so it is
+// fetched in the same query round-trip.
+func ListCredentialsPaginated(ctx context.Context, pool *pgxpool.Pool, limit, offset int, search, provider string) ([]*CredentialWithPool, int, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	var searchVal, providerVal *string
+	if s := strings.TrimSpace(search); s != "" {
+		v := "%" + s + "%"
+		searchVal = &v
+	}
+	if p := strings.TrimSpace(provider); p != "" {
+		providerVal = &p
+	}
+
+	rows, err := pool.Query(ctx, `
+		SELECT c.id, c.pool_id, c.provider, c.encrypted_key, c.base_url, c.weight,
+		       c.is_healthy, c.last_error, c.created_at::text,
+		       COALESCE(mp.model_pattern, '') AS model_pattern, c.prefix,
+		       COUNT(*) OVER() AS total_count
+		FROM credentials c
+		LEFT JOIN model_pools mp ON c.pool_id = mp.id
+		WHERE ($1::text IS NULL OR c.provider = $1)
+		  AND ($2::text IS NULL
+		       OR c.provider ILIKE $2
+		       OR c.base_url ILIKE $2
+		       OR COALESCE(mp.model_pattern, '') ILIKE $2)
+		ORDER BY c.id
+		LIMIT $3 OFFSET $4
+	`, providerVal, searchVal, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to list credentials (paginated): %w", err)
+	}
+	defer rows.Close()
+
+	var creds []*CredentialWithPool
+	total := 0
+	for rows.Next() {
+		c := &CredentialWithPool{}
+		if err := rows.Scan(
+			&c.ID, &c.PoolID, &c.Provider, &c.EncryptedKey, &c.BaseURL, &c.Weight,
+			&c.IsHealthy, &c.LastError, &c.CreatedAt, &c.ModelPattern, &c.Prefix,
+			&total,
+		); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan credential: %w", err)
+		}
+		creds = append(creds, c)
+	}
+	// total stays 0 when there are no rows, which is the correct count.
+	return creds, total, nil
 }
 
 // GetCredential returns a single credential by ID.
@@ -659,5 +905,24 @@ func GenerateEmbedding(text string) []float32 {
 
 	return vec
 }
+
+// ActivateCredentialsBulk updates the status of all credentials associated with the specified model pools.
+// It sets is_healthy to true and resets last_error to NULL.
+// Returns the count of affected credentials.
+func ActivateCredentialsBulk(ctx context.Context, pool *pgxpool.Pool, poolIDs []int) (int64, error) {
+	if len(poolIDs) == 0 {
+		return 0, nil
+	}
+	result, err := pool.Exec(ctx, `
+		UPDATE credentials 
+		SET is_healthy = TRUE, last_error = NULL 
+		WHERE pool_id = ANY($1)
+	`, poolIDs)
+	if err != nil {
+		return 0, fmt.Errorf("failed to bulk activate credentials: %w", err)
+	}
+	return result.RowsAffected(), nil
+}
+
 
 

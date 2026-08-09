@@ -78,6 +78,12 @@ func NewRewriter() *Rewriter {
 	// AgentRouter.org: OpenAI-compatible AI API aggregator
 	r.pathTransformers["agentrouter"] = passthroughPath
 
+	// ZenMux: aggregation layer, natively OpenAI-compatible
+	r.pathTransformers["zenmux"] = passthroughPath
+
+	// Jiekou.AI: OpenAI-compatible proxy for Moonshot/Kimi, DeepSeek, and other Chinese models
+	r.pathTransformers["jiekou"] = passthroughPath
+
 	return r
 }
 
@@ -130,9 +136,10 @@ func (r *Rewriter) RewriteHeaders(req *http.Request, provider, apiKey string, so
 		}
 
 	case "gemini":
-		// Gemini uses API key as query parameter (handled in URL rewrite)
-		// But also supports Bearer token for OAuth
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+		// Gemini AI Studio uses API key as a query parameter, NOT an Authorization header.
+		// The key is appended to the upstream URL in forwardRequest after calling RewriteURL.
+		// No Authorization header is set here — sending one would still work but is unnecessary.
+		// (Vertex AI uses OAuth Bearer; that is a different provider "vertex".)
 
 	case "azure":
 		req.Header.Set("api-key", apiKey)
@@ -156,6 +163,9 @@ func (r *Rewriter) RewriteHeaders(req *http.Request, provider, apiKey string, so
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	case "puter":
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	case "zenmux":
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	default:
@@ -187,16 +197,31 @@ func anthropicPath(baseURL, requestPath, _ string) string {
 	return baseURL + requestPath
 }
 
-// geminiPath transforms to Gemini's REST API format.
-// /v1/chat/completions → /v1beta/models/{model}:generateContent
-// /v1/chat/completions (stream) → /v1beta/models/{model}:streamGenerateContent
+// geminiPath transforms OpenAI paths to Gemini's REST API format.
+//
+//	/v1/chat/completions  (stream) → /v1beta/models/{model}:streamGenerateContent?alt=sse
+//	/v1/chat/completions  (non-s)  → /v1beta/models/{model}:generateContent
+//	/v1/embeddings                  → /v1beta/models/{model}:embedContent
+//
+// Note: The stream/non-stream selection is performed in forwardRequest by inspecting
+// pctx.isStream and modifying the URL in-place after this transformer runs. The
+// transformer always returns the streaming URL as a safe default; forwardRequest
+// replaces ":streamGenerateContent?alt=sse" with ":generateContent" for non-stream
+// requests before appending the API key.
 func geminiPath(baseURL, requestPath, model string) string {
+	// Do NOT normalize the model name here — the pool system (via discovery)
+	// has already validated that this model ID exists in the user's account.
+	// Calling normalizeGeminiModel would remap real discovered models (e.g.
+	// gemini-3.5-flash) to a static fallback that may be deprecated.
 	if strings.Contains(requestPath, "/chat/completions") {
-		// Default to streaming — the handler will switch based on stream flag
+		// Default to streaming — forwardRequest will switch to generateContent for non-stream.
 		return fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?alt=sse", baseURL, model)
 	}
 	if strings.Contains(requestPath, "/embeddings") {
 		return fmt.Sprintf("%s/v1beta/models/%s:embedContent", baseURL, model)
+	}
+	if strings.Contains(requestPath, "/models") {
+		return fmt.Sprintf("%s/v1beta/models", baseURL)
 	}
 	return baseURL + requestPath
 }
@@ -302,34 +327,56 @@ func ollamaPath(baseURL, requestPath, _ string) string {
 	return baseURL + requestPath
 }
 
-// cloudflarePath routes requests to the correct Cloudflare Workers AI endpoint.
+// cloudflarePath routes requests to the correct Cloudflare Workers AI / AI Gateway endpoint.
 //
 // The base_url convention used by this gateway is "cloudflare:<accountID>".
 // The account ID is extracted via strings.TrimPrefix.
 //
-// Two downstream paths exist:
+// Cloudflare exposes two distinct model namespaces:
 //
-//	Text completions (/v1/chat/completions, /v1/completions):
-//	  → https://api.cloudflare.com/client/v4/accounts/{accountID}/ai/v1/chat/completions
-//	  (Cloudflare's native OpenAI-compatible endpoint, supports streaming SSE)
+//  1. Native Workers AI models — prefixed with "@cf/" (e.g. "@cf/meta/llama-3.1-8b-instruct")
+//     These run serverless on Cloudflare's edge network.
 //
-//	All other paths (/v1/embeddings, /v1/images/generations, /v1/audio/*):
-//	  → https://api.cloudflare.com/client/v4/accounts/{accountID}/ai/run/{model}
-//	  (Cloudflare's universal inference endpoint)
+//  2. Third-party proxied models — "provider/model" form (e.g. "openai/gpt-5",
+//     "anthropic/claude-sonnet-5", "google/gemini-2.5-pro", "krea/krea-2-large").
+//     These are routed through Cloudflare AI Gateway's unified billing endpoint.
+//
+// Routing rules:
+//
+//	Chat/completion paths (/v1/chat/completions, /v1/completions):
+//	  → /ai/v1/chat/completions   (OpenAI-compatible, streaming SSE)
+//	  Works for BOTH @cf/* and third-party text-generation models.
+//
+//	Embedding path (/v1/embeddings):
+//	  → /ai/v1/embeddings         (OpenAI-compatible embeddings endpoint)
+//
+//	Image/audio/video paths (/v1/images/*, /v1/audio/*):
+//	  → /ai/run/{model}           (Universal inference endpoint)
+//	  For @cf/* models: model = "@cf/stabilityai/stable-diffusion-xl-base-1.0"
+//	  For third-party : model = "openai/gpt-image-2"  (provider/model kept intact)
 func cloudflarePath(baseURL, requestPath, model string) string {
 	// Parse the account ID from the stored base_url convention.
 	accountID := strings.TrimPrefix(baseURL, "cloudflare:")
 	cfBase := "https://api.cloudflare.com/client/v4/accounts/" + accountID
 
+	// Chat and completion requests: always route to the OpenAI-compatible endpoint.
+	// Cloudflare's /ai/v1 surface handles both @cf/* and third-party text models.
 	if strings.Contains(requestPath, "/chat/completions") ||
 		strings.Contains(requestPath, "/completions") {
-		// OpenAI-compatible endpoint — supports streaming and all standard parameters.
 		return cfBase + "/ai/v1/chat/completions"
 	}
 
-	// All other modalities (embeddings, images, audio, etc.) use the universal
-	// /ai/run/{model} endpoint. The model value here is already the clean upstream
-	// ID (e.g. "@cf/baai/bge-base-en-v1.5") with the "cloudflare/" prefix stripped
-	// by the handler before calling RewriteURL.
+	// Embedding requests: route to the OpenAI-compatible embeddings endpoint.
+	// Both @cf/* embedding models and third-party embedding models are served here.
+	if strings.Contains(requestPath, "/embeddings") {
+		return cfBase + "/ai/v1/embeddings"
+	}
+
+	// All other modalities (images, audio, video) use the universal /ai/run/{model}
+	// endpoint. The model value here is the clean upstream ID with the "cloudflare/"
+	// routing prefix already stripped by the handler — e.g.:
+	//   "@cf/stabilityai/stable-diffusion-xl-base-1.0"  (native)
+	//   "openai/gpt-image-2"                            (third-party)
+	//   "krea/krea-2-large"                             (third-party)
 	return cfBase + "/ai/run/" + model
 }

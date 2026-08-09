@@ -12,6 +12,8 @@ import (
 	"github.com/skadraneshghn/clever-ai-gate/internal/config"
 	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
 	"github.com/skadraneshghn/clever-ai-gate/internal/health"
+	"github.com/skadraneshghn/clever-ai-gate/internal/jobs"
+	"github.com/skadraneshghn/clever-ai-gate/internal/jobs/ui"
 	"github.com/skadraneshghn/clever-ai-gate/internal/middleware"
 	"github.com/skadraneshghn/clever-ai-gate/internal/playground"
 	"github.com/skadraneshghn/clever-ai-gate/internal/proxy"
@@ -24,16 +26,19 @@ import (
 
 // Dependencies holds all the shared dependencies for route handlers.
 type Dependencies struct {
-	Config      *config.Config
-	DB          *pgxpool.Pool
-	Cache       *cache.Store
-	TenantCache *cache.RedisTenantCache // nil when Redis not configured
-	Redis       *redisclient.Client     // nil when Redis not configured
-	Vault       *credentials.Vault
-	Logger      *zap.Logger
-	Health      *health.Handler
-	Proxy       *proxy.Handler
-	LogHub      *telemetry.LogHub // non-blocking log broadcaster for the admin log viewer
+	Config        *config.Config
+	DB            *pgxpool.Pool
+	Cache         *cache.Store
+	TenantCache   *cache.RedisTenantCache    // nil when Redis not configured
+	Redis         *redisclient.Client        // nil when Redis not configured
+	RedisCacheMgr *cache.RedisCacheManager   // nil when Redis not configured; drives L2 cache
+	Vault         *credentials.Vault
+	Logger        *zap.Logger
+	Health        *health.Handler
+	Proxy         *proxy.Handler
+	LogHub                *telemetry.LogHub // non-blocking log broadcaster for the admin log viewer
+	Scheduler             *jobs.Scheduler  // nil when not initialized
+	HealthCheckBroadcaster chan jobs.HealthCheckSSEEvent // real-time SSE broadcaster for model health monitor
 }
 
 // NewEngine creates and configures the Gin engine with all routes.
@@ -188,18 +193,22 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		adminGroup.DELETE("/tenants/:id", tenantHandler.Delete)
 
 		// Model pool management
-		poolHandler := admin.NewPoolHandler(deps.DB, deps.Vault)
+		poolHandler := admin.NewPoolHandler(deps.DB, deps.Vault, deps.Scheduler, deps.RedisCacheMgr)
 		adminGroup.GET("/pools", poolHandler.List)
 		adminGroup.POST("/pools", poolHandler.Create)
+		// NOTE: static routes must be registered before Gin's parameterised :id patterns.
+		adminGroup.POST("/pools/bulk-test", poolHandler.BulkTest)
+		adminGroup.POST("/pools/bulk-delete", poolHandler.BulkDelete)
+		adminGroup.POST("/pools/bulk-activate", poolHandler.BulkActivate)
+		adminGroup.POST("/pools/purge-unhealthy", poolHandler.PurgeUnhealthyPools)
 		adminGroup.GET("/pools/:id", poolHandler.Get)
 		adminGroup.PUT("/pools/:id", poolHandler.Update)
 		adminGroup.DELETE("/pools/:id", poolHandler.Delete)
-		adminGroup.POST("/pools/bulk-delete", poolHandler.BulkDelete)
 		adminGroup.GET("/pools/:id/logs", poolHandler.GetLogs)
 		adminGroup.POST("/pools/:id/credentials/:cred_id/test", poolHandler.TestCredential)
 
 		// Credential management
-		credHandler := admin.NewCredentialHandler(deps.DB, deps.Vault)
+		credHandler := admin.NewCredentialHandler(deps.DB, deps.Vault, deps.Scheduler, deps.RedisCacheMgr)
 		adminGroup.GET("/credentials", credHandler.List)
 		adminGroup.POST("/credentials", credHandler.Create)
 		adminGroup.GET("/credentials/:id", credHandler.Get)
@@ -217,8 +226,12 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		adminGroup.POST("/providers/sarvam", credHandler.RegisterSarvamProvider)
 		adminGroup.POST("/providers/puter", credHandler.RegisterPuterProvider)
 		adminGroup.POST("/providers/agentrouter", credHandler.RegisterAgentRouterProvider)
-		// Re-run discovery for ALL existing provider keys → provisions clean alias pools
+		adminGroup.POST("/providers/zenmux", credHandler.RegisterZenMuxProvider)
+		adminGroup.POST("/providers/gemini", credHandler.RegisterGeminiProvider)
 		adminGroup.POST("/providers/refresh", credHandler.RefreshAllProviders)
+		// Re-discovery: async scan of all provider endpoints for new models
+		adminGroup.POST("/providers/rediscover", credHandler.TriggerReDiscovery)
+		adminGroup.GET("/providers/rediscover/status", credHandler.GetReDiscoveryStatus)
 
 		// Live log streaming and daily log file download
 		if deps.LogHub != nil {
@@ -230,6 +243,71 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		// Dashboard statistics & metrics
 		metricsCtrl := admin.NewMetricsController(deps.DB)
 		adminGroup.GET("/metrics", metricsCtrl.GetDashboardStats)
+
+		// Exhaustive Model Health Check & Real-time SSE Monitor
+		hcHandler := admin.NewHealthCheckHandler(deps.DB, deps.Logger, deps.HealthCheckBroadcaster)
+		adminGroup.POST("/health-check/trigger", hcHandler.TriggerHealthCheck)
+		adminGroup.GET("/health-check/stream", hcHandler.StreamHealthCheckSSE)
+		adminGroup.GET("/health-check/sessions", hcHandler.GetSessions)
+		adminGroup.GET("/health-check/sessions/:id", hcHandler.GetSessionDetails)
+
+		// Job scheduling system
+		if deps.Scheduler != nil {
+			jobHandler := admin.NewJobHandler(deps.DB, deps.Scheduler, deps.Logger)
+
+			// Job CRUD & lifecycle
+			adminGroup.GET("/jobs", jobHandler.ListJobs)
+			adminGroup.POST("/jobs", jobHandler.CreateJob)
+			adminGroup.GET("/jobs/runs", jobHandler.GetAllRuns)
+			adminGroup.GET("/jobs/:id", jobHandler.GetJob)
+			adminGroup.PUT("/jobs/:id", jobHandler.UpdateJob)
+			adminGroup.DELETE("/jobs/:id", jobHandler.DeleteJob)
+			adminGroup.POST("/jobs/:id/trigger", jobHandler.TriggerJob)
+			adminGroup.POST("/jobs/:id/pause", jobHandler.PauseJob)
+			adminGroup.POST("/jobs/:id/resume", jobHandler.ResumeJob)
+			adminGroup.GET("/jobs/:id/runs", jobHandler.GetJobRuns)
+			adminGroup.DELETE("/jobs/runs/:run_id", jobHandler.DeleteRun)
+
+			// Scheduler settings & operations
+			adminGroup.GET("/scheduler/settings", jobHandler.GetSchedulerSettings)
+			adminGroup.PUT("/scheduler/settings", jobHandler.UpdateSchedulerSettings)
+			adminGroup.GET("/scheduler/stats", jobHandler.GetSchedulerStats)
+			adminGroup.GET("/scheduler/types", jobHandler.GetRegisteredTypes)
+			adminGroup.POST("/scheduler/restart", jobHandler.RestartScheduler)
+		}
+	}
+
+	// --- Job Scheduler Admin UI (protected by HTTP Basic Auth) ---
+	if deps.Scheduler != nil {
+		jobsSubFS, err := fs.Sub(ui.DistFS, "dist")
+		if err != nil {
+			deps.Logger.Warn("failed to read embedded jobs UI", zap.Error(err))
+		} else {
+			jobsIndexContent, err := fs.ReadFile(jobsSubFS, "index.html")
+			if err != nil {
+				deps.Logger.Warn("failed to read jobs UI index.html", zap.Error(err))
+			} else {
+				jobsGroup := engine.Group("", middleware.PlaygroundBasicAuth(deps.Config.PlaygroundUser, deps.Config.PlaygroundPass))
+				jobsFileServer := http.StripPrefix("/jobs", http.FileServer(http.FS(jobsSubFS)))
+
+				jobsGroup.GET("/jobs", func(c *gin.Context) {
+					c.Data(200, "text/html; charset=utf-8", jobsIndexContent)
+				})
+				jobsGroup.GET("/jobs/*any", func(c *gin.Context) {
+					path := c.Param("any")
+					if path == "" || path == "/" {
+						c.Data(200, "text/html; charset=utf-8", jobsIndexContent)
+						return
+					}
+					lastSegment := path[strings.LastIndex(path, "/")+1:]
+					if strings.Contains(lastSegment, ".") {
+						jobsFileServer.ServeHTTP(c.Writer, c.Request)
+						return
+					}
+					c.Data(200, "text/html; charset=utf-8", jobsIndexContent)
+				})
+			}
+		}
 	}
 
 	return engine

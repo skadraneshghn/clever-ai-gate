@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { KeyRound, RefreshCw, Plus, Shield, AlertTriangle, Server, Pencil, Trash2, X } from '@lucide/svelte';
+  import { KeyRound, RefreshCw, Plus, Shield, AlertTriangle, Server, Pencil, Trash2, X, Search, Radar, ChevronDown, ChevronUp, CheckCircle, XCircle, Clock } from '@lucide/svelte';
   import { appState } from '$lib/state.svelte.js';
   import Button from '$lib/components/Button.svelte';
   import Input from '$lib/components/Input.svelte';
@@ -9,9 +9,46 @@
 
   // ─── Local State ──────────────────────────────────────────────────────────
   let providerCredentials = $state([]);
+  let totalCount = $state(0);
   let providerPools = $state([]);
   let providerLoading = $state(false);
+  let loadingMore = $state(false);
   let providerError = $state('');
+
+  // Pagination / lazy-loading
+  const PAGE_SIZE = 100;
+  let currentPage = $state(0);
+  let hasMore = $state(false);
+
+  // Filtering
+  let searchQuery = $state('');
+  let providerFilter = $state('');
+  let searchTimer = null;
+
+  // Virtualization
+  const ROW_HEIGHT = 45;
+  const OVERSCAN = 8;
+  let scrollTop = $state(0);
+  let viewportHeight = $state(0);
+  let vscrollEl;
+
+  let visibleRange = $derived.by(() => {
+    const loaded = providerCredentials.length;
+    if (loaded === 0 || viewportHeight === 0) {
+      return { start: 0, end: 0, padTop: 0, padBottom: 0 };
+    }
+    const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
+    const visibleCount = Math.ceil(viewportHeight / ROW_HEIGHT) + OVERSCAN * 2;
+    const end = Math.min(loaded, start + visibleCount);
+    return {
+      start,
+      end,
+      padTop: start * ROW_HEIGHT,
+      padBottom: (loaded - end) * ROW_HEIGHT
+    };
+  });
+
+  let visibleItems = $derived(providerCredentials.slice(visibleRange.start, visibleRange.end));
 
   // Add/Edit modals
   let showAddProviderModal = $state(false);
@@ -41,40 +78,104 @@
   // Refresh all providers
   let refreshLoading = $state(false);
 
+  // Re-discovery state
+  let rediscoveryStatus = $state({ status: 'IDLE' });
+  let isRediscovering = $state(false);
+  let showRediscoveryDetails = $state(false);
+  let parsedRediscoveryReport = $state(null);
+  let rediscoveryPollInterval = null;
+
   // ─── Load state on adminKey change ─────────────────────────────────────────
   $effect(() => {
     if (appState.adminKey.trim()) {
-      loadCredentials();
+      reloadCredentials();
       loadPools();
     }
   });
 
+  // Debounced search/filter → reload first page
+  function onSearchInput() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => reloadCredentials(), 300);
+  }
+
   // ─── API Helper Headers ───────────────────────────────────────────────────
   function adminHeaders() {
     return {
-      'Authorization': `Bearer ${appState.adminKey.trim()}`,
+      'Authorization': `Bearer ${appState.getAdminKey()}`,
       'Content-Type': 'application/json'
     };
   }
 
-  async function loadCredentials() {
+  async function loadCredentialsPage(page) {
+    try {
+      const params = new URLSearchParams();
+      params.append('limit', String(PAGE_SIZE));
+      params.append('offset', String(page * PAGE_SIZE));
+      if (searchQuery.trim()) params.append('search', searchQuery.trim());
+      if (providerFilter) params.append('provider', providerFilter);
+
+      const res = await fetch(`/api/v1/admin/credentials?${params.toString()}`, { headers: adminHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        const rows = data.data ?? data;
+        return { rows, total: data.total ?? rows.length };
+      }
+      const err = await res.json();
+      return { error: err.error || `Error ${res.status}` };
+    } catch (e) {
+      return { error: `Network error: ${e.message}` };
+    }
+  }
+
+  async function reloadCredentials() {
     providerLoading = true;
     providerError = '';
+    currentPage = 0;
     appState.apiLoading = true;
     try {
-      const res = await fetch('/api/v1/admin/credentials', { headers: adminHeaders() });
-      if (res.ok) {
-        providerCredentials = await res.json();
-        selectedIds = selectedIds.filter(id => providerCredentials.some(c => c.id === id));
+      const result = await loadCredentialsPage(0);
+      if (result.error) {
+        providerError = result.error;
       } else {
-        const err = await res.json();
-        providerError = err.error || `Error ${res.status}`;
+        providerCredentials = result.rows;
+        totalCount = result.total;
+        hasMore = result.rows.length < result.total;
+        selectedIds = selectedIds.filter(id => providerCredentials.some(c => c.id === id));
+        if (vscrollEl) vscrollEl.scrollTop = 0;
       }
-    } catch (e) {
-      providerError = `Network error: ${e.message}`;
     } finally {
       providerLoading = false;
       appState.apiLoading = false;
+    }
+  }
+
+  async function loadMore() {
+    if (loadingMore || !hasMore) return;
+    loadingMore = true;
+    appState.apiLoading = true;
+    const nextPage = currentPage + 1;
+    try {
+      const result = await loadCredentialsPage(nextPage);
+      if (result.error) {
+        appState.addToast('error', result.error);
+      } else {
+        providerCredentials = [...providerCredentials, ...result.rows];
+        currentPage = nextPage;
+        hasMore = providerCredentials.length < result.total;
+      }
+    } finally {
+      loadingMore = false;
+      appState.apiLoading = false;
+    }
+  }
+
+  function onVScroll(e) {
+    scrollTop = e.target.scrollTop;
+    // Trigger lazy load when near the bottom of the loaded list
+    const remaining = providerCredentials.length * ROW_HEIGHT - (scrollTop + viewportHeight);
+    if (hasMore && !loadingMore && remaining < ROW_HEIGHT * 10) {
+      loadMore();
     }
   }
 
@@ -118,7 +219,7 @@
       if (res.ok || res.status === 201) {
         appState.addToast('success', 'Credential created successfully');
         showAddProviderModal = false;
-        loadCredentials();
+        reloadCredentials();
       } else {
         const err = await res.json();
         appState.addToast('error', err.details || err.error || 'Failed to create credential');
@@ -151,6 +252,10 @@
       endpoint = '/api/v1/admin/providers/puter';
     } else if (autoDiscoverForm.provider === 'agentrouter') {
       endpoint = '/api/v1/admin/providers/agentrouter';
+    } else if (autoDiscoverForm.provider === 'zenmux') {
+      endpoint = '/api/v1/admin/providers/zenmux';
+    } else if (autoDiscoverForm.provider === 'gemini') {
+      endpoint = '/api/v1/admin/providers/gemini';
     } else {
       endpoint = '/api/v1/admin/providers/custom';
     }
@@ -188,10 +293,12 @@
           : autoDiscoverForm.provider === 'sarvam' ? 'Sarvam AI'
           : autoDiscoverForm.provider === 'puter' ? 'Puter.com'
           : autoDiscoverForm.provider === 'agentrouter' ? 'AgentRouter'
+          : autoDiscoverForm.provider === 'zenmux' ? 'ZenMux'
+          : autoDiscoverForm.provider === 'gemini' ? 'Google AI Studio (Gemini)'
           : autoDiscoverForm.provider.toUpperCase();
         appState.addToast('success', `Successfully synchronized ${data.models_count || 0} ${displayName} models`);
         showAddProviderModal = false;
-        loadCredentials();
+        reloadCredentials();
         if (appState.apiKey) appState.loadModels();
       } else {
         const err = await res.json();
@@ -235,7 +342,7 @@
       if (res.ok) {
         appState.addToast('success', 'Credential updated successfully');
         showEditModal = false;
-        loadCredentials();
+        reloadCredentials();
       } else {
         const err = await res.json();
         appState.addToast('error', err.details || err.error || 'Failed to update credential');
@@ -265,7 +372,7 @@
         appState.addToast('success', 'Credential deleted successfully');
         showDeleteConfirm = false;
         deleteTargetId = null;
-        loadCredentials();
+        reloadCredentials();
       } else {
         const err = await res.json();
         appState.addToast('error', err.details || err.error || 'Failed to delete credential');
@@ -298,7 +405,7 @@
         appState.addToast('success', `${selectedIds.length} credentials deleted successfully`);
         showBulkDeleteConfirm = false;
         selectedIds = [];
-        loadCredentials();
+        reloadCredentials();
         loadPools();
         if (appState.apiKey) appState.loadModels();
       } else {
@@ -325,6 +432,8 @@
       case 'sarvam': return 'badge-sarvam';
       case 'puter': return 'badge-puter';
       case 'agentrouter': return 'badge-agentrouter';
+      case 'zenmux': return 'badge-zenmux';
+      case 'gemini': return 'badge-gemini';
       case 'custom': return 'badge-custom';
       default: return 'badge-default';
     }
@@ -334,7 +443,7 @@
     const key = appState.adminKey.trim();
     if (!key) return;
     localStorage.setItem('cag_admin_key', key);
-    loadCredentials();
+    reloadCredentials();
     loadPools();
   }
 
@@ -349,7 +458,7 @@
       if (res.ok) {
         const data = await res.json();
         appState.addToast('success', data.message || `Re-synced ${data.models_count ?? 0} model pools`);
-        await loadCredentials();
+        await reloadCredentials();
         if (appState.apiKey) appState.loadModels();
       } else {
         const err = await res.json();
@@ -363,11 +472,100 @@
     }
   }
 
-  onMount(() => {
-    if (appState.adminKey.trim()) {
-      loadCredentials();
-      loadPools();
+  // ─── Re-Discovery Functions ────────────────────────────────────────────────
+  async function checkRediscoveryStatus() {
+    try {
+      const res = await fetch('/api/v1/admin/providers/rediscover/status', {
+        headers: adminHeaders()
+      });
+      if (res.ok) {
+        rediscoveryStatus = await res.json();
+        if (rediscoveryStatus.report) {
+          try {
+            parsedRediscoveryReport = typeof rediscoveryStatus.report === 'string'
+              ? JSON.parse(rediscoveryStatus.report)
+              : rediscoveryStatus.report;
+          } catch (e) {
+            parsedRediscoveryReport = null;
+          }
+        } else {
+          parsedRediscoveryReport = null;
+        }
+      }
+    } catch (e) {
+      console.error('Failed to check re-discovery status', e);
     }
+  }
+
+  async function runReDiscovery() {
+    isRediscovering = true;
+    showRediscoveryDetails = false;
+    parsedRediscoveryReport = null;
+    try {
+      const res = await fetch('/api/v1/admin/providers/rediscover', {
+        method: 'POST',
+        headers: adminHeaders()
+      });
+      if (res.ok) {
+        rediscoveryStatus = { status: 'RUNNING' };
+        // Start polling for status updates
+        rediscoveryPollInterval = setInterval(async () => {
+          await checkRediscoveryStatus();
+          if (rediscoveryStatus.status !== 'RUNNING' && rediscoveryStatus.status !== 'PENDING') {
+            clearInterval(rediscoveryPollInterval);
+            rediscoveryPollInterval = null;
+            isRediscovering = false;
+            // Reload credentials to reflect any new models
+            await reloadCredentials();
+            if (appState.apiKey) appState.loadModels();
+          }
+        }, 2000);
+      } else if (res.status === 409) {
+        appState.addToast('warning', 'Re-discovery is already running. Please wait for it to complete.');
+        isRediscovering = false;
+      } else {
+        const err = await res.json();
+        appState.addToast('error', err.details || err.error || 'Failed to start re-discovery');
+        isRediscovering = false;
+      }
+    } catch (e) {
+      appState.addToast('error', `Network error: ${e.message}`);
+      isRediscovering = false;
+    }
+  }
+
+  function dismissRediscoveryBanner() {
+    rediscoveryStatus = { status: 'IDLE' };
+    parsedRediscoveryReport = null;
+    showRediscoveryDetails = false;
+  }
+
+  function formatDuration(ms) {
+    if (!ms) return '—';
+    if (ms < 1000) return `${ms}ms`;
+    const secs = Math.floor(ms / 1000);
+    if (secs < 60) return `${secs}s`;
+    return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  }
+
+  $effect(() => {
+    const key = appState.getAdminKey();
+    if (key && providerCredentials.length === 0 && !providerLoading) {
+      reloadCredentials();
+      loadPools();
+      checkRediscoveryStatus();
+    }
+  });
+
+  onMount(() => {
+    if (appState.getAdminKey()) {
+      reloadCredentials();
+      loadPools();
+      checkRediscoveryStatus();
+    }
+    return () => {
+      if (rediscoveryPollInterval) clearInterval(rediscoveryPollInterval);
+    };
   });
 </script>
 
@@ -376,7 +574,7 @@
     <KeyRound size={20} class="text-[#f97316]" />
     <span class="font-bold text-base">Provider Credentials</span>
     {#if appState.adminKey.trim()}
-      <span class="text-xs font-bold text-secondary bg-gray-500/10 border border-gray-500/20 px-2.5 py-0.5 rounded-full uppercase">{providerCredentials.length} registered</span>
+      <span class="text-xs font-bold text-secondary bg-gray-500/10 border border-gray-500/20 px-2.5 py-0.5 rounded-full uppercase">{totalCount} registered</span>
     {/if}
   </div>
   
@@ -391,6 +589,16 @@
       <Button variant="secondary" size="sm" onclick={refreshAllProviders} disabled={refreshLoading} title="Re-run discovery for all stored provider keys and provision any missing alias pools">
         <RefreshCw size={14} class={refreshLoading ? 'animate-spin' : ''} />
         {refreshLoading ? 'Refreshing...' : 'Refresh'}
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        onclick={runReDiscovery}
+        disabled={isRediscovering || rediscoveryStatus.status === 'RUNNING'}
+        title="Scan all provider endpoints for newly available models and auto-register them"
+      >
+        <Radar size={14} class={isRediscovering || rediscoveryStatus.status === 'RUNNING' ? 'animate-spin' : ''} />
+        <span>{isRediscovering || rediscoveryStatus.status === 'RUNNING' ? 'Scanning...' : 'Re-Discover Models'}</span>
       </Button>
       <Button variant="primary" size="sm" onclick={openAddProviderModal}>
         <Plus size={14} />
@@ -426,21 +634,208 @@
     </Card>
   </div>
 {:else}
-  <!-- Providers data grid -->
-  <div class="providers-grid-wrap flex-grow overflow-auto p-6">
+  <!-- Providers data grid (virtualized + lazy-loaded) -->
+  <div class="providers-grid-wrap flex flex-col flex-grow overflow-hidden">
+
+    <!-- ─── Re-Discovery Status Banner ──────────────────────────────────────── -->
+    {#if rediscoveryStatus.status === 'RUNNING' || rediscoveryStatus.status === 'PENDING'}
+      <div class="rediscovery-banner running">
+        <div class="flex items-center gap-3">
+          <div class="rediscovery-spinner"></div>
+          <div>
+            <p class="font-semibold text-sm">Scanning all provider endpoints for new models...</p>
+            <p class="text-xs opacity-70 mt-0.5">This may take a minute depending on the number of providers.</p>
+          </div>
+        </div>
+      </div>
+    {:else if rediscoveryStatus.status === 'SUCCESS' && parsedRediscoveryReport}
+      <div class="rediscovery-banner success">
+        <div class="flex items-center justify-between w-full">
+          <div class="flex items-center gap-2.5">
+            <CheckCircle size={18} class="text-emerald-500 shrink-0" />
+            <div>
+              {#if parsedRediscoveryReport.new_models_added > 0}
+                <span class="font-semibold text-sm">
+                  Re-Discovery complete: Found and auto-registered {parsedRediscoveryReport.new_models_added} new model{parsedRediscoveryReport.new_models_added !== 1 ? 's' : ''}!
+                </span>
+              {:else}
+                <span class="font-semibold text-sm">All models are up to date — no new models found.</span>
+              {/if}
+              <span class="text-xs opacity-60 ml-2">
+                {parsedRediscoveryReport.successful_endpoints}/{parsedRediscoveryReport.total_endpoints_scanned} endpoints scanned
+                · {formatDuration(parsedRediscoveryReport.duration_ms)}
+              </span>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            {#if parsedRediscoveryReport.new_models_added > 0 || parsedRediscoveryReport.provider_breakdown?.length > 0}
+              <button 
+                onclick={() => showRediscoveryDetails = !showRediscoveryDetails}
+                class="rediscovery-details-toggle"
+              >
+                {showRediscoveryDetails ? 'Hide Details' : 'View Details'}
+                {#if showRediscoveryDetails}
+                  <ChevronUp size={14} />
+                {:else}
+                  <ChevronDown size={14} />
+                {/if}
+              </button>
+            {/if}
+            <button onclick={dismissRediscoveryBanner} class="rediscovery-dismiss" title="Dismiss">
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+
+        {#if showRediscoveryDetails}
+          <div class="rediscovery-details">
+            {#if parsedRediscoveryReport.new_models?.length > 0}
+              <div class="rediscovery-section">
+                <h4 class="rediscovery-section-title">
+                  <CheckCircle size={13} class="text-emerald-500" />
+                  New Models Registered ({parsedRediscoveryReport.new_models.length})
+                </h4>
+                <div class="rediscovery-model-list">
+                  {#each parsedRediscoveryReport.new_models as model}
+                    <span class="rediscovery-model-tag new">{model}</span>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+
+            {#if parsedRediscoveryReport.provider_breakdown?.length > 0}
+              <div class="rediscovery-section">
+                <h4 class="rediscovery-section-title">
+                  <Server size={13} />
+                  Provider Breakdown
+                </h4>
+                <div class="rediscovery-provider-list">
+                  {#each parsedRediscoveryReport.provider_breakdown as scan}
+                    <div class="rediscovery-provider-row">
+                      <div class="flex items-center gap-2">
+                        {#if scan.status === 'success'}
+                          <CheckCircle size={13} class="text-emerald-500 shrink-0" />
+                        {:else}
+                          <XCircle size={13} class="text-red-400 shrink-0" />
+                        {/if}
+                        <span class="provider-badge {providerBadgeClass(scan.provider)}" style="font-size: 10px;">{scan.provider}</span>
+                        <span class="text-xs opacity-60 truncate" style="max-width: 200px;" title={scan.base_url}>{scan.base_url}</span>
+                      </div>
+                      <div class="flex items-center gap-3 text-xs">
+                        {#if scan.status === 'success'}
+                          <span class="opacity-70">{scan.models_synced} models synced</span>
+                          {#if scan.new_models?.length > 0}
+                            <span class="font-semibold text-emerald-600">+{scan.new_models.length} new</span>
+                          {/if}
+                        {:else}
+                          <span class="text-red-400 truncate" style="max-width: 250px;" title={scan.error}>{scan.error}</span>
+                        {/if}
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+
+            {#if parsedRediscoveryReport.errors?.length > 0}
+              <div class="rediscovery-section">
+                <h4 class="rediscovery-section-title text-red-400">
+                  <AlertTriangle size={13} />
+                  Errors ({parsedRediscoveryReport.errors.length})
+                </h4>
+                <ul class="rediscovery-error-list">
+                  {#each parsedRediscoveryReport.errors as err}
+                    <li>{err}</li>
+                  {/each}
+                </ul>
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </div>
+    {:else if rediscoveryStatus.status === 'FAILED'}
+      <div class="rediscovery-banner error">
+        <div class="flex items-center justify-between w-full">
+          <div class="flex items-center gap-2.5">
+            <XCircle size={18} class="text-red-400 shrink-0" />
+            <div>
+              <span class="font-semibold text-sm">Re-discovery scan failed</span>
+              {#if rediscoveryStatus.error}
+                <span class="text-xs opacity-70 ml-2">{rediscoveryStatus.error}</span>
+              {/if}
+            </div>
+          </div>
+          <button onclick={dismissRediscoveryBanner} class="rediscovery-dismiss" title="Dismiss">
+            <X size={14} />
+          </button>
+        </div>
+      </div>
+    {/if}
+    <!-- Filter / search toolbar -->
+    <div class="flex flex-col border-b shrink-0 bg-[var(--card-bg)] shadow-sm">
+      <div class="flex items-center gap-3 px-6 py-4 flex-wrap">
+        <div class="relative flex items-center flex-grow max-w-md">
+          <div class="absolute left-3.5 inset-y-0 flex items-center pointer-events-none z-10 text-secondary opacity-70">
+            <Search size={16} />
+          </div>
+          <input
+            type="text"
+            class="filter-search-input"
+            placeholder="Search provider, URL, model..."
+            bind:value={searchQuery}
+            oninput={onSearchInput}
+          />
+        </div>
+
+        <select class="filter-select max-w-[200px]" bind:value={providerFilter} onchange={onSearchInput}>
+          <option value="">All providers</option>
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="nvidia">NVIDIA</option>
+          <option value="ollama">Ollama</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="1minai">1min.ai</option>
+          <option value="cloudflare">Cloudflare</option>
+          <option value="sarvam">Sarvam AI</option>
+          <option value="puter">Puter</option>
+          <option value="zenmux">ZenMux</option>
+          <option value="gemini">Gemini</option>
+          <option value="custom">Custom</option>
+        </select>
+
+        {#if searchQuery || providerFilter}
+          <Button 
+            variant="ghost" 
+            size="sm" 
+            onclick={() => { searchQuery = ''; providerFilter = ''; onSearchInput(); }}
+            class="text-xs text-red-500 hover:text-red-600 font-semibold px-3 h-[42px]"
+          >
+            Clear Filters
+          </Button>
+        {/if}
+
+        <span class="text-xs text-secondary font-medium ml-auto">
+          {#if totalCount > 0}
+            Showing {providerCredentials.length} of {totalCount}
+            {#if loadingMore}<span class="opacity-60"> · loading more…</span>{/if}
+          {/if}
+        </span>
+      </div>
+    </div>
+
     {#if providerLoading}
-      <div class="providers-loading flex flex-col items-center justify-center h-64">
+      <div class="providers-loading flex flex-col items-center justify-center flex-grow">
         <div class="animate-spin text-[#f97316] text-xl">⟳</div>
         <p class="text-sm mt-2 text-secondary">Loading credentials...</p>
       </div>
     {:else if providerError}
-      <div class="providers-loading flex flex-col items-center justify-center h-64">
+      <div class="providers-loading flex flex-col items-center justify-center flex-grow">
         <AlertTriangle size={40} class="text-red-500 mb-2" />
         <p class="text-red-500 text-sm font-semibold">{providerError}</p>
-        <Button variant="primary" class="mt-4" onclick={loadCredentials}>Retry</Button>
+        <Button variant="primary" class="mt-4" onclick={reloadCredentials}>Retry</Button>
       </div>
     {:else if providerCredentials.length === 0}
-      <div class="providers-loading flex flex-col items-center justify-center h-64">
+      <div class="providers-loading flex flex-col items-center justify-center flex-grow">
         <Server size={48} class="opacity-20 mb-4" />
         <p class="opacity-50 text-sm text-secondary">No credentials registered yet.</p>
         <Button variant="primary" class="mt-4" onclick={openAddProviderModal}>
@@ -448,14 +843,16 @@
         </Button>
       </div>
     {:else}
-      <div class="providers-table-container">
-        <table class="providers-table">
-          <thead>
-            <tr>
-              <th style="width: 40px; text-align: center;">
+      <!-- Virtualized table -->
+      <div class="providers-table-container flex flex-col flex-grow overflow-hidden">
+        <!-- Fixed header -->
+        <div class="providers-table-header">
+          <div class="providers-table-row providers-table-headrow">
+            <div style="width: 40px; display: flex; align-items: center; justify-content: center;">
+              <label class="ios-checkbox-wrapper" title="Select all credentials">
                 <input
                   type="checkbox"
-                  class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
+                  class="ios-checkbox-input"
                   checked={selectedIds.length === providerCredentials.length && providerCredentials.length > 0}
                   onchange={(e) => {
                     if (e.target.checked) {
@@ -465,53 +862,72 @@
                     }
                   }}
                 />
-              </th>
-              <th style="font-size: 11px;">ID</th>
-              <th style="font-size: 11px;">Provider</th>
-              <th style="font-size: 11px;">Model Pattern</th>
-              <th style="font-size: 11px;">Base URL</th>
-              <th style="font-size: 11px; text-align: center;">Weight</th>
-              <th style="font-size: 11px; text-align: center;">Health</th>
-              <th style="font-size: 11px;">Key</th>
-              <th style="font-size: 11px; text-align: center;">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each providerCredentials as cred (cred.id)}
-              <tr class="provider-row">
-                <td style="text-align: center; width: 40px;">
-                  <input
-                    type="checkbox"
-                    class="log-checkbox w-4 h-4 rounded border-gray-300 accent-orange-500 cursor-pointer"
-                    value={cred.id}
-                    bind:group={selectedIds}
-                  />
-                </td>
-                <td class="font-mono text-xs opacity-60">#{cred.id}</td>
-                <td>
-                  <span class="provider-badge {providerBadgeClass(cred.provider)}">{cred.provider}</span>
-                </td>
-                <td class="font-mono text-sm">{cred.model_pattern || '—'}</td>
-                <td class="text-sm truncate" style="max-width: 250px;" title={cred.base_url}>{cred.base_url}</td>
-                <td class="text-center font-mono text-sm">{cred.weight}</td>
-                <td class="text-center">
-                  <span class="health-dot {cred.is_healthy ? 'healthy' : 'unhealthy'}" title={cred.is_healthy ? 'Healthy' : (cred.last_error || 'Unhealthy')}></span>
-                </td>
-                <td class="font-mono text-xs opacity-50">{cred.key_mask}</td>
-                <td>
-                  <div class="flex items-center justify-center gap-1">
-                    <Button variant="ghost" size="sm" onclick={() => openEditModal(cred)} title="Edit credential">
-                      <Pencil size={15} />
-                    </Button>
-                    <Button variant="ghost" size="sm" onclick={() => confirmDelete(cred.id)} title="Delete credential">
-                      <Trash2 size={15} class="text-red-500" />
-                    </Button>
+                <span class="ios-checkbox-box"></span>
+              </label>
+            </div>
+            <div style="font-size: 11px;">ID</div>
+            <div style="font-size: 11px;">Provider</div>
+            <div style="font-size: 11px;">Model Pattern</div>
+            <div style="font-size: 11px;">Base URL</div>
+            <div style="font-size: 11px; text-align: center;">Weight</div>
+            <div style="font-size: 11px; text-align: center;">Health</div>
+            <div style="font-size: 11px;">Key</div>
+            <div style="font-size: 11px; text-align: center;">Actions</div>
+          </div>
+        </div>
+        <!-- Virtualized scroll body -->
+        <div
+          class="providers-table-body"
+          bind:this={vscrollEl}
+          bind:clientHeight={viewportHeight}
+          onscroll={onVScroll}
+        >
+          <div style="height: {providerCredentials.length * ROW_HEIGHT}px; position: relative;">
+            <div style="position: absolute; top: {visibleRange.padTop}px; left: 0; right: 0;">
+              {#each visibleItems as cred, i (cred.id)}
+                <div class="providers-table-row provider-row" style="height: {ROW_HEIGHT}px;">
+                  <div style="width: 40px; display: flex; align-items: center; justify-content: center;">
+                    <label class="ios-checkbox-wrapper">
+                      <input
+                        type="checkbox"
+                        class="ios-checkbox-input"
+                        value={cred.id}
+                        bind:group={selectedIds}
+                      />
+                      <span class="ios-checkbox-box"></span>
+                    </label>
                   </div>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+                  <div class="font-mono text-xs opacity-60">#{cred.id}</div>
+                  <div>
+                    <span class="provider-badge {providerBadgeClass(cred.provider)}">{cred.provider}</span>
+                  </div>
+                  <div class="font-mono text-sm">{cred.model_pattern || '—'}</div>
+                  <div class="text-sm truncate" style="max-width: 250px;" title={cred.base_url}>{cred.base_url}</div>
+                  <div class="text-center font-mono text-sm">{cred.weight}</div>
+                  <div class="text-center">
+                    <span class="health-dot {cred.is_healthy ? 'healthy' : 'unhealthy'}" title={cred.is_healthy ? 'Healthy' : (cred.last_error || 'Unhealthy')}></span>
+                  </div>
+                  <div class="font-mono text-xs opacity-50">{cred.key_mask}</div>
+                  <div>
+                    <div class="flex items-center justify-center gap-1">
+                      <Button variant="ghost" size="sm" onclick={() => openEditModal(cred)} title="Edit credential">
+                        <Pencil size={15} />
+                      </Button>
+                      <Button variant="ghost" size="sm" onclick={() => confirmDelete(cred.id)} title="Delete credential">
+                        <Trash2 size={15} class="text-red-500" />
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+          {#if loadingMore}
+            <div class="flex items-center justify-center py-3 text-secondary text-sm">
+              <span class="animate-spin mr-2">⟳</span> Loading more...
+            </div>
+          {/if}
+        </div>
       </div>
     {/if}
   </div>
@@ -557,6 +973,8 @@
         <option value="sarvam">Sarvam AI</option>
         <option value="puter">Puter.com</option>
         <option value="agentrouter">AgentRouter.org</option>
+        <option value="zenmux">ZenMux</option>
+        <option value="gemini">Google AI Studio (Gemini)</option>
         <option value="google">Google</option>
         <option value="custom">Custom</option>
       </Input>
@@ -588,6 +1006,10 @@
           autoDiscoverForm.base_url = 'https://api.puter.com/puterai/openai/v1';
         } else if (autoDiscoverForm.provider === 'agentrouter') {
           autoDiscoverForm.base_url = 'https://agentrouter.org/v1';
+        } else if (autoDiscoverForm.provider === 'zenmux') {
+          autoDiscoverForm.base_url = 'https://zenmux.ai/api/v1';
+        } else if (autoDiscoverForm.provider === 'gemini') {
+          autoDiscoverForm.base_url = 'https://generativelanguage.googleapis.com';
         } else {
           autoDiscoverForm.base_url = '';
         }
@@ -604,6 +1026,8 @@
         <option value="sarvam">Sarvam AI</option>
         <option value="puter">Puter.com</option>
         <option value="agentrouter">AgentRouter.org</option>
+        <option value="zenmux">ZenMux</option>
+        <option value="gemini">Google AI Studio (Gemini)</option>
         <option value="custom">OpenAI-Compatible (Custom)</option>
       </Input>
 
@@ -643,8 +1067,23 @@
         </div>
       {/if}
 
+      {#if autoDiscoverForm.provider === 'zenmux'}
+        <div class="rounded-lg border border-purple-500/20 bg-purple-500/5 px-4 py-3 text-xs text-purple-400 leading-relaxed">
+          🌐 <strong>ZenMux</strong> is an enterprise-grade AI model aggregator. Enter your API Key to auto-discover all aggregated models. Get your key at <a href="https://zenmux.ai" target="_blank" rel="noopener noreferrer" class="underline">zenmux.ai</a>.
+        </div>
+      {/if}
+
+      {#if autoDiscoverForm.provider === 'gemini'}
+        <div class="rounded-lg border border-cyan-500/20 bg-cyan-500/5 px-4 py-3 text-xs text-cyan-400 leading-relaxed">
+          ✨ <strong>Google AI Studio (Gemini)</strong> provides high-performance reasoning and multimodal models. Enter your Gemini API key (starts with <code>AIzaSy</code>) to discover and register all available models under both <code>gemini/&lt;model_id&gt;</code> and clean aliases. Get your API key at <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer" class="underline">aistudio.google.com</a>.
+        </div>
+      {/if}
+
       {#if autoDiscoverForm.provider === 'custom'}
-        <Input type="text" label="Label (optional)" placeholder="e.g. Together AI, DeepInfra" bind:value={autoDiscoverForm.label} />
+        <Input type="text" label="Label (namespace prefix)" placeholder="e.g. huggingface, together, deepinfra" bind:value={autoDiscoverForm.label} />
+        <div class="rounded-lg border border-[#f97316]/20 bg-[#f97316]/5 px-4 py-3 text-xs text-[#fb923c] leading-relaxed">
+          🏷️ The label namespaces every discovered model as <code>&lt;label&gt;/&lt;model&gt;</code> (e.g. <code>huggingface/meta-llama/Llama-3</code>). This keeps models from different providers in separate pools. The clean name (without the prefix) is also registered so strict clients still work. Requests to <code>&lt;label&gt;/...</code> automatically strip the prefix before hitting the upstream API.
+        </div>
       {/if}
 
       {#if autoDiscoverForm.provider === 'cloudflare'}
@@ -673,12 +1112,14 @@
             autoDiscoverForm.provider === 'sarvam' ? 'Sarvam API key (api-subscription-key)...' :
             autoDiscoverForm.provider === 'puter' ? 'Puter Auth Token...' :
             autoDiscoverForm.provider === 'agentrouter' ? 'AgentRouter API key (sk-...)...' :
+            autoDiscoverForm.provider === 'zenmux' ? 'ZenMux API Key...' :
+            autoDiscoverForm.provider === 'gemini' ? 'Google AI Studio API Key (AIzaSy...)...' :
             'Bearer API key...'
           } 
           bind:value={autoDiscoverForm.api_key} 
         />
         
-        {#if autoDiscoverForm.provider !== 'openrouter' && autoDiscoverForm.provider !== '1minai' && autoDiscoverForm.provider !== 'sarvam' && autoDiscoverForm.provider !== 'puter' && autoDiscoverForm.provider !== 'agentrouter'}
+        {#if autoDiscoverForm.provider !== 'openrouter' && autoDiscoverForm.provider !== '1minai' && autoDiscoverForm.provider !== 'sarvam' && autoDiscoverForm.provider !== 'puter' && autoDiscoverForm.provider !== 'agentrouter' && autoDiscoverForm.provider !== 'zenmux' && autoDiscoverForm.provider !== 'gemini'}
           <Input type="text" label="Base URL" placeholder={autoDiscoverForm.provider === 'custom' ? 'https://api.together.xyz/v1' : ''} bind:value={autoDiscoverForm.base_url} />
         {/if}
       {/if}
@@ -725,6 +1166,8 @@
       <option value="sarvam">Sarvam AI</option>
       <option value="puter">Puter.com</option>
       <option value="agentrouter">AgentRouter.org</option>
+      <option value="zenmux">ZenMux</option>
+      <option value="gemini">Google AI Studio (Gemini)</option>
       <option value="google">Google</option>
       <option value="custom">Custom</option>
     </Input>
@@ -825,6 +1268,52 @@
     border-bottom: 2px solid #f97316;
   }
 
+  /* ─── Virtualized table ─── */
+  .providers-table-header {
+    flex-shrink: 0;
+    overflow-x: auto;
+    background-color: var(--card-bg);
+    border-bottom: 2px solid var(--border-color);
+  }
+  .providers-table-body {
+    flex-grow: 1;
+    overflow-y: auto;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .providers-table-row {
+    display: grid;
+    grid-template-columns: 40px 70px 130px 1fr 1.4fr 70px 70px 130px 110px;
+    align-items: center;
+    min-width: 900px;
+  }
+  .providers-table-headrow {
+    padding: 0;
+  }
+  .providers-table-headrow > div {
+    padding: 12px 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 700;
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+  .providers-table-row.provider-row {
+    border-bottom: 1px solid var(--border-color);
+    transition: background-color 0.15s;
+    background-color: var(--card-bg);
+  }
+  .providers-table-row.provider-row:hover {
+    background-color: var(--item-hover);
+  }
+  .providers-table-row.provider-row > div {
+    padding: 12px 16px;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   /* OpenRouter brand badge — indigo tone matching openrouter.ai visual identity */
   :global(.badge-openrouter) {
     background: rgba(99, 102, 241, 0.12);
@@ -865,5 +1354,219 @@
     background: rgba(20, 184, 166, 0.12);
     color: #2dd4bf;
     border: 1px solid rgba(20, 184, 166, 0.25);
+  }
+
+  /* ZenMux brand badge — purple/violet tone */
+  :global(.badge-zenmux) {
+    background: rgba(167, 139, 250, 0.12);
+    color: #a78bfa;
+    border: 1px solid rgba(167, 139, 250, 0.25);
+  }
+
+  /* Gemini brand badge — cyan/blue tone matching Google AI visual identity */
+  :global(.badge-gemini) {
+    background: rgba(6, 182, 212, 0.12);
+    color: #22d3ee;
+    border: 1px solid rgba(6, 182, 212, 0.25);
+  }
+
+  /* ─── Re-Discovery Button ─── */
+  .rediscover-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    background: linear-gradient(135deg, #f97316 0%, #ea580c 50%, #dc2626 100%);
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    box-shadow: 0 2px 8px rgba(249, 115, 22, 0.3);
+    white-space: nowrap;
+  }
+  .rediscover-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 16px rgba(249, 115, 22, 0.45);
+    filter: brightness(1.08);
+  }
+  .rediscover-btn:active:not(:disabled) {
+    transform: translateY(0);
+  }
+  .rediscover-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+
+  /* ─── Re-Discovery Status Banner ─── */
+  .rediscovery-banner {
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
+    animation: bannerSlideIn 0.3s ease;
+  }
+  .rediscovery-banner.running {
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.08) 0%, rgba(99, 102, 241, 0.06) 100%);
+    border-left: 3px solid #3b82f6;
+  }
+  .rediscovery-banner.success {
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.06) 0%, rgba(5, 150, 105, 0.04) 100%);
+    border-left: 3px solid #10b981;
+  }
+  .rediscovery-banner.error {
+    background: linear-gradient(135deg, rgba(239, 68, 68, 0.06) 0%, rgba(220, 38, 38, 0.04) 100%);
+    border-left: 3px solid #ef4444;
+  }
+
+  @keyframes bannerSlideIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Spinner for the running state */
+  .rediscovery-spinner {
+    width: 18px;
+    height: 18px;
+    border: 2.5px solid rgba(59, 130, 246, 0.2);
+    border-top-color: #3b82f6;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  /* View Details toggle */
+  .rediscovery-details-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #10b981;
+    background: rgba(16, 185, 129, 0.08);
+    border: 1px solid rgba(16, 185, 129, 0.2);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .rediscovery-details-toggle:hover {
+    background: rgba(16, 185, 129, 0.14);
+    border-color: rgba(16, 185, 129, 0.35);
+  }
+
+  /* Dismiss button */
+  .rediscovery-dismiss {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border: none;
+    background: transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--text-secondary);
+    opacity: 0.5;
+    transition: all 0.15s;
+  }
+  .rediscovery-dismiss:hover {
+    opacity: 1;
+    background: rgba(0,0,0,0.06);
+  }
+
+  /* Expandable details panel */
+  .rediscovery-details {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(16, 185, 129, 0.15);
+    max-height: 350px;
+    overflow-y: auto;
+    animation: detailsExpand 0.25s ease;
+  }
+  @keyframes detailsExpand {
+    from { opacity: 0; max-height: 0; }
+    to   { opacity: 1; max-height: 350px; }
+  }
+
+  .rediscovery-section {
+    margin-bottom: 12px;
+  }
+  .rediscovery-section:last-child {
+    margin-bottom: 0;
+  }
+  .rediscovery-section-title {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+  }
+
+  /* New model tags */
+  .rediscovery-model-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+  .rediscovery-model-tag {
+    display: inline-block;
+    padding: 3px 8px;
+    font-size: 11px;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-weight: 500;
+    border-radius: 5px;
+    white-space: nowrap;
+  }
+  .rediscovery-model-tag.new {
+    background: rgba(16, 185, 129, 0.1);
+    color: #059669;
+    border: 1px solid rgba(16, 185, 129, 0.25);
+  }
+
+  /* Provider breakdown list */
+  .rediscovery-provider-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .rediscovery-provider-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.02);
+    border: 1px solid var(--border-color);
+    transition: background 0.15s;
+  }
+  .rediscovery-provider-row:hover {
+    background: rgba(0, 0, 0, 0.04);
+  }
+
+  /* Error list */
+  .rediscovery-error-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .rediscovery-error-list li {
+    font-size: 11px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    color: #f87171;
+    padding: 4px 8px;
+    border-left: 2px solid rgba(239, 68, 68, 0.3);
+    margin-bottom: 3px;
+    word-break: break-word;
   }
 </style>

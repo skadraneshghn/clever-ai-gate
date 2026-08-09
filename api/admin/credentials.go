@@ -9,32 +9,91 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/skadraneshghn/clever-ai-gate/api/dto"
+	"github.com/skadraneshghn/clever-ai-gate/internal/cache"
 	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
 	"github.com/skadraneshghn/clever-ai-gate/internal/database"
+	"github.com/skadraneshghn/clever-ai-gate/internal/jobs"
 )
 
 // CredentialHandler provides CRUD operations for provider credentials.
 type CredentialHandler struct {
-	db    *pgxpool.Pool
-	vault *credentials.Vault
+	db            *pgxpool.Pool
+	vault         *credentials.Vault
+	scheduler     *jobs.Scheduler
+	redisCacheMgr *cache.RedisCacheManager // nil-safe; invalidates on every mutation
 }
 
 // NewCredentialHandler creates a new credential handler.
-func NewCredentialHandler(db *pgxpool.Pool, vault *credentials.Vault) *CredentialHandler {
-	return &CredentialHandler{db: db, vault: vault}
+func NewCredentialHandler(db *pgxpool.Pool, vault *credentials.Vault, scheduler *jobs.Scheduler, redisCacheMgr *cache.RedisCacheManager) *CredentialHandler {
+	return &CredentialHandler{db: db, vault: vault, scheduler: scheduler, redisCacheMgr: redisCacheMgr}
 }
 
-// List returns all provider credentials with masked keys.
+// List returns provider credentials with masked keys.
+//
+// When the `limit` query parameter is supplied the endpoint responds with a
+// paginated envelope ({data, total, limit, offset}) supporting server-side
+// pagination, filtering (`provider`, `search`) and virtualized rendering.
+// When `limit` is omitted the endpoint preserves the legacy behaviour of
+// returning the full flat array of credentials (backward compatibility).
+//
 // @Summary      List credentials
-// @Description  Returns all provider credentials across all pools with masked API keys
+// @Description  Returns provider credentials across all pools with masked API keys. Supports optional pagination via limit/offset and filtering via provider/search.
 // @Tags         Credentials
 // @Produce      json
 // @Security     BearerAuth
+// @Param        limit     query  int     false  "Page size (enables paginated envelope when present)"  example(100)
+// @Param        offset    query  int     false  "Page offset"                                          example(0)
+// @Param        provider  query  string  false  "Exact provider filter"                                example(openai)
+// @Param        search    query  string  false  "Case-insensitive search across provider/base_url/model_pattern"  example(openai)
 // @Success      200  {array}   dto.CredentialResponse
 // @Failure      500  {object}  dto.ErrorResponse
 // @Router       /api/v1/admin/credentials [get]
 func (h *CredentialHandler) List(c *gin.Context) {
-	creds, err := database.ListAllCredentials(c.Request.Context(), h.db)
+	limitStr := c.Query("limit")
+
+	// Legacy path: no pagination requested -> return the full flat list.
+	if limitStr == "" {
+		creds, err := database.ListAllCredentials(c.Request.Context(), h.db)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to list credentials", Details: err.Error()})
+			return
+		}
+
+		resp := make([]dto.CredentialResponse, len(creds))
+		for i, cr := range creds {
+			resp[i] = dto.CredentialResponse{
+				ID:           cr.ID,
+				PoolID:       cr.PoolID,
+				Provider:     cr.Provider,
+				BaseURL:      cr.BaseURL,
+				Weight:       cr.Weight,
+				IsHealthy:    cr.IsHealthy,
+				LastError:    cr.LastError,
+				KeyMask:      dto.MaskAPIKey(cr.EncryptedKey),
+				ModelPattern: cr.ModelPattern,
+				Prefix:       cr.Prefix,
+				CreatedAt:    cr.CreatedAt,
+			}
+		}
+		c.JSON(http.StatusOK, resp)
+		return
+	}
+
+	// Paginated path.
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		limit = 100
+	}
+	offset := 0
+	if offStr := c.Query("offset"); offStr != "" {
+		if v, err := strconv.Atoi(offStr); err == nil && v >= 0 {
+			offset = v
+		}
+	}
+	search := c.Query("search")
+	provider := c.Query("provider")
+
+	creds, total, err := database.ListCredentialsPaginated(c.Request.Context(), h.db, limit, offset, search, provider)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to list credentials", Details: err.Error()})
 		return
@@ -57,7 +116,12 @@ func (h *CredentialHandler) List(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusOK, dto.PaginatedCredentialsResponse{
+		Data:   resp,
+		Total:  total,
+		Limit:  limit,
+		Offset: offset,
+	})
 }
 
 // Create adds a new provider credential to a pool.
@@ -106,6 +170,9 @@ func (h *CredentialHandler) Create(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to create credential", Details: err.Error()})
 		return
 	}
+
+	// Invalidate Redis cache so all cluster nodes pick up the new credential.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
 
 	c.JSON(http.StatusCreated, dto.CredentialResponse{
 		ID:        id,
@@ -211,6 +278,9 @@ func (h *CredentialHandler) Update(c *gin.Context) {
 		return
 	}
 
+	// Invalidate Redis cache so all cluster nodes see updated credential state.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+
 	c.JSON(http.StatusOK, dto.SuccessResponse{Message: "credential updated successfully"})
 }
 
@@ -236,6 +306,9 @@ func (h *CredentialHandler) Delete(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to delete credential", Details: err.Error()})
 		return
 	}
+
+	// Invalidate Redis cache so all cluster nodes stop routing to deleted credential.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
 
 	c.JSON(http.StatusOK, dto.SuccessResponse{Message: "credential deleted successfully"})
 }
@@ -292,6 +365,9 @@ func (h *CredentialHandler) RegisterNvidiaProvider(c *gin.Context) {
 		ModelsCount:   count,
 		DiscoveredIDs: models,
 	})
+
+	// Invalidate Redis cache so all cluster nodes instantly see the new NVIDIA models.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
 }
 
 // RegisterOllamaProvider auto-discovers all models available on an Ollama instance,
@@ -345,6 +421,9 @@ func (h *CredentialHandler) RegisterOllamaProvider(c *gin.Context) {
 		ModelsCount:   count,
 		DiscoveredIDs: models,
 	})
+
+	// Invalidate Redis cache so all cluster nodes instantly see the new Ollama models.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
 }
 
 // RegisterOpenRouterProvider auto-discovers all FREE models available on OpenRouter,
@@ -396,6 +475,9 @@ func (h *CredentialHandler) RegisterOpenRouterProvider(c *gin.Context) {
 		ModelsCount:   count,
 		DiscoveredIDs: models,
 	})
+
+	// Invalidate Redis cache so all cluster nodes instantly see the new OpenRouter models.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
 }
 
 // RegisterCustomProvider handles POST /api/v1/admin/providers/custom
@@ -434,6 +516,17 @@ func (h *CredentialHandler) RegisterCustomProvider(c *gin.Context) {
 		providerLabel = "custom"
 	}
 
+	// When a label is supplied but no explicit prefix, use the label as the
+	// model prefix automatically. This namespaces discovered models under
+	// "<label>/<model>" (e.g. "huggingface/meta-llama/Llama-3") so that models
+	// from different OpenAI-compatible providers don't silently collide in the
+	// same pool. The clean alias (without prefix) is still registered too, and
+	// the routing layer strips the prefix before forwarding upstream.
+	prefix := req.Prefix
+	if prefix == "" && req.Label != "" {
+		prefix = providerLabel
+	}
+
 	count, models, err := credentials.DiscoverAndRegisterCustomModels(
 		c.Request.Context(),
 		h.db,
@@ -442,7 +535,7 @@ func (h *CredentialHandler) RegisterCustomProvider(c *gin.Context) {
 		req.BaseURL,
 		providerLabel,
 		req.Weight,
-		req.Prefix,
+		prefix,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "OpenAI-compatible provider discovery failed", Details: err.Error()})
@@ -454,6 +547,9 @@ func (h *CredentialHandler) RegisterCustomProvider(c *gin.Context) {
 		ModelsCount:   count,
 		DiscoveredIDs: models,
 	})
+
+	// Invalidate Redis cache so all cluster nodes instantly see new custom provider models.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
 }
 
 // RegisterOneMinAIProvider auto-discovers all models available on 1min.ai
@@ -509,6 +605,9 @@ func (h *CredentialHandler) RegisterOneMinAIProvider(c *gin.Context) {
 		ModelsCount:   count,
 		DiscoveredIDs: models,
 	})
+
+	// Invalidate Redis cache so all cluster nodes instantly see new 1min.ai models.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
 }
 
 // RegisterCloudflareProvider auto-discovers all Cloudflare Workers AI models
@@ -577,6 +676,9 @@ func (h *CredentialHandler) RegisterCloudflareProvider(c *gin.Context) {
 		ModelsCount:   count,
 		DiscoveredIDs: models,
 	})
+
+	// Invalidate Redis cache so all cluster nodes instantly see new Cloudflare models.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
 }
 
 // RegisterSarvamProvider auto-discovers all Sarvam AI chat models available under
@@ -633,11 +735,77 @@ func (h *CredentialHandler) RegisterSarvamProvider(c *gin.Context) {
 		ModelsCount:   count,
 		DiscoveredIDs: models,
 	})
+
+	// Invalidate Redis cache so all cluster nodes instantly see new Sarvam AI models.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+}
+
+// RegisterGeminiProvider auto-discovers all models available under a Google AI Studio
+// API key, creates model pools for each, and binds the credential to all of them in
+// one transaction.
+//
+// Google AI Studio exposes a live /v1beta/models endpoint that returns the full
+// model catalog. Each model is registered under two pool patterns:
+//   - "gemini/<modelID>"  — explicit provider routing prefix
+//   - "<modelID>"          — clean name for direct use in Cline, Continue, etc.
+//
+// The discovery engine filters models to only those supporting generateContent
+// (chat) or embedContent (embeddings). The base URL is hardcoded to
+// https://generativelanguage.googleapis.com.
+//
+// @Summary      Auto-discover Google AI Studio (Gemini) Models
+// @Description  Submits a Google AI Studio API key, hits the /v1beta/models endpoint, and registers all available models automatically
+// @Tags         Credentials
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        body  body      dto.DiscoverGeminiRequest  true  "Google AI Studio provider details (api_key required)"
+// @Success      200   {object}  dto.DiscoverProviderResponse
+// @Failure      400   {object}  dto.ErrorResponse
+// @Failure      500   {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/providers/gemini [post]
+func (h *CredentialHandler) RegisterGeminiProvider(c *gin.Context) {
+	var req dto.DiscoverGeminiRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
+		return
+	}
+
+	if req.APIKey == "" {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "api_key is required for Google AI Studio auto-discovery"})
+		return
+	}
+
+	if req.Weight <= 0 {
+		req.Weight = 1
+	}
+
+	count, models, err := credentials.DiscoverAndRegisterGeminiModels(
+		c.Request.Context(),
+		h.db,
+		h.vault,
+		req.APIKey,
+		req.Weight,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Google AI Studio auto-discovery failed", Details: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.DiscoverProviderResponse{
+		Message:       fmt.Sprintf("Successfully synchronized %d Google AI Studio (Gemini) models", count),
+		ModelsCount:   count,
+		DiscoveredIDs: models,
+	})
+
+	// Invalidate Redis cache so all cluster nodes instantly see new Gemini models.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
 }
 
 // RegisterPuterProvider auto-discovers all Puter.com AI models available under
 // an API token, creates model pools for each, and binds the credential
 // to all of them in one transaction.
+
 //
 // @Summary      Auto-discover Puter.com Models
 // @Description  Submits a Puter token, fetches the model details, and registers all models automatically
@@ -683,6 +851,9 @@ func (h *CredentialHandler) RegisterPuterProvider(c *gin.Context) {
 		ModelsCount:   count,
 		DiscoveredIDs: models,
 	})
+
+	// Invalidate Redis cache so all cluster nodes instantly see new Puter.com models.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
 }
 
 // RegisterAgentRouterProvider auto-discovers all models available on AgentRouter.org
@@ -738,7 +909,64 @@ func (h *CredentialHandler) RegisterAgentRouterProvider(c *gin.Context) {
 		ModelsCount:   count,
 		DiscoveredIDs: models,
 	})
+
+	// Invalidate Redis cache so all cluster nodes instantly see new AgentRouter models.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
 }
+
+// RegisterZenMuxProvider auto-discovers all ZenMux AI models available under
+// an API key, creates model pools for each, and binds the credential
+// to all of them in one transaction.
+//
+// @Summary      Auto-discover ZenMux Models
+// @Description  Submits a ZenMux API key, fetches the model details, and registers all models automatically
+// @Tags         Credentials
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        body  body      dto.DiscoverZenMuxRequest  true  "ZenMux provider details (api_key required)"
+// @Success      200   {object}  dto.DiscoverProviderResponse
+// @Failure      400   {object}  dto.ErrorResponse
+// @Failure      500   {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/providers/zenmux [post]
+func (h *CredentialHandler) RegisterZenMuxProvider(c *gin.Context) {
+	var req dto.DiscoverZenMuxRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
+		return
+	}
+
+	if req.APIKey == "" {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "api_key is required for ZenMux auto-discovery"})
+		return
+	}
+
+	if req.Weight <= 0 {
+		req.Weight = 1
+	}
+
+	count, models, err := credentials.DiscoverAndRegisterZenMuxModels(
+		c.Request.Context(),
+		h.db,
+		h.vault,
+		req.APIKey,
+		req.Weight,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "ZenMux auto-discovery failed", Details: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.DiscoverProviderResponse{
+		Message:       fmt.Sprintf("Successfully synchronized %d ZenMux models", count),
+		ModelsCount:   count,
+		DiscoveredIDs: models,
+	})
+
+	// Invalidate Redis cache so all cluster nodes instantly see new ZenMux models.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+}
+
 
 
 // RefreshAllProviders re-runs auto-discovery for every distinct provider key
@@ -878,6 +1106,10 @@ func (h *CredentialHandler) RefreshAllProviders(c *gin.Context) {
 			count, discovered, discErr = credentials.DiscoverAndRegisterAgentRouterModels(
 				ctx, h.db, h.vault, apiKey, weight)
 
+		case "zenmux":
+			count, discovered, discErr = credentials.DiscoverAndRegisterZenMuxModels(
+				ctx, h.db, h.vault, apiKey, weight)
+
 		default:
 			// Any OpenAI-compatible provider (openai, anthropic, deepseek, custom, …)
 			count, discovered, discErr = credentials.DiscoverAndRegisterCustomModels(
@@ -907,6 +1139,144 @@ func (h *CredentialHandler) RefreshAllProviders(c *gin.Context) {
 		ModelsCount:   len(allDiscovered),
 		DiscoveredIDs: allDiscovered,
 	})
+
+	// Invalidate Redis cache so all cluster nodes instantly see newly refreshed models.
+	h.redisCacheMgr.InvalidateAndPublish(ctx)
+}
+
+// TriggerReDiscovery launches an asynchronous re-discovery job that scans all
+// registered provider endpoints for newly available models and auto-registers
+// them into the pool system. The job runs in the background via the scheduler
+// framework and produces a structured JSON report stored in job_runs.output.
+//
+// @Summary      Trigger model re-discovery
+// @Description  Launches an async scan of all provider endpoints to discover and register new models
+// @Tags         Credentials
+// @Produce      json
+// @Security     BearerAuth
+// @Success      202  {object}  map[string]string
+// @Failure      500  {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/providers/rediscover [post]
+func (h *CredentialHandler) TriggerReDiscovery(c *gin.Context) {
+	if h.scheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, dto.ErrorResponse{
+			Error:   "Job scheduler is not available",
+			Details: "The scheduler is required for async re-discovery but was not initialized",
+		})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Look up the re-discovery job by its job_type. If it doesn't exist yet,
+	// auto-create it as a manual-trigger-only singleton job with a proper UUID.
+	var jobID string
+	err := h.db.QueryRow(ctx,
+		`SELECT id FROM jobs WHERE job_type = 'provider_rediscovery' LIMIT 1`,
+	).Scan(&jobID)
+
+	if err != nil {
+		// Job definition doesn't exist yet — create it with a generated UUID.
+		err = h.db.QueryRow(ctx, `
+			INSERT INTO jobs (name, description, job_type, schedule_type, payload, timezone, max_retries, timeout_seconds, is_enabled, is_singleton)
+			VALUES ('Provider Re-Discovery', 'Scans all registered provider endpoints for new AI models and auto-registers them', 'provider_rediscovery', 'manual', '{}'::jsonb, 'UTC', 0, 600, true, true)
+			RETURNING id
+		`).Scan(&jobID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.ErrorResponse{
+				Error:   "Failed to create re-discovery job definition",
+				Details: err.Error(),
+			})
+			return
+		}
+	}
+
+	// Check if a run is already in progress (singleton guard)
+	var runningCount int
+	_ = h.db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM job_runs
+		WHERE job_id = $1 AND status IN ('pending', 'running')
+	`, jobID).Scan(&runningCount)
+	if runningCount > 0 {
+		c.JSON(http.StatusConflict, dto.ErrorResponse{
+			Error:   "Re-discovery is already running",
+			Details: "Please wait for the current scan to complete before starting another",
+		})
+		return
+	}
+
+	runID, err := h.scheduler.TriggerNow(ctx, jobID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{
+			Error:   "Failed to dispatch re-discovery job",
+			Details: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"message": "Re-discovery scan started — scanning all provider endpoints for new models",
+		"run_id":  runID,
+	})
+}
+
+// GetReDiscoveryStatus returns the status and report from the most recent
+// re-discovery job run. The frontend polls this endpoint to display progress
+// and the expandable results banner.
+//
+// @Summary      Get re-discovery status
+// @Description  Returns the status and report from the latest re-discovery run
+// @Tags         Credentials
+// @Produce      json
+// @Security     BearerAuth
+// @Success      200  {object}  map[string]string
+// @Router       /api/v1/admin/providers/rediscover/status [get]
+func (h *CredentialHandler) GetReDiscoveryStatus(c *gin.Context) {
+	var runID string
+	var status string
+	var result *string
+	var errorMsg *string
+	var durationMs *int64
+	var startedAt *string
+	var finishedAt *string
+
+	// Join through the jobs table to find runs by job_type (avoids hardcoded UUID)
+	err := h.db.QueryRow(c.Request.Context(), `
+		SELECT jr.id, jr.status, jr.output, jr.error_message, jr.duration_ms,
+		       jr.started_at::text, jr.finished_at::text
+		FROM job_runs jr
+		JOIN jobs j ON j.id = jr.job_id
+		WHERE j.job_type = 'provider_rediscovery'
+		ORDER BY jr.created_at DESC LIMIT 1
+	`).Scan(&runID, &status, &result, &errorMsg, &durationMs, &startedAt, &finishedAt)
+
+	if err != nil {
+		// No runs found — system is idle
+		c.JSON(http.StatusOK, gin.H{"status": "IDLE"})
+		return
+	}
+
+	resp := gin.H{
+		"run_id": runID,
+		"status": strings.ToUpper(status),
+	}
+	if result != nil {
+		resp["report"] = *result
+	}
+	if errorMsg != nil {
+		resp["error"] = *errorMsg
+	}
+	if durationMs != nil {
+		resp["duration_ms"] = *durationMs
+	}
+	if startedAt != nil {
+		resp["started_at"] = *startedAt
+	}
+	if finishedAt != nil {
+		resp["finished_at"] = *finishedAt
+	}
+
+	c.JSON(http.StatusOK, resp)
 }
 
 // BulkDelete deletes multiple credentials at once.
@@ -933,6 +1303,9 @@ func (h *CredentialHandler) BulkDelete(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to delete credentials in bulk", Details: err.Error()})
 		return
 	}
+
+	// Invalidate Redis cache so all cluster nodes stop routing to deleted credentials.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
 
 	c.JSON(http.StatusOK, dto.SuccessResponse{Message: fmt.Sprintf("%d credentials deleted successfully", len(req.IDs))})
 }

@@ -11,34 +11,121 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/skadraneshghn/clever-ai-gate/api/dto"
+	"github.com/skadraneshghn/clever-ai-gate/internal/cache"
 	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
 	"github.com/skadraneshghn/clever-ai-gate/internal/database"
+	"github.com/skadraneshghn/clever-ai-gate/internal/jobs"
 )
 
 // PoolHandler provides CRUD operations for model routing pools.
 type PoolHandler struct {
-	db    *pgxpool.Pool
-	vault *credentials.Vault
+	db            *pgxpool.Pool
+	vault         *credentials.Vault
+	scheduler     *jobs.Scheduler
+	redisCacheMgr *cache.RedisCacheManager // nil-safe; invalidates on every mutation
 }
 
 // NewPoolHandler creates a new pool handler.
-func NewPoolHandler(db *pgxpool.Pool, vault *credentials.Vault) *PoolHandler {
-	return &PoolHandler{db: db, vault: vault}
+func NewPoolHandler(db *pgxpool.Pool, vault *credentials.Vault, scheduler *jobs.Scheduler, redisCacheMgr *cache.RedisCacheManager) *PoolHandler {
+	return &PoolHandler{db: db, vault: vault, scheduler: scheduler, redisCacheMgr: redisCacheMgr}
 }
 
 // List returns all model routing pools.
+//
+// When the `limit` query parameter is supplied the endpoint responds with a
+// paginated envelope ({data, total, limit, offset}) supporting server-side
+// pagination, filtering (`search`) and virtualized rendering.
+// When `limit` is omitted the endpoint preserves the legacy behaviour of
+// returning the full flat array of pools (backward compatibility).
+//
 // @Summary      List model pools
-// @Description  Returns all model routing pools with credential counts
+// @Description  Returns all model routing pools with credential counts. Supports optional pagination via limit/offset and filtering via search.
 // @Tags         Pools
 // @Produce      json
 // @Security     BearerAuth
+// @Param        limit   query  int     false  "Page size (enables paginated envelope when present)"  example(100)
+// @Param        offset  query  int     false  "Page offset"                                        example(0)
+// @Param        search  query  string  false  "Case-insensitive search across model_pattern/strategy"  example(gpt-4o)
 // @Success      200  {array}   dto.PoolResponse
 // @Failure      500  {object}  dto.ErrorResponse
 // @Router       /api/v1/admin/pools [get]
 func (h *PoolHandler) List(c *gin.Context) {
-	pools, err := database.ListModelPools(c.Request.Context(), h.db)
+	limitStr := c.Query("limit")
+
+	// Legacy path: no pagination requested -> return the full flat list.
+	if limitStr == "" {
+		pools, err := database.ListModelPools(c.Request.Context(), h.db)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to list pools", Details: err.Error()})
+			return
+		}
+
+		resp := make([]dto.PoolResponse, len(pools))
+		for i, p := range pools {
+			// Get credential count
+			creds, _ := database.ListCredentialsByPool(c.Request.Context(), h.db, p.ID)
+
+			// Decode capabilities JSONB into map
+			var caps map[string]bool
+			if len(p.Capabilities) > 0 {
+				_ = json.Unmarshal(p.Capabilities, &caps)
+			}
+
+			resp[i] = dto.PoolResponse{
+				ID:              p.ID,
+				ModelPattern:    p.ModelPattern,
+				Strategy:        p.Strategy,
+				FallbackPoolID:  p.FallbackPoolID,
+				Capabilities:    caps,
+				CredentialCount: len(creds),
+				CreatedAt:       p.CreatedAt,
+			}
+		}
+
+		c.JSON(http.StatusOK, resp)
+		return
+	}
+
+	// Paginated path.
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		limit = 100
+	}
+	offset := 0
+	if offStr := c.Query("offset"); offStr != "" {
+		if v, err := strconv.Atoi(offStr); err == nil && v >= 0 {
+			offset = v
+		}
+	}
+
+	filter := database.PoolFilter{
+		Search:       c.Query("search"),
+		Strategy:     c.Query("strategy"),
+		HealthStatus: c.Query("health_status"),
+		SortBy:       c.Query("sort_by"),
+		SortOrder:    c.Query("sort_order"),
+	}
+
+	if caps := c.Query("capabilities"); caps != "" {
+		filter.Capabilities = strings.Split(caps, ",")
+	}
+
+	if hf := c.Query("has_fallback"); hf != "" {
+		if val, err := strconv.ParseBool(hf); err == nil {
+			filter.HasFallback = &val
+		}
+	}
+
+	if hc := c.Query("has_credentials"); hc != "" {
+		if val, err := strconv.ParseBool(hc); err == nil {
+			filter.HasCredentials = &val
+		}
+	}
+
+	pools, total, err := database.ListModelPoolsPaginated(c.Request.Context(), h.db, limit, offset, filter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to list pools", Details: err.Error()})
 		return
@@ -46,13 +133,17 @@ func (h *PoolHandler) List(c *gin.Context) {
 
 	resp := make([]dto.PoolResponse, len(pools))
 	for i, p := range pools {
-		// Get credential count
-		creds, _ := database.ListCredentialsByPool(c.Request.Context(), h.db, p.ID)
-
 		// Decode capabilities JSONB into map
 		var caps map[string]bool
 		if len(p.Capabilities) > 0 {
 			_ = json.Unmarshal(p.Capabilities, &caps)
+		}
+
+		// Compute health percentage (nil when no credentials)
+		var healthPct *float64
+		if p.CredentialCount > 0 {
+			v := float64(p.HealthyCount) / float64(p.CredentialCount) * 100
+			healthPct = &v
 		}
 
 		resp[i] = dto.PoolResponse{
@@ -61,12 +152,19 @@ func (h *PoolHandler) List(c *gin.Context) {
 			Strategy:        p.Strategy,
 			FallbackPoolID:  p.FallbackPoolID,
 			Capabilities:    caps,
-			CredentialCount: len(creds),
+			CredentialCount: p.CredentialCount,
+			HealthyCount:    p.HealthyCount,
+			HealthPercent:   healthPct,
 			CreatedAt:       p.CreatedAt,
 		}
 	}
 
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusOK, dto.PaginatedPoolsResponse{
+		Data:   resp,
+		Total:  total,
+		Limit:  limit,
+		Offset: offset,
+	})
 }
 
 // Get returns a single pool with all its credentials.
@@ -160,6 +258,9 @@ func (h *PoolHandler) Create(c *gin.Context) {
 		return
 	}
 
+	// Invalidate Redis cache so all cluster nodes get fresh model list.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+
 	c.JSON(http.StatusCreated, dto.PoolResponse{
 		ID:             id,
 		ModelPattern:   req.ModelPattern,
@@ -200,6 +301,9 @@ func (h *PoolHandler) Update(c *gin.Context) {
 		return
 	}
 
+	// Invalidate Redis cache so all cluster nodes get fresh model list.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+
 	c.JSON(http.StatusOK, dto.SuccessResponse{Message: "pool updated successfully"})
 }
 
@@ -225,6 +329,9 @@ func (h *PoolHandler) Delete(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to delete pool", Details: err.Error()})
 		return
 	}
+
+	// Invalidate Redis cache so all cluster nodes get fresh model list.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
 
 	c.JSON(http.StatusOK, dto.SuccessResponse{Message: "pool deleted successfully"})
 }
@@ -288,6 +395,35 @@ func (h *PoolHandler) TestCredential(c *gin.Context) {
 		req, probeErr = http.NewRequestWithContext(c.Request.Context(), "GET", url, nil)
 		if probeErr == nil {
 			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+	} else if cred.Provider == "gemini" {
+		// Gemini provider: check native generateContent REST endpoint
+		testModel := pool.ModelPattern
+		testModel = strings.TrimPrefix(testModel, "gemini/")
+		if testModel == "" || strings.Contains(testModel, "*") {
+			// Default to a real, non-deprecated model available on all accounts
+			testModel = "gemini-3.5-flash"
+		}
+
+		url := fmt.Sprintf("%s/v1beta/models/%s:generateContent?key=%s",
+			strings.TrimRight(cred.BaseURL, "/"), testModel, apiKey)
+
+		payload := map[string]interface{}{
+			"contents": []map[string]interface{}{
+				{
+					"parts": []map[string]interface{}{
+						{"text": "ping"},
+					},
+				},
+			},
+			"generationConfig": map[string]interface{}{
+				"maxOutputTokens": 1,
+			},
+		}
+		bodyBytes, _ := json.Marshal(payload)
+		req, probeErr = http.NewRequestWithContext(c.Request.Context(), "POST", url, bytes.NewReader(bodyBytes))
+		if probeErr == nil {
+			req.Header.Set("Content-Type", "application/json")
 		}
 	} else {
 		// Custom, NVIDIA, or OpenAI providers: check chat completions
@@ -471,7 +607,159 @@ func (h *PoolHandler) BulkDelete(c *gin.Context) {
 		return
 	}
 
+	// Invalidate Redis cache so all cluster nodes get fresh model list.
+	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+
 	c.JSON(http.StatusOK, dto.SuccessResponse{Message: fmt.Sprintf("%d model pools deleted successfully", len(req.IDs))})
 }
 
+// BulkTest launches an asynchronous background cluster job to health-check all model credentials.
+// It ensures the system job definition row exists in the database (idempotent) and fires
+// scheduler.TriggerNow, which enqueues a run via the Redis async queue (or a goroutine when
+// Redis is unavailable). The caller receives an immediate 202 Accepted response with the run ID.
+//
+// @Summary      Bulk test all model credentials
+// @Description  Launches a background distributed job that health-checks every credential across all pools
+// @Tags         Pools
+// @Produce      json
+// @Security     BearerAuth
+// @Success      202  {object}  dto.SuccessResponse
+// @Failure      503  {object}  dto.ErrorResponse
+// @Failure      500  {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/pools/bulk-test [post]
+func (h *PoolHandler) BulkTest(c *gin.Context) {
+	if h.scheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, dto.ErrorResponse{
+			Error: "job scheduler is unavailable on this gateway node",
+		})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Derive a stable, deterministic UUID (v5/SHA-1) from the canonical job name.
+	// This satisfies the UUID PRIMARY KEY constraint while remaining reproducible
+	// across restarts so the idempotent EXISTS check always resolves the same row.
+	const systemJobName = "sys-bulk-health-check"
+	systemJobID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(systemJobName))
+
+	// Idempotently ensure the system job definition exists in the database.
+	var exists bool
+	_ = h.db.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM jobs WHERE id = $1)",
+		systemJobID,
+	).Scan(&exists)
+
+	if !exists {
+		_, err := h.db.Exec(ctx, `
+			INSERT INTO jobs (
+				id, name, description, job_type, schedule_type, payload,
+				timezone, max_retries, retry_delay_seconds, timeout_seconds,
+				is_enabled, is_singleton
+			) VALUES (
+				$1, 'System Bulk Pool Health Check',
+				'On-demand live health evaluation of all model provider credentials across pools',
+				'bulk_pool_health_check', 'manual', '{}',
+				'UTC', 0, 0, 600,
+				true, true
+			)`,
+			systemJobID,
+		)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.ErrorResponse{
+				Error:   "failed to provision system job schema",
+				Details: err.Error(),
+			})
+			return
+		}
+	}
+
+	runID, err := h.scheduler.TriggerNow(ctx, systemJobID.String())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{
+			Error:   "failed to dispatch bulk health check job",
+			Details: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusAccepted, dto.SuccessResponse{
+		Message: fmt.Sprintf("Bulk health check dispatched. Run ID: %s", runID),
+	})
+}
+
+// PurgeUnhealthyPools permanently removes all model pools where every credential
+// is unhealthy (health_percent = 0%) or the pool contains no credentials at all.
+// This instantly removes those model patterns from the OpenAI-compatible proxy API.
+// A PostgreSQL NOTIFY is broadcast so all cluster nodes hot-swap their routing cache.
+//
+// @Summary      Purge zero-health model pools
+// @Description  Deletes all pools with 0% healthy credentials, removing them from the proxy API immediately
+// @Tags         Pools
+// @Produce      json
+// @Security     BearerAuth
+// @Success      200  {object}  dto.SuccessResponse
+// @Failure      500  {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/pools/purge-unhealthy [post]
+func (h *PoolHandler) PurgeUnhealthyPools(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	deleted, err := database.DeleteZeroHealthPools(ctx, h.db)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{
+			Error:   "failed to purge unhealthy pools",
+			Details: err.Error(),
+		})
+		return
+	}
+
+	// Broadcast reload so all cluster nodes evict the deleted patterns immediately.
+	_, _ = h.db.Exec(ctx, "NOTIFY config_change, 'model_pools:reload'")
+
+	// Invalidate Redis cache so all cluster nodes get fresh model list.
+	h.redisCacheMgr.InvalidateAndPublish(ctx)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("%d pool(s) with 0%% healthy credentials permanently removed from the gateway.", deleted),
+		"deleted": deleted,
+	})
+}
+
+// BulkActivate sets all credentials associated with the specified pools to healthy.
+// @Summary      Bulk activate credentials in pools
+// @Description  Activates all provider credentials (tokens) linked to the given pool IDs
+// @Tags         Pools
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        request   body      dto.BulkActivateRequest  true  "IDs of model pools to activate credentials in"
+// @Success      200       {object}  dto.SuccessResponse
+// @Failure      400       {object}  dto.ErrorResponse
+// @Failure      500       {object}  dto.ErrorResponse
+// @Router       /api/v1/admin/pools/bulk-activate [post]
+func (h *PoolHandler) BulkActivate(c *gin.Context) {
+	var req dto.BulkActivateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
+		return
+	}
+
+	ctx := c.Request.Context()
+	activated, err := database.ActivateCredentialsBulk(ctx, h.db, req.IDs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "failed to activate credentials in bulk", Details: err.Error()})
+		return
+	}
+
+	// Broadcast reload so all cluster nodes hot-swap their routing cache and load the newly activated credentials.
+	_, _ = h.db.Exec(ctx, "NOTIFY config_change, 'model_pools:reload'")
+
+	// Invalidate Redis cache so all cluster nodes get updated credential/health data.
+	h.redisCacheMgr.InvalidateAndPublish(ctx)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":   fmt.Sprintf("Successfully activated %d credentials/tokens across %d pools.", activated, len(req.IDs)),
+		"activated": activated,
+	})
+}
 
