@@ -181,7 +181,7 @@ func fetchAgentRouterModels(ctx context.Context, apiKey string) []string {
 		return defaultAgentRouterModels
 	}
 
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("x-api-key", apiKey)
 	req.Header.Set("User-Agent", "claude-cli/2.1.158 (external, sdk-cli)")
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("anthropic-beta", "claude-code-20250219,interleaved-thinking-2025-05-14,effort-2025-11-24,redact-thinking-2026-02-12")
@@ -252,7 +252,7 @@ func validateAgentRouterKey(ctx context.Context, apiKey string) error {
 
 	// Inject mandatory Claude Code CLI wire-image headers to satisfy AgentRouter WAF
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("x-api-key", apiKey)
 	req.Header.Set("User-Agent", "claude-cli/2.1.158 (external, sdk-cli)")
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("anthropic-beta", "claude-code-20250219,interleaved-thinking-2025-05-14,effort-2025-11-24,redact-thinking-2026-02-12")

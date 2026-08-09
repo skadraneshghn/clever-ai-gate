@@ -136,7 +136,13 @@ func (r *Rewriter) RewriteHeaders(req *http.Request, provider, apiKey string, so
 		}
 
 	case "agentrouter":
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+		// AgentRouter is an Anthropic wire-image bridge. It expects the Anthropic
+		// auth header (x-api-key) and the full Claude Code CLI fingerprint.
+		// Using Authorization: Bearer causes 401 from the WAF.
+		req.Header.Set("x-api-key", apiKey)
+		req.Header.Del("Authorization")
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
 		req.Header.Set("User-Agent", "claude-cli/2.1.158 (external, sdk-cli)")
 		req.Header.Set("anthropic-version", "2023-06-01")
 		req.Header.Set("anthropic-beta", "claude-code-20250219,interleaved-thinking-2025-05-14,effort-2025-11-24,redact-thinking-2026-02-12")
