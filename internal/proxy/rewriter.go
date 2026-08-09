@@ -213,7 +213,7 @@ func anthropicPath(baseURL, requestPath, _ string) string {
 // agentrouterPath transforms OpenAI paths to AgentRouter's Anthropic /v1/messages?beta=true endpoint.
 func agentrouterPath(baseURL, requestPath, _ string) string {
 	if strings.Contains(requestPath, "/chat/completions") {
-		return baseURL + "/messages?beta=true"
+		return baseURL + "/v1/messages?beta=true"
 	}
 	return baseURL + requestPath
 }
