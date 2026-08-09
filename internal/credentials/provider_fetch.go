@@ -278,6 +278,27 @@ func fetchProviderDiscoveredModels(ctx context.Context, acc providerAccount, api
 			}
 		}
 
+	case "agentrouter":
+		models := fetchAgentRouterModels(ctx, apiKey)
+		for _, m := range models {
+			cleanID := strings.TrimPrefix(m, "agentrouter/")
+			if cleanID == "" {
+				continue
+			}
+			patterns := []string{"agentrouter/" + cleanID, cleanID}
+			for _, pat := range patterns {
+				items = append(items, DiscoveredModelItem{
+					ModelPattern: pat,
+					Provider:     "agentrouter",
+					BaseURL:      agentRouterBaseURL,
+					RawAPIKey:    apiKey,
+					Weight:       weight,
+					Prefix:       acc.Prefix,
+					Capabilities: ClassifyModel(pat),
+				})
+			}
+		}
+
 	case "zenmux":
 		client := &http.Client{Timeout: 8 * time.Second}
 		req, err := http.NewRequestWithContext(ctx, "GET", ZenMuxBaseURL+"/models", nil)
