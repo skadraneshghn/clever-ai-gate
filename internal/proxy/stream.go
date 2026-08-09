@@ -162,7 +162,7 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 		// Handle non-data SSE events (some providers send event types)
 		if bytes.HasPrefix(line, []byte("event: ")) {
 			eventType := string(line[7:])
-			if provider == "anthropic" || provider == "1minai" {
+			if provider == "anthropic" || provider == "1minai" || provider == "agentrouter" {
 				tmx.SetEventType(eventType)
 			}
 			continue

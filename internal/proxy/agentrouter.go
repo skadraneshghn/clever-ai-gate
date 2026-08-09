@@ -1,124 +1,259 @@
 package proxy
 
 import (
-	"bytes"
 	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/buger/jsonparser"
 )
 
-// agentRouterUnsupportedFields lists standard OpenAI Chat Completions request fields
-// that cause failures when AgentRouter proxies them to diverse upstream backends
-// (DeepSeek, Claude, Llama, Mistral, etc.). These upstream models reject unrecognized
-// fields with 400 Bad Request — the root cause of OmniRoute Issue #1921.
+// TranslateOpenAIToAgentRouter converts an incoming OpenAI-style /v1/chat/completions
+// request body into Anthropic's /v1/messages format required by AgentRouter.org.
 //
-// The gateway strips these fields before forwarding to AgentRouter, keeping the
-// request compatible with all possible upstream destinations. This is the same
-// approach OmniRoute adopted after the bug was reported and fixed.
-var agentRouterUnsupportedFields = []string{
-	"store",               // OpenAI conversation storage — rejected by most upstreams
-	"metadata",            // OpenAI request metadata — not part of standard chat spec
-	"service_tier",        // OpenAI priority tier — vendor-specific
-	"parallel_tool_calls", // OpenAI parallel function calling — not universally supported
-	"logprobs",            // OpenAI log probabilities — not supported by many models
-	"top_logprobs",        // OpenAI log probabilities — not supported by many models
-	"logit_bias",          // OpenAI token bias — not universally supported
-	"suffix",              // OpenAI completion suffix — legacy
+// Key translations:
+//  1. System and developer role messages are combined into Anthropic's top-level "system" prompt.
+//  2. User and assistant messages are mapped into Anthropic's "messages" array.
+//  3. "max_tokens" is defaulted to 4096 if missing (Anthropic requires max_tokens).
+//  4. Model prefix "agentrouter/" is stripped so AgentRouter receives the clean model name.
+func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
+	if len(raw) == 0 {
+		return raw, nil
+	}
+
+	modelStr, _ := jsonparser.GetString(raw, "model")
+	cleanModel := strings.TrimPrefix(modelStr, "agentrouter/")
+
+	var systemPrompts []string
+	var anthropicMsgs []map[string]interface{}
+
+	// Parse messages array
+	_, err := jsonparser.ArrayEach(raw, func(value []byte, dataType jsonparser.ValueType, offset int, err error) {
+		role, _ := jsonparser.GetString(value, "role")
+
+		// Handle content — can be string or array
+		contentBytes, _, _, _ := jsonparser.Get(value, "content")
+		var contentVal interface{}
+		if len(contentBytes) > 0 && contentBytes[0] == '[' {
+			var rawArr []interface{}
+			if err := json.Unmarshal(contentBytes, &rawArr); err == nil {
+				contentVal = rawArr
+			} else {
+				contentVal = string(contentBytes)
+			}
+		} else {
+			strVal, _ := jsonparser.GetString(value, "content")
+			contentVal = strVal
+		}
+
+		if role == "system" || role == "developer" {
+			if str, ok := contentVal.(string); ok && str != "" {
+				systemPrompts = append(systemPrompts, str)
+			}
+			return
+		}
+
+		anthropicRole := role
+		if anthropicRole != "user" && anthropicRole != "assistant" {
+			anthropicRole = "user"
+		}
+
+		anthropicMsgs = append(anthropicMsgs, map[string]interface{}{
+			"role":    anthropicRole,
+			"content": contentVal,
+		})
+	}, "messages")
+
+	if err != nil {
+		return raw, fmt.Errorf("failed to parse messages for agentrouter translation: %w", err)
+	}
+
+	maxTokens, _ := jsonparser.GetInt(raw, "max_tokens")
+	if maxTokens <= 0 {
+		maxTokens = 4096
+	}
+
+	stream, _ := jsonparser.GetBoolean(raw, "stream")
+	temperature, _ := jsonparser.GetFloat(raw, "temperature")
+
+	out := map[string]interface{}{
+		"model":      cleanModel,
+		"messages":   anthropicMsgs,
+		"max_tokens": maxTokens,
+		"stream":     stream,
+	}
+
+	if temperature > 0 {
+		out["temperature"] = temperature
+	}
+
+	if len(systemPrompts) > 0 {
+		out["system"] = strings.Join(systemPrompts, "\n\n")
+	}
+
+	return json.Marshal(out)
 }
 
-// sanitizeAgentRouterRequest cleans and normalizes an OpenAI-compatible request body
-// before forwarding to AgentRouter. This implements the OmniRoute Issue #1921 fix.
+// translateAgentRouterResponseToOpenAI converts Anthropic /v1/messages non-streaming
+// JSON response from AgentRouter into an OpenAI /v1/chat/completions JSON payload.
 //
-// Sanitization rules:
-//
-//  1. Strip unsupported top-level fields that upstream models reject with 400.
-//  2. Strip "stream_options" if "stream" is not true — tools often send stream_options
-//     even for non-streaming requests, causing upstream rejections.
-//  3. Normalize "developer" role messages to "system" — the newer OpenAI "developer"
-//     role is rejected by many AgentRouter upstream models (DeepSeek, Llama, etc.).
-//  4. Strip "reasoning_effort" — only supported by specific OpenAI models, rejected
-//     by most AgentRouter upstream destinations.
-//
-// The function uses a fast bytes.Contains probe to skip processing entirely when
-// no unsupported field is present, keeping the common clean-request path allocation-free.
-func sanitizeAgentRouterRequest(body []byte) []byte {
-	if len(body) == 0 {
-		return body
+// Supports text content, thinking/reasoning blocks (for DeepSeek R1 / Claude thinking),
+// tool calls, and token usage.
+func translateAgentRouterResponseToOpenAI(raw []byte, requestedModel string) ([]byte, bool) {
+	if len(raw) == 0 {
+		return nil, false
 	}
 
-	// Fast probe: check if ANY sanitization is needed before doing any work.
-	needsFieldStrip := false
-	for _, f := range agentRouterUnsupportedFields {
-		if bytes.Contains(body, []byte(`"`+f+`"`)) {
-			needsFieldStrip = true
-			break
-		}
+	// Unmarshal Anthropic response structure
+	type anthropicBlock struct {
+		Type     string          `json:"type"`
+		Text     string          `json:"text,omitempty"`
+		Thinking string          `json:"thinking,omitempty"`
+		ID       string          `json:"id,omitempty"`
+		Name     string          `json:"name,omitempty"`
+		Input    json.RawMessage `json:"input,omitempty"`
 	}
 
-	needsStreamFix := bytes.Contains(body, []byte(`"stream_options"`))
-	needsRoleFix := bytes.Contains(body, []byte(`"developer"`))
-	needsReasoningFix := bytes.Contains(body, []byte(`"reasoning_effort"`))
-
-	if !needsFieldStrip && !needsStreamFix && !needsRoleFix && !needsReasoningFix {
-		return body // Fast path: no sanitization needed
+	type anthropicUsage struct {
+		InputTokens  int64 `json:"input_tokens"`
+		OutputTokens int64 `json:"output_tokens"`
 	}
 
-	// For role normalization, stream_options conditional logic, and reasoning_effort
-	// stripping, we need to parse the JSON. Field stripping can be done with
-	// jsonparser.Delete but since we may need to Marshal anyway for role changes,
-	// we use a unified json.Unmarshal approach when complex changes are needed.
-	var rawMap map[string]interface{}
-	if err := json.Unmarshal(body, &rawMap); err != nil {
-		return body // Malformed JSON — let upstream reject it normally
+	type anthropicResp struct {
+		ID         string           `json:"id"`
+		Type       string           `json:"type"`
+		Role       string           `json:"role"`
+		Model      string           `json:"model"`
+		Content    []anthropicBlock `json:"content"`
+		StopReason *string          `json:"stop_reason"`
+		Usage      anthropicUsage   `json:"usage"`
 	}
 
-	modified := false
-
-	// 1. Strip unsupported top-level fields.
-	for _, f := range agentRouterUnsupportedFields {
-		if _, exists := rawMap[f]; exists {
-			delete(rawMap, f)
-			modified = true
-		}
+	var antResp anthropicResp
+	if err := json.Unmarshal(raw, &antResp); err != nil || antResp.Type != "message" {
+		return nil, false // Not an Anthropic message response — return false for passthrough
 	}
 
-	// 2. Strip stream_options if stream is not true.
-	// Tools like Kilo/Cursor sometimes send stream_options even on non-streaming
-	// requests, which upstream models reject.
-	if _, hasStreamOpts := rawMap["stream_options"]; hasStreamOpts {
-		stream, isStreamBool := rawMap["stream"].(bool)
-		if !isStreamBool || !stream {
-			delete(rawMap, "stream_options")
-			modified = true
-		}
+	modelName := antResp.Model
+	if modelName == "" {
+		modelName = requestedModel
 	}
 
-	// 3. Strip reasoning_effort — only specific OpenAI o-series models support it.
-	// AgentRouter routes to many upstreams that reject this field.
-	if _, has := rawMap["reasoning_effort"]; has {
-		delete(rawMap, "reasoning_effort")
-		modified = true
+	msgID := antResp.ID
+	if msgID == "" {
+		msgID = fmt.Sprintf("chatcmpl-agentrouter-%d", time.Now().Unix())
+	} else if !strings.HasPrefix(msgID, "chatcmpl-") {
+		msgID = "chatcmpl-" + msgID
 	}
 
-	// 4. Normalize "developer" role messages to "system".
-	// The "developer" role was introduced in newer OpenAI API versions but is
-	// rejected by most AgentRouter upstream models (DeepSeek, Claude, Llama, etc.).
-	if messages, ok := rawMap["messages"].([]interface{}); ok {
-		for _, msg := range messages {
-			if msgMap, ok := msg.(map[string]interface{}); ok {
-				if role, ok := msgMap["role"].(string); ok && role == "developer" {
-					msgMap["role"] = "system"
-					modified = true
-				}
+	var textContent strings.Builder
+	var reasoningContent strings.Builder
+
+	type openAIFunction struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}
+
+	type openAIToolCall struct {
+		ID       string         `json:"id"`
+		Type     string         `json:"type"`
+		Function openAIFunction `json:"function"`
+	}
+
+	var toolCalls []openAIToolCall
+
+	for _, block := range antResp.Content {
+		switch block.Type {
+		case "text":
+			textContent.WriteString(block.Text)
+		case "thinking":
+			reasoningContent.WriteString(block.Thinking)
+		case "tool_use":
+			argsStr := string(block.Input)
+			if argsStr == "" {
+				argsStr = "{}"
 			}
+			toolCalls = append(toolCalls, openAIToolCall{
+				ID:   block.ID,
+				Type: "function",
+				Function: openAIFunction{
+					Name:      block.Name,
+					Arguments: argsStr,
+				},
+			})
 		}
 	}
 
-	if !modified {
-		return body
+	finishReason := "stop"
+	if antResp.StopReason != nil {
+		switch *antResp.StopReason {
+		case "end_turn", "stop_sequence":
+			finishReason = "stop"
+		case "max_tokens":
+			finishReason = "length"
+		case "tool_use":
+			finishReason = "tool_calls"
+		default:
+			finishReason = *antResp.StopReason
+		}
 	}
 
-	sanitized, err := json.Marshal(rawMap)
-	if err != nil {
-		return body // Marshal failed — return original
+	type openAIMessage struct {
+		Role             string           `json:"role"`
+		Content          string           `json:"content"`
+		ReasoningContent string           `json:"reasoning_content,omitempty"`
+		ToolCalls        []openAIToolCall `json:"tool_calls,omitempty"`
 	}
-	return sanitized
+
+	type openAIChoice struct {
+		Index        int           `json:"index"`
+		Message      openAIMessage `json:"message"`
+		FinishReason string        `json:"finish_reason"`
+	}
+
+	type openAIUsage struct {
+		PromptTokens     int64 `json:"prompt_tokens"`
+		CompletionTokens int64 `json:"completion_tokens"`
+		TotalTokens      int64 `json:"total_tokens"`
+	}
+
+	type openAIResp struct {
+		ID      string         `json:"id"`
+		Object  string         `json:"object"`
+		Created int64          `json:"created"`
+		Model   string         `json:"model"`
+		Choices []openAIChoice `json:"choices"`
+		Usage   openAIUsage    `json:"usage"`
+	}
+
+	resp := openAIResp{
+		ID:      msgID,
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   modelName,
+		Choices: []openAIChoice{
+			{
+				Index: 0,
+				Message: openAIMessage{
+					Role:             "assistant",
+					Content:          textContent.String(),
+					ReasoningContent: reasoningContent.String(),
+					ToolCalls:        toolCalls,
+				},
+				FinishReason: finishReason,
+			},
+		},
+		Usage: openAIUsage{
+			PromptTokens:     antResp.Usage.InputTokens,
+			CompletionTokens: antResp.Usage.OutputTokens,
+			TotalTokens:      antResp.Usage.InputTokens + antResp.Usage.OutputTokens,
+		},
+	}
+
+	out, err := json.Marshal(resp)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }

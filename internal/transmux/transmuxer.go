@@ -32,7 +32,7 @@ const (
 // NewTransmuxer creates the appropriate transmuxer for a provider.
 func NewTransmuxer(provider string) Transmuxer {
 	switch provider {
-	case "anthropic":
+	case "anthropic", "agentrouter":
 		return NewAnthropicTransmuxer()
 	case "gemini", "vertex":
 		return NewGeminiTransmuxer()

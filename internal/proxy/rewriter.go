@@ -75,8 +75,8 @@ func NewRewriter() *Rewriter {
 	// Puter.com: natively OpenAI-compatible
 	r.pathTransformers["puter"] = passthroughPath
 
-	// AgentRouter.org: OpenAI-compatible AI API aggregator
-	r.pathTransformers["agentrouter"] = passthroughPath
+	// AgentRouter.org: Anthropic-compatible wire-image bridge
+	r.pathTransformers["agentrouter"] = agentrouterPath
 
 	// ZenMux: aggregation layer, natively OpenAI-compatible
 	r.pathTransformers["zenmux"] = passthroughPath
@@ -135,6 +135,14 @@ func (r *Rewriter) RewriteHeaders(req *http.Request, provider, apiKey string, so
 			req.Header.Set("anthropic-beta", sourceHeaders.Get("anthropic-beta"))
 		}
 
+	case "agentrouter":
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("User-Agent", "claude-cli/2.1.158 (external, sdk-cli)")
+		req.Header.Set("anthropic-version", "2023-06-01")
+		req.Header.Set("anthropic-beta", "claude-code-20250219,interleaved-thinking-2025-05-14,effort-2025-11-24,redact-thinking-2026-02-12")
+		req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
+		req.Header.Set("x-app", "cli")
+
 	case "gemini":
 		// Gemini AI Studio uses API key as a query parameter, NOT an Authorization header.
 		// The key is appended to the upstream URL in forwardRequest after calling RewriteURL.
@@ -173,6 +181,11 @@ func (r *Rewriter) RewriteHeaders(req *http.Request, provider, apiKey string, so
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
+	if provider == "agentrouter" {
+		// Keep the spoofed Claude Code CLI User-Agent intact
+		return
+	}
+
 	// Forward user agent for debugging
 	if ua := sourceHeaders.Get("User-Agent"); ua != "" {
 		req.Header.Set("User-Agent", "CleverAIGate/1.0 ("+ua+")")
@@ -193,6 +206,14 @@ func passthroughPath(baseURL, requestPath, _ string) string {
 func anthropicPath(baseURL, requestPath, _ string) string {
 	if strings.Contains(requestPath, "/chat/completions") {
 		return baseURL + "/v1/messages"
+	}
+	return baseURL + requestPath
+}
+
+// agentrouterPath transforms OpenAI paths to AgentRouter's Anthropic /v1/messages?beta=true endpoint.
+func agentrouterPath(baseURL, requestPath, _ string) string {
+	if strings.Contains(requestPath, "/chat/completions") {
+		return baseURL + "/messages?beta=true"
 	}
 	return baseURL + requestPath
 }

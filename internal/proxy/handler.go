@@ -1103,16 +1103,19 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		bodyBytes = sanitizePuterRequest(bodyBytes)
 	}
 
-	// --- AgentRouter Request Sanitization (OmniRoute Issue #1921 Fix) ---
-	// AgentRouter proxies requests to diverse upstream backends (DeepSeek, Claude,
-	// Llama, Mistral, etc.) that reject unrecognized OpenAI fields with 400 Bad
-	// Request. The sanitizer strips unsupported fields (store, user, metadata, etc.),
-	// normalizes the "developer" role to "system", and handles stream_options.
-	// This runs for BOTH routing forms (prefixed "agentrouter/..." and clean alias)
-	// because it is invoked from the hot-path gated on the resolved credential's
-	// provider, not on the model prefix.
+	// --- AgentRouter Request Transpilation ---
+	// AgentRouter requires requests in Anthropic's /v1/messages?beta=true format
+	// with mandatory Claude Code CLI wire-image headers.
 	if cred.Provider == "agentrouter" {
-		bodyBytes = sanitizeAgentRouterRequest(bodyBytes)
+		agentBody, trErr := TranslateOpenAIToAgentRouter(bodyBytes)
+		if trErr != nil {
+			h.logger.Error("agentrouter request transpilation failed",
+				zap.String("model", pctx.model),
+				zap.Error(trErr),
+			)
+			return http.StatusBadRequest, upstreamURL, nil, trErr
+		}
+		bodyBytes = agentBody
 	}
 
 	// --- Jiekou.AI Request Sanitization ---
@@ -1297,6 +1300,30 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 
 	// All non-2xx responses are captured by the universal error block above.
 	// Only 2xx responses reach this point — safe to write to c.Writer.
+
+	// --- AgentRouter native response translation (non-streaming) ---
+	if cred.Provider == "agentrouter" {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return http.StatusInternalServerError, upstreamURL, nil, readErr
+		}
+		if translated, ok := translateAgentRouterResponseToOpenAI(respBody, pctx.requestedModel); ok {
+			respBody = translated
+		}
+		respBody = h.normalizeNonStreamingReasoning(respBody)
+		respBody = h.rewriteResponseModel(respBody, pctx.requestedModel)
+		for key, vals := range resp.Header {
+			for _, val := range vals {
+				c.Writer.Header().Add(key, val)
+			}
+		}
+		c.Writer.Header().Set("Content-Type", "application/json")
+		c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+		c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+		c.Writer.WriteHeader(resp.StatusCode)
+		c.Writer.Write(respBody) //nolint:errcheck
+		return resp.StatusCode, upstreamURL, respBody, nil
+	}
 
 	// --- Ollama native response translation (non-streaming) ---
 	// Ollama Cloud returns a native JSON body for non-stream requests that must
