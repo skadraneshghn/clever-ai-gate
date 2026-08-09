@@ -1,6 +1,8 @@
 package transmux
 
 import (
+	"fmt"
+
 	"github.com/buger/jsonparser"
 )
 
@@ -48,6 +50,9 @@ func (t *AnthropicTransmuxer) TranslateChunk(data []byte) ([]byte, error) {
 		if t.blockType == "tool_use" {
 			toolID, _ := jsonparser.GetString(data, "content_block", "id")
 			toolName, _ := jsonparser.GetString(data, "content_block", "name")
+			if toolID == "" {
+				toolID = fmt.Sprintf("call_gate_%d", t.toolIndex)
+			}
 			return buildToolCallStartDelta(t.toolIndex, toolID, toolName), nil
 		}
 
@@ -139,7 +144,6 @@ func (t *AnthropicTransmuxer) TranslateChunk(data []byte) ([]byte, error) {
 		return nil, nil
 	}
 }
-
 
 // Close releases resources.
 func (t *AnthropicTransmuxer) Close() {}

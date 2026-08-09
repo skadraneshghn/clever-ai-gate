@@ -388,4 +388,339 @@ func TestTranslateOpenAIToAgentRouterEmptyToolIDAndObjectArgs(t *testing.T) {
 	}
 }
 
+func TestTranslateEmptyToolIDsMatchResults(t *testing.T) {
+	// Simulates GPT models through agentrouter where the Anthropic SSE omits
+	// content_block.id — the client accumulates tool_calls with empty IDs and
+	// tool results with empty tool_call_id. The translator must generate
+	// deterministic IDs that match each tool_use with its tool_result.
+	openAIRaw := []byte(`{
+		"model": "agentrouter/gpt-5.6-sol",
+		"messages": [
+			{"role": "user", "content": "Read two files"},
+			{
+				"role": "assistant",
+				"content": "",
+				"tool_calls": [
+					{"id": "", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"a.txt\"}"}},
+					{"id": "", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"b.txt\"}"}}
+				]
+			},
+			{"role": "tool", "tool_call_id": "", "content": "content of a"},
+			{"role": "tool", "tool_call_id": "", "content": "content of b"}
+		]
+	}`)
+
+	agentBody, err := TranslateOpenAIToAgentRouter(openAIRaw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(agentBody, &parsed); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	msgs := parsed["messages"].([]interface{})
+	// user, assistant(tool_use x2), user(tool_result x2 coalesced)
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(msgs))
+	}
+
+	// Assistant message: should have 2 tool_use blocks with non-empty, distinct IDs
+	astMsg := msgs[1].(map[string]interface{})
+	astBlocks := astMsg["content"].([]interface{})
+	var toolUseIDs []string
+	for _, b := range astBlocks {
+		block := b.(map[string]interface{})
+		if block["type"] == "tool_use" {
+			id, _ := block["id"].(string)
+			if id == "" {
+				t.Errorf("expected non-empty tool_use id, got empty")
+			}
+			toolUseIDs = append(toolUseIDs, id)
+		}
+	}
+	if len(toolUseIDs) != 2 {
+		t.Fatalf("expected 2 tool_use blocks, got %d", len(toolUseIDs))
+	}
+	if toolUseIDs[0] == toolUseIDs[1] {
+		t.Errorf("expected distinct tool_use IDs, got duplicate: %s", toolUseIDs[0])
+	}
+
+	// User message with tool_results: each tool_result's tool_use_id must match a tool_use ID
+	usrMsg := msgs[2].(map[string]interface{})
+	usrBlocks := usrMsg["content"].([]interface{})
+	var toolResultIDs []string
+	for _, b := range usrBlocks {
+		block := b.(map[string]interface{})
+		if block["type"] == "tool_result" {
+			id, _ := block["tool_use_id"].(string)
+			toolResultIDs = append(toolResultIDs, id)
+		}
+	}
+	if len(toolResultIDs) != 2 {
+		t.Fatalf("expected 2 tool_result blocks, got %d", len(toolResultIDs))
+	}
+
+	// Each tool_result ID must match a tool_use ID in order
+	for i, resultID := range toolResultIDs {
+		if resultID != toolUseIDs[i] {
+			t.Errorf("tool_result[%d] id %q does not match tool_use[%d] id %q",
+				i, resultID, i, toolUseIDs[i])
+		}
+	}
+}
+
+func TestTranslateMixedToolIDsMatchResults(t *testing.T) {
+	// Mixed scenario: one tool call has a proper ID, one has empty.
+	// The tool results follow the same pattern.
+	openAIRaw := []byte(`{
+		"model": "agentrouter/gpt-5.6-sol",
+		"messages": [
+			{"role": "user", "content": "Read two files"},
+			{
+				"role": "assistant",
+				"content": "",
+				"tool_calls": [
+					{"id": "call_proper_1", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"a.txt\"}"}},
+					{"id": "", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"b.txt\"}"}}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_proper_1", "content": "content of a"},
+			{"role": "tool", "tool_call_id": "", "content": "content of b"}
+		]
+	}`)
+
+	agentBody, err := TranslateOpenAIToAgentRouter(openAIRaw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(agentBody, &parsed); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	msgs := parsed["messages"].([]interface{})
+
+	// Assistant message: first tool_use has "call_proper_1", second has generated ID
+	astMsg := msgs[1].(map[string]interface{})
+	astBlocks := astMsg["content"].([]interface{})
+	var toolUseIDs []string
+	for _, b := range astBlocks {
+		block := b.(map[string]interface{})
+		if block["type"] == "tool_use" {
+			id, _ := block["id"].(string)
+			toolUseIDs = append(toolUseIDs, id)
+		}
+	}
+	if len(toolUseIDs) != 2 {
+		t.Fatalf("expected 2 tool_use blocks, got %d", len(toolUseIDs))
+	}
+	if toolUseIDs[0] != "call_proper_1" {
+		t.Errorf("expected first tool_use id 'call_proper_1', got %q", toolUseIDs[0])
+	}
+	if toolUseIDs[1] == "" {
+		t.Errorf("expected non-empty generated id for second tool_use")
+	}
+
+	// User message with tool_results: first matches "call_proper_1", second matches generated
+	usrMsg := msgs[2].(map[string]interface{})
+	usrBlocks := usrMsg["content"].([]interface{})
+	var toolResultIDs []string
+	for _, b := range usrBlocks {
+		block := b.(map[string]interface{})
+		if block["type"] == "tool_result" {
+			id, _ := block["tool_use_id"].(string)
+			toolResultIDs = append(toolResultIDs, id)
+		}
+	}
+	if toolResultIDs[0] != "call_proper_1" {
+		t.Errorf("expected first tool_result id 'call_proper_1', got %q", toolResultIDs[0])
+	}
+	if toolResultIDs[1] != toolUseIDs[1] {
+		t.Errorf("expected second tool_result id %q to match generated tool_use id, got %q",
+			toolUseIDs[1], toolResultIDs[1])
+	}
+}
+
+func TestTranslateContentWithToolUseSkipsToolCalls(t *testing.T) {
+	// When the assistant content array already contains tool_use blocks (Anthropic
+	// format embedded in OpenAI content), the translator must skip tool_calls
+	// processing to avoid duplicate tool_use blocks.
+	openAIRaw := []byte(`{
+		"model": "agentrouter/claude-opus-5",
+		"messages": [
+			{"role": "user", "content": "Read file"},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "toolu_abc", "name": "read", "input": {"path": "/file.txt"}}
+				],
+				"tool_calls": [
+					{"id": "toolu_abc", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"/file.txt\"}"}}
+				]
+			},
+			{"role": "tool", "tool_call_id": "toolu_abc", "content": "file content"}
+		]
+	}`)
+
+	agentBody, err := TranslateOpenAIToAgentRouter(openAIRaw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(agentBody, &parsed); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	msgs := parsed["messages"].([]interface{})
+
+	// Assistant message: should have exactly 1 tool_use (not duplicated)
+	astMsg := msgs[1].(map[string]interface{})
+	astBlocks := astMsg["content"].([]interface{})
+	toolUseCount := 0
+	for _, b := range astBlocks {
+		block := b.(map[string]interface{})
+		if block["type"] == "tool_use" {
+			toolUseCount++
+			if block["id"] != "toolu_abc" {
+				t.Errorf("expected tool_use id 'toolu_abc', got %v", block["id"])
+			}
+		}
+	}
+	if toolUseCount != 1 {
+		t.Errorf("expected 1 tool_use block (no duplicate), got %d", toolUseCount)
+	}
+
+	// Tool result should match
+	usrMsg := msgs[2].(map[string]interface{})
+	usrBlocks := usrMsg["content"].([]interface{})
+	for _, b := range usrBlocks {
+		block := b.(map[string]interface{})
+		if block["type"] == "tool_result" {
+			if block["tool_use_id"] != "toolu_abc" {
+				t.Errorf("expected tool_result tool_use_id 'toolu_abc', got %v", block["tool_use_id"])
+			}
+		}
+	}
+}
+
+func TestTranslateContentWithEmptyToolUseID(t *testing.T) {
+	// Content has tool_use blocks with empty IDs (from GPT model streaming).
+	// The translator should generate IDs and match them with tool results.
+	openAIRaw := []byte(`{
+		"model": "agentrouter/gpt-5.6-sol",
+		"messages": [
+			{"role": "user", "content": "Read file"},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "", "name": "read", "input": {"path": "/file.txt"}}
+				],
+				"tool_calls": [
+					{"id": "", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"/file.txt\"}"}}
+				]
+			},
+			{"role": "tool", "tool_call_id": "", "content": "file content"}
+		]
+	}`)
+
+	agentBody, err := TranslateOpenAIToAgentRouter(openAIRaw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(agentBody, &parsed); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	msgs := parsed["messages"].([]interface{})
+
+	// Assistant: exactly 1 tool_use with generated non-empty ID
+	astMsg := msgs[1].(map[string]interface{})
+	astBlocks := astMsg["content"].([]interface{})
+	var toolUseID string
+	toolUseCount := 0
+	for _, b := range astBlocks {
+		block := b.(map[string]interface{})
+		if block["type"] == "tool_use" {
+			toolUseCount++
+			toolUseID, _ = block["id"].(string)
+		}
+	}
+	if toolUseCount != 1 {
+		t.Errorf("expected 1 tool_use block, got %d", toolUseCount)
+	}
+	if toolUseID == "" {
+		t.Errorf("expected non-empty generated tool_use id")
+	}
+
+	// Tool result should match the generated ID
+	usrMsg := msgs[2].(map[string]interface{})
+	usrBlocks := usrMsg["content"].([]interface{})
+	for _, b := range usrBlocks {
+		block := b.(map[string]interface{})
+		if block["type"] == "tool_result" {
+			if block["tool_use_id"] != toolUseID {
+				t.Errorf("expected tool_result tool_use_id %q, got %v", toolUseID, block["tool_use_id"])
+			}
+		}
+	}
+}
+
+func TestTranslateAgentRouterResponseEmptyToolID(t *testing.T) {
+	// Non-streaming Anthropic response with a tool_use block that has an empty ID
+	// (GPT models proxied through agentrouter). The translator should generate
+	// a stable, non-empty ID.
+	anthropicRaw := []byte(`{
+		"id": "msg_001",
+		"type": "message",
+		"role": "assistant",
+		"model": "gpt-5.6-sol",
+		"content": [
+			{"type": "text", "text": "Let me read that file."},
+			{"type": "tool_use", "id": "", "name": "read_file", "input": {"path": "/test.go"}}
+		],
+		"stop_reason": "tool_use",
+		"usage": {"input_tokens": 10, "output_tokens": 20}
+	}`)
+
+	openAIPayload, ok := translateAgentRouterResponseToOpenAI(anthropicRaw, "gpt-5.6-sol")
+	if !ok {
+		t.Fatalf("expected successful translation")
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(openAIPayload, &parsed); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	choices := parsed["choices"].([]interface{})
+	choice0 := choices[0].(map[string]interface{})
+	msg := choice0["message"].(map[string]interface{})
+	toolCalls := msg["tool_calls"].([]interface{})
+
+	if len(toolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(toolCalls))
+	}
+
+	tc := toolCalls[0].(map[string]interface{})
+	id, _ := tc["id"].(string)
+	if id == "" {
+		t.Errorf("expected non-empty generated tool call id")
+	}
+
+	fn := tc["function"].(map[string]interface{})
+	if fn["name"] != "read_file" {
+		t.Errorf("expected tool name 'read_file', got %v", fn["name"])
+	}
+
+	if choice0["finish_reason"] != "tool_calls" {
+		t.Errorf("expected finish_reason 'tool_calls', got %v", choice0["finish_reason"])
+	}
+}
+
 

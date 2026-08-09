@@ -127,6 +127,23 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 		}
 
 		if err := json.Unmarshal(msgsBytes, &openAIMsgs); err == nil {
+			// pendingToolUseIDs is an ordered queue of all tool_use IDs (both real
+			// and generated) across assistant messages. When tool-result messages
+			// (role: "tool") carry an empty tool_call_id — common with GPT models
+			// proxied through agentrouter whose Anthropic SSE omits content_block.id —
+			// the next ID is popped from the front so each tool_use gets a matching
+			// tool_result. Tool results with a non-empty tool_call_id remove their
+			// matching ID from the queue to preserve ordering for later empties.
+			var pendingToolUseIDs []string
+			removeFromToolUseQueue := func(id string) {
+				for i, q := range pendingToolUseIDs {
+					if q == id {
+						pendingToolUseIDs = append(pendingToolUseIDs[:i], pendingToolUseIDs[i+1:]...)
+						return
+					}
+				}
+			}
+
 			for msgIdx, msg := range openAIMsgs {
 				// Handle system/developer roles
 				if msg.Role == "system" || msg.Role == "developer" {
@@ -141,7 +158,14 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 				if msg.Role == "tool" {
 					toolCallID := msg.ToolCallID
 					if toolCallID == "" {
-						toolCallID = fmt.Sprintf("call_unknown_%d", msgIdx)
+						if len(pendingToolUseIDs) > 0 {
+							toolCallID = pendingToolUseIDs[0]
+							pendingToolUseIDs = pendingToolUseIDs[1:]
+						} else {
+							toolCallID = fmt.Sprintf("call_unknown_%d", msgIdx)
+						}
+					} else {
+						removeFromToolUseQueue(toolCallID)
 					}
 					toolResultContent := parseRawContentToText(msg.Content)
 					if toolResultContent == "" {
@@ -182,8 +206,32 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 					blocks = append(blocks, parsedBlocks...)
 				}
 
+				// If the content array already contains tool_use blocks (Anthropic format
+				// embedded in OpenAI content), fix any empty IDs and register them in the
+				// pending queue so tool-result messages with empty tool_call_id can match.
+				// Skip tool_calls processing below to avoid duplicate tool_use blocks.
+				hasToolUseInContent := false
+				contentTcIdx := 0
+				for _, b := range blocks {
+					block, ok := b.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					if t, _ := block["type"].(string); t == "tool_use" {
+						hasToolUseInContent = true
+						if id, _ := block["id"].(string); id == "" {
+							genID := fmt.Sprintf("call_msg%d_%d", msgIdx, contentTcIdx)
+							block["id"] = genID
+							pendingToolUseIDs = append(pendingToolUseIDs, genID)
+						} else {
+							pendingToolUseIDs = append(pendingToolUseIDs, id)
+						}
+						contentTcIdx++
+					}
+				}
+
 				// Tool calls (if assistant) — ensure non-empty name, non-empty ID, and robust arguments parsing
-				if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+				if msg.Role == "assistant" && len(msg.ToolCalls) > 0 && !hasToolUseInContent {
 					var rawToolCalls []map[string]interface{}
 					if json.Unmarshal(msg.ToolCalls, &rawToolCalls) == nil {
 						for tcIdx, tcMap := range rawToolCalls {
@@ -202,8 +250,9 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 							// 2. Extract ID (check id field)
 							toolID, _ := tcMap["id"].(string)
 							if toolID == "" {
-								toolID = fmt.Sprintf("call_%d_%d_%d", time.Now().UnixNano(), msgIdx, tcIdx)
+								toolID = fmt.Sprintf("call_msg%d_%d", msgIdx, tcIdx)
 							}
+							pendingToolUseIDs = append(pendingToolUseIDs, toolID)
 
 							// 3. Extract arguments / input schema
 							var argsInput interface{}
@@ -285,7 +334,6 @@ func TranslateOpenAIToAgentRouter(raw []byte) ([]byte, error) {
 			},
 		}, anthropicMsgs...)
 	}
-
 
 	maxTokens, _ := jsonparser.GetInt(raw, "max_tokens")
 	if maxTokens <= 0 {
@@ -523,6 +571,7 @@ func translateAgentRouterResponseToOpenAI(raw []byte, requestedModel string) ([]
 	}
 
 	var toolCalls []openAIToolCall
+	toolCallIdx := 0
 
 	for _, block := range antResp.Content {
 		switch block.Type {
@@ -535,14 +584,19 @@ func translateAgentRouterResponseToOpenAI(raw []byte, requestedModel string) ([]
 			if argsStr == "" {
 				argsStr = "{}"
 			}
+			callID := block.ID
+			if callID == "" {
+				callID = fmt.Sprintf("call_gate_%d", toolCallIdx)
+			}
 			toolCalls = append(toolCalls, openAIToolCall{
-				ID:   block.ID,
+				ID:   callID,
 				Type: "function",
 				Function: openAIFunction{
 					Name:      block.Name,
 					Arguments: argsStr,
 				},
 			})
+			toolCallIdx++
 		}
 	}
 
