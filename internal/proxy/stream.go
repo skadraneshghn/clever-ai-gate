@@ -91,6 +91,7 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 	}
 
 	// Step 4: Read and transmux each SSE line
+	var sseEventType string
 	for scanner.Scan() {
 		line := scanner.Bytes()
 
@@ -120,6 +121,19 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 					zap.Error(err),
 				)
 				translated = data
+			}
+
+			// Debug: log raw agentrouter SSE events to diagnose GPT tool call issues
+			if provider == "agentrouter" && len(data) > 0 && sseEventType != "ping" {
+				blockType, _, _, _ := jsonparser.Get(data, "content_block", "type")
+				hasToolCalls := bytes.Contains(translated, []byte(`"tool_calls"`))
+				sp.logger.Info("agentrouter SSE event",
+					zap.String("event", sseEventType),
+					zap.ByteString("block_type", blockType),
+					zap.Bool("has_tool_calls", hasToolCalls),
+					zap.Int("raw_len", len(data)),
+					zap.Int("translated_len", len(translated)),
+				)
 			}
 
 			if len(translated) > 0 {
@@ -162,6 +176,7 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 		// Handle non-data SSE events (some providers send event types)
 		if bytes.HasPrefix(line, []byte("event: ")) {
 			eventType := string(line[7:])
+			sseEventType = eventType
 			if provider == "anthropic" || provider == "1minai" || provider == "agentrouter" {
 				tmx.SetEventType(eventType)
 			}
@@ -305,7 +320,6 @@ func (sp *StreamProxy) processGeminiChunk(c *gin.Context, flusher http.Flusher, 
 	}
 	return ""
 }
-
 
 // ExtractStreamFlag checks the body for the stream flag without full unmarshalling.
 // Uses strings.Contains for minimal overhead.

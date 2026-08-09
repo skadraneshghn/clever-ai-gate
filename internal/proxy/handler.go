@@ -73,17 +73,17 @@ func NewHandler(client *http.Client, cacheStore *cache.Store, redisCacheMgr *cac
 type proxyContext struct {
 	model          string
 	isStream       bool
-	isNvidia       bool // True when model uses nvidia/ prefix — triggers reasoning injection
-	isOneMinAI     bool // True when model uses 1min/ prefix — triggers body/response translation
-	isCloudflare   bool // True when model uses cloudflare/ prefix — triggers prefix stripping
-	isSarvam       bool // True when model uses sarvam/ prefix — triggers prefix stripping
-	isPuter        bool // True when model uses puter/ prefix — triggers prefix stripping
-	isAgentRouter  bool // True when model uses agentrouter/ prefix — triggers sanitization
-	isZenMux       bool // True when model uses zenmux/ prefix — triggers prefix stripping
-	isGemini       bool // True when model routes to the Gemini AI Studio pipeline (gemini/ prefix or standalone gemini-* family) — triggers full body transpilation
+	isNvidia       bool   // True when model uses nvidia/ prefix — triggers reasoning injection
+	isOneMinAI     bool   // True when model uses 1min/ prefix — triggers body/response translation
+	isCloudflare   bool   // True when model uses cloudflare/ prefix — triggers prefix stripping
+	isSarvam       bool   // True when model uses sarvam/ prefix — triggers prefix stripping
+	isPuter        bool   // True when model uses puter/ prefix — triggers prefix stripping
+	isAgentRouter  bool   // True when model uses agentrouter/ prefix — triggers sanitization
+	isZenMux       bool   // True when model uses zenmux/ prefix — triggers prefix stripping
+	isGemini       bool   // True when model routes to the Gemini AI Studio pipeline (gemini/ prefix or standalone gemini-* family) — triggers full body transpilation
 	studioProvider string // Resolved routing label (ProviderGeminiStudio) for gemini requests; "" otherwise. Diagnostic only — the transpiler gate is cred.Provider == ProviderGemini
 	requestedModel string // The original model requested by the client before prefix stripping
-	isJiekou       bool // True when model uses jiekou/ prefix — triggers body model rewrite + parameter clamping
+	isJiekou       bool   // True when model uses jiekou/ prefix — triggers body model rewrite + parameter clamping
 	body           []byte
 	credential     *credentials.AcquireResult
 	pool           *credentials.BalancedChannelPool
@@ -757,14 +757,14 @@ retryLoop:
 		cooldownDuration := cooldownForStatus(recStatus)
 		if result.Credential.Provider == "puter" {
 			// Check if this is a rate limit, quota exhaust, or Puter's custom Bad Request quota signal
-			isQuotaError := recStatus == http.StatusPaymentRequired || 
-				recStatus == http.StatusForbidden || 
+			isQuotaError := recStatus == http.StatusPaymentRequired ||
+				recStatus == http.StatusForbidden ||
 				recStatus == http.StatusTooManyRequests
 
 			if recStatus == http.StatusBadRequest && len(errBody) > 0 {
 				bodyStr := string(errBody)
-				if strings.Contains(bodyStr, "usage-limited-chat") || 
-					strings.Contains(bodyStr, "insufficient_funds") || 
+				if strings.Contains(bodyStr, "usage-limited-chat") ||
+					strings.Contains(bodyStr, "insufficient_funds") ||
 					strings.Contains(bodyStr, "error_400_from_delegate") ||
 					strings.Contains(bodyStr, "Permission denied") {
 					isQuotaError = true
@@ -790,8 +790,8 @@ retryLoop:
 		isPuterQuota400 := false
 		if result.Credential.Provider == "puter" && recStatus == http.StatusBadRequest && len(errBody) > 0 {
 			bodyStr := string(errBody)
-			if strings.Contains(bodyStr, "usage-limited-chat") || 
-				strings.Contains(bodyStr, "insufficient_funds") || 
+			if strings.Contains(bodyStr, "usage-limited-chat") ||
+				strings.Contains(bodyStr, "insufficient_funds") ||
 				strings.Contains(bodyStr, "error_400_from_delegate") ||
 				strings.Contains(bodyStr, "Permission denied") {
 				isPuterQuota400 = true
@@ -1115,6 +1115,23 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 			)
 			return http.StatusBadRequest, upstreamURL, nil, trErr
 		}
+		// Debug: log key details of the translated Anthropic request
+		debugMsgs, _, _, _ := jsonparser.Get(agentBody, "messages")
+		debugMsgCount := 0
+		if len(debugMsgs) > 0 {
+			json.Unmarshal(debugMsgs, &[]interface{}{}) // count only
+			var tmp []interface{}
+			if json.Unmarshal(debugMsgs, &tmp) == nil {
+				debugMsgCount = len(tmp)
+			}
+		}
+		hasTools, _, _, _ := jsonparser.Get(agentBody, "tools")
+		h.logger.Info("agentrouter translated request",
+			zap.String("model", pctx.model),
+			zap.Int("body_bytes", len(agentBody)),
+			zap.Int("msg_count", debugMsgCount),
+			zap.Bool("has_tools", len(hasTools) > 0),
+		)
 		bodyBytes = agentBody
 	}
 
@@ -2035,7 +2052,7 @@ func (h *Handler) findPoolByPrefix(model string) (interface{}, bool) {
 //   - 422 Unprocessable Entity: key accepted but provider rejects this request shape
 func isCredentialAuthError(status int) bool {
 	switch status {
-	case http.StatusUnauthorized,        // 401
+	case http.StatusUnauthorized, // 401
 		http.StatusPaymentRequired,     // 402
 		http.StatusForbidden,           // 403
 		http.StatusNotFound,            // 404
