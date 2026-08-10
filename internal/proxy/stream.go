@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"runtime/debug"
@@ -92,6 +93,8 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 
 	// Step 4: Read and transmux each SSE line
 	var sseEventType string
+	var sawToolCalls bool    // tracks if any translated chunk contained tool_calls
+	var sawFinishReason bool // tracks if a non-null finish_reason was already sent
 	for scanner.Scan() {
 		line := scanner.Bytes()
 
@@ -134,16 +137,23 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 					zap.Int("raw_len", len(data)),
 					zap.Int("translated_len", len(translated)),
 				}
-				// For content_block_start, log the full raw data to see tool_use id/name
-				if sseEventType == "content_block_start" {
-					// Truncate to 1000 bytes to avoid huge logs
+				// For content_block_start and input_json_delta, log raw data
+				if sseEventType == "content_block_start" || (hasToolCalls && sseEventType == "content_block_delta") {
 					truncData := data
-					if len(truncData) > 1000 {
-						truncData = truncData[:1000]
+					if len(truncData) > 500 {
+						truncData = truncData[:500]
 					}
 					logFields = append(logFields, zap.ByteString("raw_data", truncData))
 				}
 				sp.logger.Info("agentrouter SSE event", logFields...)
+			}
+
+			// Track tool calls and finish_reason for synthetic finish injection
+			if bytes.Contains(translated, []byte(`"tool_calls"`)) {
+				sawToolCalls = true
+			}
+			if bytes.Contains(translated, []byte(`"finish_reason":"`)) {
+				sawFinishReason = true
 			}
 
 			if len(translated) > 0 {
@@ -237,6 +247,27 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 			c.Writer.Write([]byte("\n\n"))
 			flusher.Flush()
 		}
+	}
+
+	// AgentRouter GPT models: the Anthropic SSE stream sometimes ends without
+	// a message_delta event, so the client never receives a finish_reason.
+	// Without finish_reason: "tool_calls", IDE clients don't execute tool calls.
+	// Inject a synthetic finish_reason based on whether tool calls were seen.
+	if (provider == "agentrouter" || provider == "anthropic") && !sawFinishReason {
+		reason := "stop"
+		if sawToolCalls {
+			reason = "tool_calls"
+		}
+		finishChunk := fmt.Sprintf(`{"id":"chatcmpl-gate","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"%s"}]}`, reason)
+		sp.logger.Info("injecting synthetic finish_reason",
+			zap.String("provider", provider),
+			zap.String("reason", reason),
+			zap.Bool("saw_tool_calls", sawToolCalls),
+		)
+		c.Writer.Write([]byte("data: "))
+		c.Writer.Write([]byte(finishChunk))
+		c.Writer.Write([]byte("\n\n"))
+		flusher.Flush()
 	}
 
 	// Ensure [DONE] is sent even if upstream didn't send it

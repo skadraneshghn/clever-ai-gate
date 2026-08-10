@@ -588,11 +588,15 @@ func translateAgentRouterResponseToOpenAI(raw []byte, requestedModel string) ([]
 			if callID == "" {
 				callID = fmt.Sprintf("call_gate_%d", toolCallIdx)
 			}
+			toolName := block.Name
+			if toolName == "" {
+				toolName = "unknown_tool"
+			}
 			toolCalls = append(toolCalls, openAIToolCall{
 				ID:   callID,
 				Type: "function",
 				Function: openAIFunction{
-					Name:      block.Name,
+					Name:      toolName,
 					Arguments: argsStr,
 				},
 			})

@@ -173,3 +173,47 @@ func TestAnthropicTransmuxerToolUseMissingID(t *testing.T) {
 		t.Errorf("expected tool index 0, got %v", toolIdx)
 	}
 }
+
+func TestAnthropicTransmuxerToolUseMissingName(t *testing.T) {
+	// AgentRouter's GPT-to-Anthropic conversion sometimes omits both id and name
+	// from content_block_start for tool_use. The transmuxer must generate fallbacks
+	// for both so the client receives a valid OpenAI tool call.
+	tmx := NewAnthropicTransmuxer()
+	defer tmx.Close()
+
+	tmx.SetEventType("message_start")
+	_, _ = tmx.TranslateChunk([]byte(`{"type":"message_start","message":{"id":"msg_123","model":"gpt-5.6-sol"}}`))
+
+	// content_block_start for tool_use WITHOUT id or name
+	tmx.SetEventType("content_block_start")
+	startChunk, err := tmx.TranslateChunk([]byte(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","input":{}}}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(startChunk, &parsed); err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	delta := parsed["choices"].([]interface{})[0].(map[string]interface{})["delta"].(map[string]interface{})
+	toolCalls := delta["tool_calls"].([]interface{})
+	tool0 := toolCalls[0].(map[string]interface{})
+
+	id, _ := tool0["id"].(string)
+	if id == "" {
+		t.Errorf("expected non-empty generated tool id")
+	}
+	if !strings.HasPrefix(id, "call_gate_") {
+		t.Errorf("expected 'call_gate_' prefix, got %q", id)
+	}
+
+	fn := tool0["function"].(map[string]interface{})
+	name, _ := fn["name"].(string)
+	if name == "" {
+		t.Errorf("expected non-empty fallback tool name")
+	}
+	if name != "unknown_tool" {
+		t.Errorf("expected fallback name 'unknown_tool', got %q", name)
+	}
+}

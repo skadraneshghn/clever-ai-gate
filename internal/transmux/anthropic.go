@@ -18,9 +18,11 @@ import (
 //   - message_stop        → stream termination
 //   - ping                → keepalive
 type AnthropicTransmuxer struct {
-	eventType string
-	blockType string // "text", "thinking", "tool_use"
-	toolIndex int    // tool call index counter for OpenAI tool_calls
+	eventType   string
+	blockType   string // "text", "thinking", "tool_use"
+	toolIndex   int    // tool call index counter for OpenAI tool_calls
+	toolUseSeen bool   // true if any tool_use block was encountered
+	finishSent  bool   // true if a finish_reason was already emitted
 }
 
 // NewAnthropicTransmuxer creates a new Anthropic format translator.
@@ -53,6 +55,10 @@ func (t *AnthropicTransmuxer) TranslateChunk(data []byte) ([]byte, error) {
 			if toolID == "" {
 				toolID = fmt.Sprintf("call_gate_%d", t.toolIndex)
 			}
+			if toolName == "" {
+				toolName = "unknown_tool"
+			}
+			t.toolUseSeen = true
 			return buildToolCallStartDelta(t.toolIndex, toolID, toolName), nil
 		}
 
@@ -116,6 +122,7 @@ func (t *AnthropicTransmuxer) TranslateChunk(data []byte) ([]byte, error) {
 		outputTokens, _ := jsonparser.GetInt(data, "usage", "output_tokens")
 
 		reason := mapAnthropicStopReason(string(stopReason))
+		t.finishSent = true
 
 		if inputTokens > 0 || outputTokens > 0 {
 			return buildUsageDelta(reason, int(inputTokens), int(outputTokens)), nil
