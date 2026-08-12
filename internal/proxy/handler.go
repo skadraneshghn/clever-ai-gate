@@ -917,20 +917,23 @@ retryLoop:
 		// first-pass sanitizer miss, then break on the second 400 to protect the
 		// remaining pool keys from pointless exhaustion.
 		//
-		// All other providers: abort immediately on first 400.
+		// Fast Fail for 400 Bad Request Payload Issues (not a Puter quota error)
+		//
+		// Allows up to 2 attempts for a provider before concluding the payload schema
+		// is invalid, protecting remaining pool keys from pointless exhaustion.
 		if recStatus == http.StatusBadRequest {
-			jiekou400Count := 0
+			provider400Count := 0
 			for _, a := range attempts {
-				if a.provider == "jiekou" && a.statusCode == http.StatusBadRequest {
-					jiekou400Count++
+				if a.provider == result.Credential.Provider && a.statusCode == http.StatusBadRequest {
+					provider400Count++
 				}
 			}
-			if result.Credential.Provider != "jiekou" || jiekou400Count >= 2 {
-				h.logger.Error("payload schema error — aborting rotation to protect pool keys",
+			if provider400Count >= 2 {
+				h.logger.Error("payload schema error — aborting rotation to protect remaining pool keys",
 					zap.String("model", pctx.model),
 					zap.String("provider", result.Credential.Provider),
 					zap.Int("status", recStatus),
-					zap.Int("jiekou_400_count", jiekou400Count),
+					zap.Int("provider_400_count", provider400Count),
 					zap.ByteString("error_body", errBody),
 				)
 				break retryLoop
