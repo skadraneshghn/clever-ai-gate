@@ -135,3 +135,84 @@ func TestIsCloudflareModelAgreementError(t *testing.T) {
 	}
 }
 
+func TestSanitizeCloudflareRequest_VisionWithoutText(t *testing.T) {
+	// Request containing image without text
+	rawJSON := []byte(`{
+		"model": "cloudflare/@cf/meta/llama-3.2-11b-vision-instruct",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+				]
+			}
+		],
+		"stream_options": {"include_usage": true},
+		"tools": []
+	}`)
+
+	sanitized := sanitizeCloudflareRequest(rawJSON)
+
+	// Verify model prefix stripped
+	model, err := jsonparser.GetString(sanitized, "model")
+	if err != nil || model != "@cf/meta/llama-3.2-11b-vision-instruct" {
+		t.Errorf("expected model @cf/meta/llama-3.2-11b-vision-instruct, got %s", model)
+	}
+
+	// Verify stream_options and tools removed
+	if _, _, _, err := jsonparser.Get(sanitized, "stream_options"); err == nil {
+		t.Errorf("expected stream_options to be removed")
+	}
+	if _, _, _, err := jsonparser.Get(sanitized, "tools"); err == nil {
+		t.Errorf("expected empty tools to be removed")
+	}
+
+	// Verify text prompt injected for image
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text,omitempty"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+
+	if err := json.Unmarshal(sanitized, &req); err != nil {
+		t.Fatalf("failed to unmarshal sanitized JSON: %v", err)
+	}
+
+	if len(req.Messages) == 0 {
+		t.Fatalf("expected messages, got 0")
+	}
+
+	hasText := false
+	for _, part := range req.Messages[0].Content {
+		if part.Type == "text" && part.Text != "" {
+			hasText = true
+		}
+	}
+
+	if !hasText {
+		t.Errorf("expected text part to be injected in vision message, got %+v", req.Messages[0].Content)
+	}
+}
+
+func TestSanitizeCloudflareRequest_DeveloperRoleNormalized(t *testing.T) {
+	rawJSON := []byte(`{
+		"model": "@cf/meta/llama-3.2-11b-vision-instruct",
+		"messages": [
+			{"role": "developer", "content": "You are a helpful assistant."},
+			{"role": "user", "content": "Hi"}
+		]
+	}`)
+
+	sanitized := sanitizeCloudflareRequest(rawJSON)
+
+	role0, _ := jsonparser.GetString(sanitized, "messages", "[0]", "role")
+	if role0 != "system" {
+		t.Errorf("expected developer role to be normalized to system, got %s", role0)
+	}
+}
+
+

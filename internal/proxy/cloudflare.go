@@ -220,3 +220,134 @@ func autoAcceptCloudflareModelAgreement(ctx context.Context, client *http.Client
 
 	return nil
 }
+
+var cloudflareUnsupportedFields = []string{
+	"stream_options",
+	"store",
+	"metadata",
+	"service_tier",
+	"parallel_tool_calls",
+}
+
+// sanitizeCloudflareRequest normalizes and sanitizes chat completion payloads
+// destined for Cloudflare Workers AI (/ai/v1/chat/completions).
+//
+// Fixes:
+//  1. Converts "role": "developer" to "role": "system".
+//  2. In multimodal/vision requests (e.g. Llama 3.2 Vision), if a message contains
+//     an image_url block but no non-empty text block, Cloudflare's internal tokenizer
+//     fails with code 3030: "AiError: Unable to add image when there are no user-supplied
+//     nor system-supplied messages." We ensure a non-empty text prompt exists.
+//  3. Strips unsupported top-level OpenAI parameters (stream_options, store, metadata,
+//     service_tier) that cause Cloudflare schema rejection.
+//  4. Removes empty tool definitions ("tools": []).
+func sanitizeCloudflareRequest(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+
+	// 1. Strip "cloudflare/" routing prefix from model if present
+	if modelRaw, ok := payload["model"].(string); ok {
+		if strings.HasPrefix(modelRaw, "cloudflare/") {
+			payload["model"] = strings.TrimPrefix(modelRaw, "cloudflare/")
+		}
+	}
+
+	// 2. Strip unsupported top-level OpenAI parameters
+	for _, f := range cloudflareUnsupportedFields {
+		delete(payload, f)
+	}
+
+	// 3. Remove empty tools list
+	if tools, ok := payload["tools"].([]interface{}); ok && len(tools) == 0 {
+		delete(payload, "tools")
+	}
+
+	// 4. Normalize messages and ensure vision messages have valid text parts
+	if messages, ok := payload["messages"].([]interface{}); ok {
+		hasUserMsg := false
+		for _, msgInterface := range messages {
+			msgMap, isMap := msgInterface.(map[string]interface{})
+			if !isMap {
+				continue
+			}
+
+			// Normalize "developer" role -> "system"
+			if role, ok := msgMap["role"].(string); ok {
+				roleLower := strings.ToLower(role)
+				if roleLower == "developer" {
+					msgMap["role"] = "system"
+				} else if roleLower == "user" {
+					hasUserMsg = true
+				}
+			}
+
+			// Replace null content with empty string
+			if msgMap["content"] == nil {
+				msgMap["content"] = ""
+			}
+
+			// Handle multimodal array content
+			if parts, ok := msgMap["content"].([]interface{}); ok {
+				hasImage := false
+				hasText := false
+				var textPart map[string]interface{}
+
+				for _, partInterface := range parts {
+					partMap, ok := partInterface.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					pType, _ := partMap["type"].(string)
+					if pType == "image_url" || pType == "image" {
+						hasImage = true
+					} else if pType == "text" {
+						txt, _ := partMap["text"].(string)
+						if strings.TrimSpace(txt) != "" {
+							hasText = true
+						}
+						textPart = partMap
+					}
+				}
+
+				// If message has image but NO non-empty text, add text prompt so Cloudflare's
+				// Llama 3.2 Vision tokenizer does not throw code 3030:
+				// "Unable to add image when there are no user-supplied nor system-supplied messages."
+				if hasImage && !hasText {
+					if textPart != nil {
+						textPart["text"] = "Describe this image."
+					} else {
+						parts = append([]interface{}{
+							map[string]interface{}{
+								"type": "text",
+								"text": "Describe this image.",
+							},
+						}, parts...)
+						msgMap["content"] = parts
+					}
+				}
+			}
+		}
+
+		// Ensure at least one user message exists if there are only system/assistant messages
+		if !hasUserMsg && len(messages) > 0 {
+			messages = append(messages, map[string]interface{}{
+				"role":    "user",
+				"content": "Describe this image.",
+			})
+			payload["messages"] = messages
+		}
+	}
+
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return out
+}
+

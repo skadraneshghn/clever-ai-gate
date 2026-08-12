@@ -1176,14 +1176,16 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		// Third-party AI Gateway image models: pass OpenAI payload through unchanged
 	}
 
-	// --- Cloudflare Workers AI VLM Image Inlining ---
+	// --- Cloudflare Workers AI VLM Image Inlining & Request Sanitization ---
 	// Cloudflare Workers AI rejects remote HTTP/HTTPS image URLs on /ai/v1/chat/completions
 	// with error code 6004 ("Property image_url only supports base64 encoded image data").
 	// Convert any remote image URLs to Base64 data URIs in-memory before dispatch.
+	// Also sanitize messages to prevent code 3030 ("Unable to add image when there are no user messages").
 	if cred.Provider == "cloudflare" && !isCloudflareImageRequest(c.Request.URL.Path) {
 		if inlined, inErr := ConvertImageURLsToBase64(c.Request.Context(), bodyBytes); inErr == nil && len(inlined) > 0 {
 			bodyBytes = inlined
 		}
+		bodyBytes = sanitizeCloudflareRequest(bodyBytes)
 	}
 
 	// --- Sarvam AI Request Sanitization ---
