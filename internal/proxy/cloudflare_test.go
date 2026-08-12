@@ -108,3 +108,30 @@ func TestIsCloudflareImageRequest(t *testing.T) {
 		}
 	}
 }
+
+func TestIsCloudflareModelAgreementError(t *testing.T) {
+	agreementErrors := [][]byte{
+		[]byte(`{"errors":[{"message":"AiError: Model Agreement: Prior to using this model, you must submit the prompt 'agree'. By submitting ‘agree’, you hereby agree to the llama-3.2-11b-vision-instruct Community License"}]}`),
+		[]byte(`{"errors":[{"code":1000,"message":"Prior to using this model, you must submit the prompt 'agree'"}]}`),
+		[]byte(`{"error":"Model Agreement required, submit agree"}`),
+	}
+
+	for _, errBody := range agreementErrors {
+		if !isCloudflareModelAgreementError(errBody) {
+			t.Errorf("expected isCloudflareModelAgreementError to be true for: %s", string(errBody))
+		}
+	}
+
+	otherErrors := [][]byte{
+		[]byte(`{"errors":[{"message":"Rate limit exceeded"}]}`),
+		[]byte(`{"error":"Invalid API key"}`),
+		[]byte(`{"success":false,"errors":[{"message":"Not found"}]}`),
+	}
+
+	for _, errBody := range otherErrors {
+		if isCloudflareModelAgreementError(errBody) {
+			t.Errorf("expected isCloudflareModelAgreementError to be false for: %s", string(errBody))
+		}
+	}
+}
+

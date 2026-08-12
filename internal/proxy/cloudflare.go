@@ -2,9 +2,12 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -160,4 +163,60 @@ func isCloudflareNativeImageResponse(body []byte) bool {
 		return true
 	}
 	return false
+}
+
+// isCloudflareModelAgreementError reports whether a Cloudflare error body indicates
+// that the model requires submitting the "agree" prompt before inference.
+func isCloudflareModelAgreementError(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	bodyStr := string(body)
+	return strings.Contains(bodyStr, "AiError: Model Agreement") ||
+		(strings.Contains(bodyStr, "Model Agreement") && strings.Contains(bodyStr, "agree")) ||
+		strings.Contains(bodyStr, "Prior to using this model, you must submit the prompt 'agree'")
+}
+
+// autoAcceptCloudflareModelAgreement automatically performs the required "agree"
+// prompt handshake with Cloudflare Workers AI for Meta / restricted models.
+func autoAcceptCloudflareModelAgreement(ctx context.Context, client *http.Client, accountID, apiToken, model string) error {
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	cleanModel := strings.TrimPrefix(model, "cloudflare/")
+
+	// 1. Submit "agree" to the universal /ai/run/{model} endpoint
+	runURL := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/ai/run/%s", accountID, cleanModel)
+	runBody := []byte(`{"prompt":"agree"}`)
+
+	runReq, err := http.NewRequestWithContext(ctx, http.MethodPost, runURL, bytes.NewReader(runBody))
+	if err == nil {
+		runReq.Header.Set("Authorization", "Bearer "+apiToken)
+		runReq.Header.Set("Content-Type", "application/json")
+		runReq.Header.Set("User-Agent", "CleverAIGate/1.0 (Agreement-Handshake)")
+
+		if resp, doErr := client.Do(runReq); doErr == nil {
+			io.Copy(io.Discard, resp.Body) //nolint:errcheck
+			resp.Body.Close()
+		}
+	}
+
+	// 2. Also submit "agree" to the OpenAI chat completions endpoint
+	chatURL := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/ai/v1/chat/completions", accountID)
+	chatBody := []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"agree"}]}`, cleanModel))
+
+	chatReq, err := http.NewRequestWithContext(ctx, http.MethodPost, chatURL, bytes.NewReader(chatBody))
+	if err == nil {
+		chatReq.Header.Set("Authorization", "Bearer "+apiToken)
+		chatReq.Header.Set("Content-Type", "application/json")
+		chatReq.Header.Set("User-Agent", "CleverAIGate/1.0 (Agreement-Handshake)")
+
+		if resp, doErr := client.Do(chatReq); doErr == nil {
+			io.Copy(io.Discard, resp.Body) //nolint:errcheck
+			resp.Body.Close()
+		}
+	}
+
+	return nil
 }

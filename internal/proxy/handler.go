@@ -830,7 +830,12 @@ retryLoop:
 			}
 		}
 
-		if isDepletedAccount {
+		if isCloudflareModelAgreementError(errBody) {
+			cooldownDuration = 1 * time.Second
+			isDepletedAccount = false
+			accountID := strings.TrimPrefix(result.Credential.BaseURL, "cloudflare:")
+			_ = autoAcceptCloudflareModelAgreement(c.Request.Context(), h.client, accountID, result.Credential.APIKey, pctx.model)
+		} else if isDepletedAccount {
 			cooldownDuration = 24 * time.Hour
 			h.logger.Error("credential account balance exhausted or suspended — marked with 24h cooldown",
 				zap.String("model", pctx.model),
@@ -1429,6 +1434,43 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		const maxErrBodyBytes = 4096
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes))
+
+		// Auto-Agree Handshake for Cloudflare Meta / Restricted Models
+		if cred.Provider == "cloudflare" && isCloudflareModelAgreementError(body) {
+			h.logger.Info("cloudflare model agreement required — performing automatic 'agree' handshake",
+				zap.String("model", pctx.model),
+				zap.Int("credential_id", cred.ID),
+			)
+			accountID := strings.TrimPrefix(cred.BaseURL, "cloudflare:")
+			_ = autoAcceptCloudflareModelAgreement(c.Request.Context(), h.client, accountID, cred.APIKey, modelName)
+
+			// Retry the original request with the agreed credential
+			retryReq, reqErr := http.NewRequestWithContext(
+				c.Request.Context(),
+				c.Request.Method,
+				upstreamURL,
+				bytes.NewReader(bodyBytes),
+			)
+			if reqErr == nil {
+				h.rewriter.RewriteHeaders(retryReq, cred.Provider, cred.APIKey, c.Request.Header)
+				if contentTypeOverride != "" {
+					retryReq.Header.Set("Content-Type", contentTypeOverride)
+				}
+				retryResp, retryDoErr := h.client.Do(retryReq)
+				if retryDoErr == nil && retryResp.StatusCode >= 200 && retryResp.StatusCode < 300 {
+					if resp != nil && resp.Body != nil {
+						resp.Body.Close()
+					}
+					resp = retryResp
+					err = nil
+					goto handleSuccess
+				} else if retryResp != nil {
+					defer retryResp.Body.Close()
+					body, _ = io.ReadAll(io.LimitReader(retryResp.Body, maxErrBodyBytes))
+				}
+			}
+		}
+
 		h.logger.Error("upstream returned error (buffered for retry evaluation)",
 			zap.String("model", pctx.model),
 			zap.String("provider", cred.Provider),
@@ -1439,7 +1481,7 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		return resp.StatusCode, upstreamURL, body, nil
 	}
 
-	// --- Success stream path ---
+handleSuccess:
 	// --- Success stream path ---
 	if pctx.isStream && resp.StatusCode == http.StatusOK {
 		c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)

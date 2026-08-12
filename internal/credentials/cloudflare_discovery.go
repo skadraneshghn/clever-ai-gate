@@ -1,6 +1,7 @@
 package credentials
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -448,6 +449,37 @@ func DiscoverAndRegisterCloudflareModels(
 	if _, err = tx.Exec(ctx, "NOTIFY config_change, 'model_pools:reload'"); err != nil {
 		return 0, nil, fmt.Errorf("failed to broadcast config change notification: %w", err)
 	}
+
+	// Proactively perform the "agree" handshake for Meta / Llama models in background
+	go func(models []string, acctID, token string) {
+		client := &http.Client{Timeout: 5 * time.Second}
+		for _, m := range models {
+			mLower := strings.ToLower(m)
+			if strings.Contains(mLower, "llama") || strings.HasPrefix(m, "cloudflare/@cf/meta/") || strings.HasPrefix(m, "@cf/meta/") {
+				cleanModel := strings.TrimPrefix(m, "cloudflare/")
+				// Universal run endpoint agreement
+				runURL := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/ai/run/%s", acctID, cleanModel)
+				if req, err := http.NewRequest(http.MethodPost, runURL, bytes.NewReader([]byte(`{"prompt":"agree"}`))); err == nil {
+					req.Header.Set("Authorization", "Bearer "+token)
+					req.Header.Set("Content-Type", "application/json")
+					if resp, doErr := client.Do(req); doErr == nil {
+						io.Copy(io.Discard, resp.Body) //nolint:errcheck
+						resp.Body.Close()
+					}
+				}
+				// OpenAI endpoint agreement
+				chatURL := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/ai/v1/chat/completions", acctID)
+				if req, err := http.NewRequest(http.MethodPost, chatURL, bytes.NewReader([]byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"agree"}]}`, cleanModel)))); err == nil {
+					req.Header.Set("Authorization", "Bearer "+token)
+					req.Header.Set("Content-Type", "application/json")
+					if resp, doErr := client.Do(req); doErr == nil {
+						io.Copy(io.Discard, resp.Body) //nolint:errcheck
+						resp.Body.Close()
+					}
+				}
+			}
+		}
+	}(discoveredModels, accountID, apiToken)
 
 	return len(discoveredModels), discoveredModels, tx.Commit(ctx)
 }
