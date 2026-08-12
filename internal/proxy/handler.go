@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -184,6 +185,21 @@ func (h *Handler) Handle(c *gin.Context) {
 	}
 
 	requestedModel := model
+
+	// --- Endpoint vs Model Modality Guard ---
+	// Prevent sending embedding models to /v1/chat/completions (which causes upstream 404
+	// and falsely penalizes all healthy pool credentials for 25 minutes).
+	reqPath := c.Request.URL.Path
+	if strings.Contains(reqPath, "/chat/completions") && isEmbeddingModel(model) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{
+				"message": fmt.Sprintf("Model %q is an embedding model and must be called via /v1/embeddings, not /v1/chat/completions", model),
+				"type":    "invalid_request_error",
+				"code":    "endpoint_mismatch",
+			},
+		})
+		return
+	}
 
 	// --- NVIDIA Prefix Detection ---
 	// Models prefixed with "nvidia/" are routed through the NVIDIA NIM pipeline.
@@ -578,6 +594,26 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestSt
 
 retryLoop:
 	for triedCount < maxAttempts {
+		// Stop immediately if the client context was canceled or timed out
+		if c.Request.Context().Err() != nil {
+			h.logger.Warn("client context canceled or timed out — aborting retry loop immediately to protect pool credentials",
+				zap.String("model", pctx.model),
+				zap.String("tenant_id", pctx.tenantID),
+				zap.Int("keys_tried", triedCount),
+				zap.Error(c.Request.Context().Err()),
+			)
+			if !c.Writer.Written() {
+				c.AbortWithStatusJSON(http.StatusGatewayTimeout, gin.H{
+					"error": gin.H{
+						"message": "Client request timed out or was canceled",
+						"type":    "timeout_error",
+						"code":    "context_canceled",
+					},
+				})
+			}
+			return
+		}
+
 		spins++
 		if spins > maxSpins {
 			// All remaining pool tokens were penalized by concurrent requests
@@ -660,6 +696,27 @@ retryLoop:
 		)
 
 		statusCode, upstreamURL, errBody, err := h.forwardRequest(c, pctx)
+
+		// If client disconnected or timed out during forwardRequest, exit immediately
+		if c.Request.Context().Err() != nil {
+			h.logger.Warn("request terminated due to client context cancellation — aborting rotation without penalizing remaining keys",
+				zap.String("model", pctx.model),
+				zap.String("provider", result.Credential.Provider),
+				zap.Int("credential_id", result.Credential.ID),
+				zap.Int("keys_tried", triedCount),
+				zap.Error(c.Request.Context().Err()),
+			)
+			if !c.Writer.Written() {
+				c.AbortWithStatusJSON(http.StatusGatewayTimeout, gin.H{
+					"error": gin.H{
+						"message": "Client request timed out or was canceled",
+						"type":    "timeout_error",
+						"code":    "context_canceled",
+					},
+				})
+			}
+			return
+		}
 
 		// ── True 2xx success: forwardRequest already wrote to c.Writer ────────
 		if err == nil && statusCode >= 200 && statusCode < 300 {
@@ -755,21 +812,37 @@ retryLoop:
 		}
 
 		cooldownDuration := cooldownForStatus(recStatus)
-		if result.Credential.Provider == "puter" {
+
+		// Check for Account / Balance / Quota exhaustion across all providers
+		isDepletedAccount := false
+		if len(errBody) > 0 {
+			bodyLower := strings.ToLower(string(errBody))
+			if strings.Contains(bodyLower, "not_enough_balance") ||
+				strings.Contains(bodyLower, "insufficient_balance") ||
+				strings.Contains(bodyLower, "insufficient_funds") ||
+				strings.Contains(bodyLower, "account suspended") ||
+				strings.Contains(bodyLower, "account_suspended") ||
+				strings.Contains(bodyLower, "quota_exceeded") ||
+				strings.Contains(bodyLower, "credit limit") ||
+				strings.Contains(bodyLower, "usage-limited-chat") ||
+				strings.Contains(bodyLower, "error_400_from_delegate") {
+				isDepletedAccount = true
+			}
+		}
+
+		if isDepletedAccount {
+			cooldownDuration = 24 * time.Hour
+			h.logger.Error("credential account balance exhausted or suspended — marked with 24h cooldown",
+				zap.String("model", pctx.model),
+				zap.String("provider", result.Credential.Provider),
+				zap.Int("credential_id", result.Credential.ID),
+				zap.ByteString("error_body", errBody),
+			)
+		} else if result.Credential.Provider == "puter" {
 			// Check if this is a rate limit, quota exhaust, or Puter's custom Bad Request quota signal
 			isQuotaError := recStatus == http.StatusPaymentRequired ||
 				recStatus == http.StatusForbidden ||
 				recStatus == http.StatusTooManyRequests
-
-			if recStatus == http.StatusBadRequest && len(errBody) > 0 {
-				bodyStr := string(errBody)
-				if strings.Contains(bodyStr, "usage-limited-chat") ||
-					strings.Contains(bodyStr, "insufficient_funds") ||
-					strings.Contains(bodyStr, "error_400_from_delegate") ||
-					strings.Contains(bodyStr, "Permission denied") {
-					isQuotaError = true
-				}
-			}
 
 			if isQuotaError {
 				if failures >= 3 {
@@ -798,11 +871,11 @@ retryLoop:
 			}
 		}
 
-		if isCredentialAuthError(recStatus) || isPuterQuota400 {
+		if isCredentialAuthError(recStatus) || isPuterQuota400 || isDepletedAccount {
 			// Quota/auth error: rotate to the next key.
 			result.FromPool.PenalizeToken(result.Index, cooldownDuration)
 			h.broadcaster.PublishPenalize(result.FromPool.ModelPattern, result.Credential.ID, result.Index, time.Now().Add(cooldownDuration))
-			h.logger.Warn("credential rejected by upstream (or puter quota limit) — rotating to next key",
+			h.logger.Warn("credential rejected by upstream (quota/auth/balance limit) — rotating to next key",
 				zap.String("request_id", fmt.Sprintf("%v", requestID)),
 				zap.String("model", pctx.model),
 				zap.String("provider", result.Credential.Provider),
@@ -813,6 +886,18 @@ retryLoop:
 				zap.Duration("cooldown", cooldownDuration),
 			)
 			continue // immediately rotate
+		}
+
+		// Fast fail for 404 Not Found:
+		// If upstream returns 404 (model not found / invalid route), rotating credentials
+		// will only fail identically and penalize all healthy keys for 25m. Abort rotation.
+		if recStatus == http.StatusNotFound {
+			h.logger.Warn("upstream returned 404 not found — aborting retry loop to protect pool keys",
+				zap.String("model", pctx.model),
+				zap.String("provider", result.Credential.Provider),
+				zap.ByteString("error_body", errBody),
+			)
+			break retryLoop
 		}
 
 		// Fast Fail for 400 Bad Request Payload Issues (not a Puter quota error)
@@ -1084,6 +1169,16 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 			contentTypeOverride = ctOverride
 		}
 		// Third-party AI Gateway image models: pass OpenAI payload through unchanged
+	}
+
+	// --- Cloudflare Workers AI VLM Image Inlining ---
+	// Cloudflare Workers AI rejects remote HTTP/HTTPS image URLs on /ai/v1/chat/completions
+	// with error code 6004 ("Property image_url only supports base64 encoded image data").
+	// Convert any remote image URLs to Base64 data URIs in-memory before dispatch.
+	if cred.Provider == "cloudflare" && !isCloudflareImageRequest(c.Request.URL.Path) {
+		if inlined, inErr := ConvertImageURLsToBase64(c.Request.Context(), bodyBytes); inErr == nil && len(inlined) > 0 {
+			bodyBytes = inlined
+		}
 	}
 
 	// --- Sarvam AI Request Sanitization ---
@@ -1614,12 +1709,28 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	}
 
 	// Normal success path — capture text responses for logging history.
-	// For JSON (application/json) content types, we read into memory to allow
-	// telemetry indexing. For binary formats (image, audio), we stream directly via io.Copy
-	// to avoid memory bloat.
+	// Normal success path — capture text responses for logging history.
+	// For JSON (application/json) content types, we read into memory to allow telemetry indexing.
+	// For Image generation endpoints that return raw binary (image/png, image/jpeg), translate to OpenAI b64_json format.
+	// For other binary formats (audio stream, file downloads), stream directly via io.Copy to avoid memory bloat.
 	isJSON := strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json")
 	var respBody []byte
-	if isJSON {
+
+	if strings.Contains(c.Request.URL.Path, "/images/") && !isJSON {
+		respBody, _ = io.ReadAll(resp.Body)
+		if isBinaryImage(respBody) {
+			b64 := base64.StdEncoding.EncodeToString(respBody)
+			respJSON := map[string]interface{}{
+				"created": time.Now().Unix(),
+				"data": []map[string]interface{}{
+					{"b64_json": b64},
+				},
+			}
+			respBody, _ = json.Marshal(respJSON)
+			isJSON = true
+			resp.Header.Set("Content-Type", "application/json")
+		}
+	} else if isJSON {
 		respBody, _ = io.ReadAll(resp.Body)
 		// Normalize inline <think> tags into structured reasoning_content so
 		// front-ends render a thinking panel instead of raw reasoning text.
@@ -1631,6 +1742,9 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		for _, val := range vals {
 			c.Writer.Header().Add(key, val)
 		}
+	}
+	if isJSON {
+		c.Writer.Header().Set("Content-Type", "application/json")
 	}
 	c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
 	c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
@@ -2565,3 +2679,15 @@ func (h *Handler) rewriteResponseModel(respBody []byte, requestedModel string) [
 	}
 	return respBody
 }
+
+// isEmbeddingModel reports whether a model identifier is an embedding model.
+func isEmbeddingModel(model string) bool {
+	lower := strings.ToLower(model)
+	return strings.Contains(lower, "embed") ||
+		strings.Contains(lower, "nemoretriever") ||
+		strings.Contains(lower, "bge-") ||
+		strings.Contains(lower, "e5-") ||
+		strings.Contains(lower, "gte-") ||
+		strings.Contains(lower, "sentence-")
+}
+

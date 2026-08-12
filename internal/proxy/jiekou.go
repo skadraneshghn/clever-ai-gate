@@ -134,6 +134,14 @@ func sanitizeJiekouRequest(body []byte) []byte {
 		delete(payload, f)
 	}
 
+	// Strip string response_format (e.g. "b64_json" or "url" on image generations)
+	// which Jiekou's image API rejects with HTTP 400 "Unknown parameter: 'response_format'".
+	if rf, ok := payload["response_format"]; ok {
+		if _, isStr := rf.(string); isStr {
+			delete(payload, "response_format")
+		}
+	}
+
 	// ── Layer 1b: Universal Message Role Normalization ─────────────────────────
 	// IDE coding tools (Cursor, Cline, Kilo Code, Roo Code) send system prompts
 	// as {"role": "developer", ...} when talking to reasoning/newer models.

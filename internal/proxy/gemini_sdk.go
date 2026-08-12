@@ -329,32 +329,40 @@ func buildSDKPartsFromContent(raw json.RawMessage) ([]*genai.Part, error) {
 }
 
 // convertImageURLToSDK converts an OpenAI image_url value into a *genai.Part.
-// data: URIs → InlineData (base64). https:// URLs → FileData.
+// data: URIs → InlineData (raw binary bytes in genai.Blob.Data, which json.Marshal base64-encodes).
+// http(s):// URLs → fetched in-memory and converted to InlineData.
 func convertImageURLToSDK(url string) (*genai.Part, error) {
 	if strings.HasPrefix(url, "data:") {
-		rest := strings.TrimPrefix(url, "data:")
-		semicolonIdx := strings.Index(rest, ";")
-		if semicolonIdx < 0 {
-			return nil, fmt.Errorf("malformed data URI: missing semicolon")
+		mimeType, rawBytes, _, err := ExtractBase64FromDataURI(url)
+		if err != nil {
+			return nil, err
 		}
-		mimeType := rest[:semicolonIdx]
-		afterSemicolon := rest[semicolonIdx+1:]
-		commaIdx := strings.Index(afterSemicolon, ",")
-		if commaIdx < 0 {
-			return nil, fmt.Errorf("malformed data URI: missing comma after encoding")
-		}
-		b64data := afterSemicolon[commaIdx+1:]
 		return &genai.Part{
 			InlineData: &genai.Blob{
 				MIMEType: mimeType,
-				Data:     []byte(b64data),
+				Data:     rawBytes,
 			},
 		}, nil
 	}
-	// HTTPS URL → FileData
-	return &genai.Part{
-		FileData: &genai.FileData{FileURI: url},
-	}, nil
+
+	if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
+		mimeType, _, dataURI, err := FetchAndEncodeImage(context.Background(), url)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch remote image for gemini sdk: %w", err)
+		}
+		_, rawBytes, _, err := ExtractBase64FromDataURI(dataURI)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode fetched image for gemini sdk: %w", err)
+		}
+		return &genai.Part{
+			InlineData: &genai.Blob{
+				MIMEType: mimeType,
+				Data:     rawBytes,
+			},
+		}, nil
+	}
+
+	return nil, fmt.Errorf("unsupported image URL format: must be data URI or http(s) URL")
 }
 
 // buildSDKAssistantParts converts an OpenAI assistant message (text content and/or

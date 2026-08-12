@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -675,21 +676,13 @@ func buildGeminiPartsFromContent(raw json.RawMessage) ([]geminiPart, error) {
 }
 
 // convertImageURL converts an OpenAI image_url value into a Gemini part.
-// data: URIs → inlineData (base64). https:// URLs → fileData.
+// data: URIs → inlineData (base64). http(s):// URLs → fetched and converted to inlineData.
 func convertImageURL(url string) (geminiPart, error) {
 	if strings.HasPrefix(url, "data:") {
-		rest := strings.TrimPrefix(url, "data:")
-		semicolonIdx := strings.Index(rest, ";")
-		if semicolonIdx < 0 {
-			return geminiPart{}, fmt.Errorf("malformed data URI: missing semicolon")
+		mimeType, _, b64data, err := ExtractBase64FromDataURI(url)
+		if err != nil {
+			return geminiPart{}, err
 		}
-		mimeType := rest[:semicolonIdx]
-		afterSemicolon := rest[semicolonIdx+1:]
-		commaIdx := strings.Index(afterSemicolon, ",")
-		if commaIdx < 0 {
-			return geminiPart{}, fmt.Errorf("malformed data URI: missing comma after encoding")
-		}
-		b64data := afterSemicolon[commaIdx+1:]
 		return geminiPart{
 			InlineData: &geminiInlineData{
 				MimeType: mimeType,
@@ -697,10 +690,21 @@ func convertImageURL(url string) (geminiPart, error) {
 			},
 		}, nil
 	}
-	// HTTPS URL → fileData (Gemini 2.0+)
-	return geminiPart{
-		FileData: &geminiFileData{FileURI: url},
-	}, nil
+
+	if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
+		mimeType, b64data, _, err := FetchAndEncodeImage(context.Background(), url)
+		if err != nil {
+			return geminiPart{}, fmt.Errorf("failed to fetch remote image for gemini: %w", err)
+		}
+		return geminiPart{
+			InlineData: &geminiInlineData{
+				MimeType: mimeType,
+				Data:     b64data,
+			},
+		}, nil
+	}
+
+	return geminiPart{}, fmt.Errorf("unsupported image URL format: must be data URI or http(s) URL")
 }
 
 // buildGeminiAssistantParts converts an OpenAI assistant message (text content

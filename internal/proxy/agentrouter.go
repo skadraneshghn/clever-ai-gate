@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -403,6 +404,7 @@ func parseRawContentToText(raw json.RawMessage) string {
 }
 
 // parseRawContentToBlocks converts raw message content into an array of content blocks.
+// It also converts OpenAI "image_url" parts into Anthropic "image" content blocks.
 func parseRawContentToBlocks(raw json.RawMessage) []interface{} {
 	if len(raw) == 0 {
 		return nil
@@ -416,7 +418,50 @@ func parseRawContentToBlocks(raw json.RawMessage) []interface{} {
 	}
 	var rawBlocks []interface{}
 	if json.Unmarshal(raw, &rawBlocks) == nil {
-		return rawBlocks
+		var convertedBlocks []interface{}
+		for _, b := range rawBlocks {
+			blockMap, ok := b.(map[string]interface{})
+			if !ok {
+				convertedBlocks = append(convertedBlocks, b)
+				continue
+			}
+
+			blockType, _ := blockMap["type"].(string)
+			if blockType == "image_url" {
+				var targetURL string
+				if imgObj, ok := blockMap["image_url"].(map[string]interface{}); ok {
+					targetURL, _ = imgObj["url"].(string)
+				} else if strURL, ok := blockMap["image_url"].(string); ok {
+					targetURL = strURL
+				}
+
+				if targetURL != "" {
+					var mimeType, b64Data string
+					var err error
+
+					if strings.HasPrefix(targetURL, "data:") {
+						mimeType, _, b64Data, err = ExtractBase64FromDataURI(targetURL)
+					} else if strings.HasPrefix(targetURL, "http://") || strings.HasPrefix(targetURL, "https://") {
+						mimeType, b64Data, _, err = FetchAndEncodeImage(context.Background(), targetURL)
+					}
+
+					if err == nil && b64Data != "" {
+						convertedBlocks = append(convertedBlocks, map[string]interface{}{
+							"type": "image",
+							"source": map[string]interface{}{
+								"type":       "base64",
+								"media_type": mimeType,
+								"data":       b64Data,
+							},
+						})
+						continue
+					}
+				}
+			}
+
+			convertedBlocks = append(convertedBlocks, blockMap)
+		}
+		return convertedBlocks
 	}
 	return nil
 }

@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/buger/jsonparser"
 )
@@ -44,30 +47,80 @@ func translateCloudflareImageRequest(body []byte) ([]byte, string, error) {
 
 // ─── Response Translation (Cloudflare Workers AI → OpenAI) ──────────────────
 
+// isBinaryImage reports whether the given byte slice starts with known
+// image magic header bytes (PNG, JPEG, WebP, GIF, BMP).
+func isBinaryImage(body []byte) bool {
+	if len(body) < 8 {
+		return false
+	}
+	// PNG: \x89PNG\r\n\x1a\n
+	if bytes.HasPrefix(body, []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}) {
+		return true
+	}
+	// JPEG: \xff\xd8\xff
+	if bytes.HasPrefix(body, []byte{0xff, 0xd8, 0xff}) {
+		return true
+	}
+	// WebP: RIFF....WEBP
+	if len(body) >= 12 && bytes.HasPrefix(body, []byte("RIFF")) && bytes.Equal(body[8:12], []byte("WEBP")) {
+		return true
+	}
+	// GIF: GIF87a or GIF89a
+	if bytes.HasPrefix(body, []byte("GIF87a")) || bytes.HasPrefix(body, []byte("GIF89a")) {
+		return true
+	}
+	// BMP: BM
+	if bytes.HasPrefix(body, []byte("BM")) {
+		return true
+	}
+	return false
+}
+
 // translateCloudflareImageResponse converts a Cloudflare Workers AI
 // text-to-image response into an OpenAI /v1/images/generations response.
 //
-//	Cloudflare: {"success":true,"result":{"image":"<base64 image bytes>"}}
-//	OpenAI:     {"created":0,"data":[{"b64_json":"<base64>"}]}
+// Handles both formats returned by Cloudflare:
+//  1. Raw binary image stream (e.g. image/png, image/jpeg bytes directly from /ai/run/{model})
+//  2. JSON envelope: {"success":true,"result":{"image":"<base64>"}} or {"result":{"response":"<base64>"}}
 //
-// The base64 string returned by Cloudflare is a raw base64-encoded image (not a
-// data URI), which maps directly onto OpenAI's b64_json field.
+// Converts either to OpenAI standard:
 //
-// Third-party image models (openai/gpt-image-2, recraft/*, krea/*, etc.) return
-// an OpenAI-native response directly — use isCloudflareNativeImageResponse() to
-// detect which format the upstream returned before calling this function.
+//	{"created": unix_timestamp, "data": [{"b64_json": "<base64_string>"}]}
 func translateCloudflareImageResponse(body []byte) ([]byte, string, error) {
+	if len(body) == 0 {
+		return nil, "", fmt.Errorf("cloudflare image response was empty")
+	}
+
+	// 1. Raw binary image stream (PNG, JPEG, WebP, GIF, BMP)
+	if isBinaryImage(body) {
+		imageB64 := base64.StdEncoding.EncodeToString(body)
+		resp := map[string]interface{}{
+			"created": time.Now().Unix(),
+			"data": []map[string]interface{}{
+				{"b64_json": imageB64},
+			},
+		}
+		out, err := json.Marshal(resp)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to marshal openai image response: %w", err)
+		}
+		return out, "application/json", nil
+	}
+
+	// 2. Cloudflare JSON envelope
 	imageB64, _ := jsonparser.GetString(body, "result", "image")
 	if imageB64 == "" {
-		// Some Cloudflare image models nest the image under result.response.
 		imageB64, _ = jsonparser.GetString(body, "result", "response")
+	}
+	if imageB64 == "" {
+		imageB64, _ = jsonparser.GetString(body, "image")
 	}
 	if imageB64 == "" {
 		return nil, "", fmt.Errorf("cloudflare image response did not contain an image")
 	}
 
 	resp := map[string]interface{}{
-		"created": 0,
+		"created": time.Now().Unix(),
 		"data": []map[string]interface{}{
 			{"b64_json": imageB64},
 		},
@@ -90,31 +143,17 @@ func isCloudflareImageRequest(requestPath string) bool {
 
 // isCloudflareNativeImageModel reports whether the model ID belongs to the
 // native @cf/* Workers AI model namespace.
-//
-// Native @cf/* models return a Cloudflare-specific envelope:
-//
-//	{"success": true, "result": {"image": "<base64>"}}
-//
-// Third-party models (openai/*, anthropic/*, google/*, recraft/*, krea/*, etc.)
-// are proxied through Cloudflare AI Gateway and return the OpenAI-native format
-// directly:
-//
-//	{"created": 1234567890, "data": [{"b64_json": "<base64>"}]}
-//
-// This function is used by the handler to decide whether to:
-//   - Run request/response translation (native @cf/* models)
-//   - Pass through the request/response unchanged (third-party models)
 func isCloudflareNativeImageModel(modelID string) bool {
 	return strings.HasPrefix(modelID, "@cf/")
 }
 
 // isCloudflareNativeImageResponse reports whether a response body is in the
-// Cloudflare Workers AI native envelope format ({"success":...,"result":...}).
-//
-// This provides a secondary detection path when the model ID alone is ambiguous.
-// If the response has a top-level "success" boolean field, it is a native CF envelope.
-// If it has a top-level "data" array, it is already in OpenAI format.
+// Cloudflare Workers AI native format (raw binary image OR {"success":...,"result":...}).
 func isCloudflareNativeImageResponse(body []byte) bool {
+	// Raw binary images are always native Cloudflare responses
+	if isBinaryImage(body) {
+		return true
+	}
 	// Presence of "success" key indicates native Cloudflare envelope
 	_, dataType, _, err := jsonparser.Get(body, "success")
 	if err == nil && dataType == jsonparser.Boolean {

@@ -57,8 +57,8 @@ func TestTranslateCloudflareImageResponse(t *testing.T) {
 	}
 
 	created, _ := jsonparser.GetInt(out, "created")
-	if created != 0 {
-		t.Fatalf("expected created=0, got %d", created)
+	if created <= 0 {
+		t.Fatalf("expected created > 0, got %d", created)
 	}
 	b64, _ := jsonparser.GetString(out, "data", "[0]", "b64_json")
 	if b64 != "aGVsbG8=" {
@@ -67,6 +67,24 @@ func TestTranslateCloudflareImageResponse(t *testing.T) {
 	// Must NOT leak the Cloudflare envelope.
 	if strings.Contains(string(out), "success") || strings.Contains(string(out), "result") {
 		t.Fatalf("translated response leaked cloudflare envelope: %s", out)
+	}
+}
+
+func TestTranslateCloudflareImageResponse_BinaryImage(t *testing.T) {
+	// Raw binary PNG bytes
+	rawPNG := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 13, 'I', 'H', 'D', 'R'}
+
+	out, ct, err := translateCloudflareImageResponse(rawPNG)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ct != "application/json" {
+		t.Fatalf("expected application/json content type, got %s", ct)
+	}
+
+	b64, _ := jsonparser.GetString(out, "data", "[0]", "b64_json")
+	if b64 == "" {
+		t.Fatalf("expected non-empty b64_json for binary PNG input, got: %s", out)
 	}
 }
 
