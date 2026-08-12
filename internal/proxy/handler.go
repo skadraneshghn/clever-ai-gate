@@ -1179,12 +1179,24 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 		// Third-party AI Gateway image models: pass OpenAI payload through unchanged
 	}
 
-	// --- Cloudflare Workers AI VLM Image Inlining & Request Sanitization ---
-	// Cloudflare Workers AI rejects remote HTTP/HTTPS image URLs on /ai/v1/chat/completions
-	// with error code 6004 ("Property image_url only supports base64 encoded image data").
-	// Convert any remote image URLs to Base64 data URIs in-memory before dispatch.
-	// Also sanitize messages to prevent code 3030 ("Unable to add image when there are no user messages").
-	if cred.Provider == "cloudflare" && !isCloudflareImageRequest(c.Request.URL.Path) {
+	// --- Cloudflare Workers AI VLM Image Inlining, Vision Translation & Sanitization ---
+	if cred.Provider == "cloudflare" && isCloudflareNativeVisionModel(modelName) {
+		if inlined, inErr := ConvertImageURLsToBase64(c.Request.Context(), bodyBytes); inErr == nil && len(inlined) > 0 {
+			bodyBytes = inlined
+		}
+		translated, ctOverride, trErr := translateCloudflareVisionRequest(bodyBytes)
+		if trErr != nil {
+			h.logger.Error("cloudflare native vision request translation failed",
+				zap.String("model", pctx.model),
+				zap.Error(trErr),
+			)
+			return http.StatusBadRequest, upstreamURL, nil, trErr
+		}
+		bodyBytes = translated
+		if ctOverride != "" {
+			contentTypeOverride = ctOverride
+		}
+	} else if cred.Provider == "cloudflare" && !isCloudflareImageRequest(c.Request.URL.Path) {
 		if inlined, inErr := ConvertImageURLsToBase64(c.Request.Context(), bodyBytes); inErr == nil && len(inlined) > 0 {
 			bodyBytes = inlined
 		}
@@ -1748,6 +1760,38 @@ handleSuccess:
 			}
 		}
 		c.Writer.Header().Set("Content-Type", "application/json")
+		c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+		c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+		c.Writer.WriteHeader(resp.StatusCode)
+		c.Writer.Write(respBody) //nolint:errcheck
+		return resp.StatusCode, upstreamURL, respBody, nil
+	}
+
+	// --- Cloudflare Workers AI Native Vision Response Translation ---
+	if cred.Provider == "cloudflare" && isCloudflareNativeVisionModel(pctx.model) {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return http.StatusInternalServerError, upstreamURL, nil, readErr
+		}
+
+		translated, contentType, trErr := translateCloudflareVisionResponse(respBody, pctx.model)
+		if trErr == nil && translated != nil {
+			c.Writer.Header().Set("Content-Type", contentType)
+			c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
+			c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
+			c.Writer.WriteHeader(resp.StatusCode)
+			c.Writer.Write(translated) //nolint:errcheck
+			return resp.StatusCode, upstreamURL, translated, nil
+		}
+		h.logger.Warn("cloudflare native vision response translation failed, passing through original",
+			zap.String("model", pctx.model),
+			zap.Error(trErr),
+		)
+		for key, vals := range resp.Header {
+			for _, val := range vals {
+				c.Writer.Header().Add(key, val)
+			}
+		}
 		c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
 		c.Writer.Header().Set("X-Gateway-Model-Pattern", pctx.model)
 		c.Writer.WriteHeader(resp.StatusCode)

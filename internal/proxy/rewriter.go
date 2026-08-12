@@ -391,7 +391,14 @@ func cloudflarePath(baseURL, requestPath, model string) string {
 	accountID := strings.TrimPrefix(baseURL, "cloudflare:")
 	cfBase := "https://api.cloudflare.com/client/v4/accounts/" + accountID
 
-	// Chat and completion requests: always route to the OpenAI-compatible endpoint.
+	cleanModel := strings.TrimPrefix(model, "cloudflare/")
+
+	// Cloudflare native vision models (Image-to-Text): route to /ai/run/{model}
+	if isCloudflareNativeVisionModel(cleanModel) {
+		return cfBase + "/ai/run/" + cleanModel
+	}
+
+	// Chat and completion requests: route to the OpenAI-compatible endpoint.
 	// Cloudflare's /ai/v1 surface handles both @cf/* and third-party text models.
 	if strings.Contains(requestPath, "/chat/completions") ||
 		strings.Contains(requestPath, "/completions") {
@@ -410,5 +417,5 @@ func cloudflarePath(baseURL, requestPath, model string) string {
 	//   "@cf/stabilityai/stable-diffusion-xl-base-1.0"  (native)
 	//   "openai/gpt-image-2"                            (third-party)
 	//   "krea/krea-2-large"                             (third-party)
-	return cfBase + "/ai/run/" + model
+	return cfBase + "/ai/run/" + cleanModel
 }

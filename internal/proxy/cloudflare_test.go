@@ -198,21 +198,87 @@ func TestSanitizeCloudflareRequest_VisionWithoutText(t *testing.T) {
 	}
 }
 
-func TestSanitizeCloudflareRequest_DeveloperRoleNormalized(t *testing.T) {
-	rawJSON := []byte(`{
+func TestIsCloudflareNativeVisionModel(t *testing.T) {
+	cases := map[string]bool{
+		"@cf/meta/llama-3.2-11b-vision-instruct": true,
+		"@cf/meta/llama-3.2-90b-vision-instruct": true,
+		"@cf/llava-hf/llava-1.5-7b-hf":           true,
+		"@cf/unum/uform-gen2-qwen-500m":          true,
+		"cloudflare/@cf/meta/llama-3.2-11b-vision-instruct": true,
+		"@cf/meta/llama-3.1-8b-instruct":         false,
+		"@cf/stabilityai/stable-diffusion-xl-base-1.0": false,
+		"openai/gpt-4o":                          false,
+	}
+
+	for model, want := range cases {
+		if got := isCloudflareNativeVisionModel(model); got != want {
+			t.Errorf("isCloudflareNativeVisionModel(%q) = %v, want %v", model, got, want)
+		}
+	}
+}
+
+func TestTranslateCloudflareVisionRequest(t *testing.T) {
+	openAIBody := []byte(`{
 		"model": "@cf/meta/llama-3.2-11b-vision-instruct",
 		"messages": [
-			{"role": "developer", "content": "You are a helpful assistant."},
-			{"role": "user", "content": "Hi"}
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "Describe this image in detail and list all key visual elements."},
+					{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA="}}
+				]
+			}
 		]
 	}`)
 
-	sanitized := sanitizeCloudflareRequest(rawJSON)
+	out, ct, err := translateCloudflareVisionRequest(openAIBody)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ct != "application/json" {
+		t.Fatalf("expected application/json content type, got %s", ct)
+	}
 
-	role0, _ := jsonparser.GetString(sanitized, "messages", "[0]", "role")
-	if role0 != "system" {
-		t.Errorf("expected developer role to be normalized to system, got %s", role0)
+	prompt, _ := jsonparser.GetString(out, "prompt")
+	if !strings.Contains(prompt, "Describe this image in detail") {
+		t.Errorf("unexpected prompt in translated vision request: %s", prompt)
+	}
+
+	// Verify image array is present
+	_, dataType, _, _ := jsonparser.Get(out, "image")
+	if dataType != jsonparser.Array {
+		t.Errorf("expected image field to be array in translated vision request, got: %s", out)
 	}
 }
+
+func TestTranslateCloudflareVisionResponse(t *testing.T) {
+	cfVisionBody := []byte(`{
+		"result": {
+			"response": "This image shows an electronic circuit board with conductive traces and an IC chip."
+		},
+		"success": true,
+		"errors": [],
+		"messages": []
+	}`)
+
+	out, ct, err := translateCloudflareVisionResponse(cfVisionBody, "@cf/meta/llama-3.2-11b-vision-instruct")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ct != "application/json" {
+		t.Fatalf("expected application/json content type, got %s", ct)
+	}
+
+	content, _ := jsonparser.GetString(out, "choices", "[0]", "message", "content")
+	if !strings.Contains(content, "electronic circuit board") {
+		t.Errorf("unexpected content in translated response: %s", content)
+	}
+
+	model, _ := jsonparser.GetString(out, "model")
+	if model != "@cf/meta/llama-3.2-11b-vision-instruct" {
+		t.Errorf("expected model @cf/meta/llama-3.2-11b-vision-instruct, got %s", model)
+	}
+}
+
 
 

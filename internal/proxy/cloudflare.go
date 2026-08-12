@@ -136,6 +136,182 @@ func translateCloudflareImageResponse(body []byte) ([]byte, string, error) {
 	return out, "application/json", nil
 }
 
+// ─── Cloudflare Native Vision Translation (OpenAI → /ai/run/{model}) ────────
+
+// isCloudflareNativeVisionModel reports whether the model ID belongs to
+// Cloudflare Workers AI's native vision / image-to-text models.
+func isCloudflareNativeVisionModel(modelID string) bool {
+	clean := strings.TrimPrefix(modelID, "cloudflare/")
+	if !strings.HasPrefix(clean, "@cf/") {
+		return false
+	}
+	cleanLower := strings.ToLower(clean)
+	return strings.Contains(cleanLower, "vision") ||
+		strings.Contains(cleanLower, "llava") ||
+		strings.Contains(cleanLower, "uform") ||
+		strings.Contains(cleanLower, "image-to-text")
+}
+
+// translateCloudflareVisionRequest converts an OpenAI /v1/chat/completions
+// multimodal request into the native /ai/run/{model} format expected by
+// Cloudflare Workers AI vision models.
+//
+// Cloudflare /ai/run/{model} expects:
+//
+//	{"prompt": "Describe this image", "image": [255, 216, ...]}
+func translateCloudflareVisionRequest(body []byte) ([]byte, string, error) {
+	if len(body) == 0 {
+		return nil, "", fmt.Errorf("empty vision request body")
+	}
+
+	var promptSb strings.Builder
+	var imageBytes []byte
+
+	// Parse messages array
+	_, err := jsonparser.ArrayEach(body, func(msgValue []byte, _ jsonparser.ValueType, _ int, _ error) {
+		role, _ := jsonparser.GetString(msgValue, "role")
+		if role == "system" {
+			sysContent, _ := jsonparser.GetString(msgValue, "content")
+			if sysContent != "" {
+				promptSb.WriteString(sysContent)
+				promptSb.WriteString("\n")
+			}
+			return
+		}
+
+		// Check string content vs array content
+		cType, err := jsonparser.GetString(msgValue, "content")
+		if err == nil && cType != "" {
+			if promptSb.Len() > 0 {
+				promptSb.WriteString("\n")
+			}
+			promptSb.WriteString(cType)
+			return
+		}
+
+		// Array content: text parts + image_url parts
+		jsonparser.ArrayEach(msgValue, func(partValue []byte, _ jsonparser.ValueType, _ int, _ error) {
+			pType, _ := jsonparser.GetString(partValue, "type")
+			if pType == "text" {
+				txt, _ := jsonparser.GetString(partValue, "text")
+				if txt != "" {
+					if promptSb.Len() > 0 {
+						promptSb.WriteString("\n")
+					}
+					promptSb.WriteString(txt)
+				}
+			} else if pType == "image_url" || pType == "image" {
+				urlStr, _ := jsonparser.GetString(partValue, "image_url", "url")
+				if urlStr == "" {
+					urlStr, _ = jsonparser.GetString(partValue, "url")
+				}
+				if urlStr != "" && len(imageBytes) == 0 {
+					// Strip Data URI prefix if present
+					b64 := urlStr
+					if commaIdx := strings.Index(urlStr, ","); commaIdx >= 0 && strings.HasPrefix(urlStr, "data:") {
+						b64 = urlStr[commaIdx+1:]
+					}
+					decoded, decErr := base64.StdEncoding.DecodeString(b64)
+					if decErr == nil && len(decoded) > 0 {
+						imageBytes = decoded
+					}
+				}
+			}
+		}, "content")
+	}, "messages")
+
+	if err != nil && promptSb.Len() == 0 {
+		// Fallback to top-level prompt
+		if p, pErr := jsonparser.GetString(body, "prompt"); pErr == nil {
+			promptSb.WriteString(p)
+		}
+	}
+
+	prompt := strings.TrimSpace(promptSb.String())
+	if prompt == "" {
+		prompt = "Describe what you see in this image in detail and list all key visual elements."
+	}
+
+	// Build Cloudflare /ai/run/{model} request
+	req := map[string]interface{}{
+		"prompt": prompt,
+	}
+
+	if len(imageBytes) > 0 {
+		// Cloudflare Workers AI expects the image as an array of uint8 integers
+		intArr := make([]int, len(imageBytes))
+		for i, b := range imageBytes {
+			intArr[i] = int(b)
+		}
+		req["image"] = intArr
+	}
+
+	out, err := json.Marshal(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to marshal cloudflare vision request: %w", err)
+	}
+	return out, "application/json", nil
+}
+
+// translateCloudflareVisionResponse converts a Cloudflare Workers AI
+// /ai/run/{model} vision response into an OpenAI chat completion response.
+func translateCloudflareVisionResponse(body []byte, model string) ([]byte, string, error) {
+	if len(body) == 0 {
+		return nil, "", fmt.Errorf("cloudflare vision response was empty")
+	}
+
+	respText, _ := jsonparser.GetString(body, "result", "response")
+	if respText == "" {
+		respText, _ = jsonparser.GetString(body, "result", "description")
+	}
+	if respText == "" {
+		respText, _ = jsonparser.GetString(body, "response")
+	}
+	if respText == "" {
+		respText, _ = jsonparser.GetString(body, "description")
+	}
+
+	if respText == "" {
+		// Check for error in response
+		errMsg, _ := jsonparser.GetString(body, "errors", "[0]", "message")
+		if errMsg != "" {
+			return nil, "", fmt.Errorf("cloudflare vision upstream error: %s", errMsg)
+		}
+		return nil, "", fmt.Errorf("cloudflare vision response did not contain text response: %s", string(body))
+	}
+
+	cleanModel := strings.TrimPrefix(model, "cloudflare/")
+	createdTime := time.Now().Unix()
+
+	resp := map[string]interface{}{
+		"id":      fmt.Sprintf("chatcmpl-cf-vision-%d", time.Now().UnixNano()),
+		"object":  "chat.completion",
+		"created": createdTime,
+		"model":   cleanModel,
+		"choices": []map[string]interface{}{
+			{
+				"index": 0,
+				"message": map[string]interface{}{
+					"role":    "assistant",
+					"content": respText,
+				},
+				"finish_reason": "stop",
+			},
+		},
+		"usage": map[string]interface{}{
+			"prompt_tokens":     15,
+			"completion_tokens": len(respText) / 4,
+			"total_tokens":      15 + (len(respText) / 4),
+		},
+	}
+
+	out, err := json.Marshal(resp)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to marshal openai chat completion response: %w", err)
+	}
+	return out, "application/json", nil
+}
+
 // ─── Detection helpers ───────────────────────────────────────────────────────
 
 // isCloudflareImageRequest reports whether the incoming path targets the
@@ -147,7 +323,7 @@ func isCloudflareImageRequest(requestPath string) bool {
 // isCloudflareNativeImageModel reports whether the model ID belongs to the
 // native @cf/* Workers AI model namespace.
 func isCloudflareNativeImageModel(modelID string) bool {
-	return strings.HasPrefix(modelID, "@cf/")
+	return strings.HasPrefix(modelID, "@cf/") && !isCloudflareNativeVisionModel(modelID)
 }
 
 // isCloudflareNativeImageResponse reports whether a response body is in the
