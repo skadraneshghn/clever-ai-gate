@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -21,11 +22,29 @@ type CredentialHandler struct {
 	vault         *credentials.Vault
 	scheduler     *jobs.Scheduler
 	redisCacheMgr *cache.RedisCacheManager // nil-safe; invalidates on every mutation
+	syncManager   *credentials.SyncManager // nil-safe; triggers immediate synchronous reload
 }
 
 // NewCredentialHandler creates a new credential handler.
-func NewCredentialHandler(db *pgxpool.Pool, vault *credentials.Vault, scheduler *jobs.Scheduler, redisCacheMgr *cache.RedisCacheManager) *CredentialHandler {
-	return &CredentialHandler{db: db, vault: vault, scheduler: scheduler, redisCacheMgr: redisCacheMgr}
+func NewCredentialHandler(db *pgxpool.Pool, vault *credentials.Vault, scheduler *jobs.Scheduler, redisCacheMgr *cache.RedisCacheManager, syncManager ...*credentials.SyncManager) *CredentialHandler {
+	var sm *credentials.SyncManager
+	if len(syncManager) > 0 {
+		sm = syncManager[0]
+	}
+	return &CredentialHandler{db: db, vault: vault, scheduler: scheduler, redisCacheMgr: redisCacheMgr, syncManager: sm}
+}
+
+// SetSyncManager attaches the sync manager for immediate cache reloading.
+func (h *CredentialHandler) SetSyncManager(sm *credentials.SyncManager) {
+	h.syncManager = sm
+}
+
+func (h *CredentialHandler) syncCaches(ctx context.Context) {
+	if h.syncManager != nil {
+		_ = h.syncManager.ReloadSync(ctx)
+	} else if h.redisCacheMgr != nil {
+		h.redisCacheMgr.InvalidateAndPublish(ctx)
+	}
 }
 
 // List returns provider credentials with masked keys.
@@ -171,8 +190,8 @@ func (h *CredentialHandler) Create(c *gin.Context) {
 		return
 	}
 
-	// Invalidate Redis cache so all cluster nodes pick up the new credential.
-	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+	// Synchronously reload caches so all cluster nodes pick up the new credential.
+	h.syncCaches(c.Request.Context())
 
 	c.JSON(http.StatusCreated, dto.CredentialResponse{
 		ID:        id,
@@ -278,8 +297,8 @@ func (h *CredentialHandler) Update(c *gin.Context) {
 		return
 	}
 
-	// Invalidate Redis cache so all cluster nodes see updated credential state.
-	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+	// Synchronously reload caches
+	h.syncCaches(c.Request.Context())
 
 	c.JSON(http.StatusOK, dto.SuccessResponse{Message: "credential updated successfully"})
 }
@@ -307,8 +326,8 @@ func (h *CredentialHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	// Invalidate Redis cache so all cluster nodes stop routing to deleted credential.
-	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+	// Synchronously reload caches so all cluster nodes stop routing to deleted credential.
+	h.syncCaches(c.Request.Context())
 
 	c.JSON(http.StatusOK, dto.SuccessResponse{Message: "credential deleted successfully"})
 }
@@ -366,8 +385,8 @@ func (h *CredentialHandler) RegisterNvidiaProvider(c *gin.Context) {
 		DiscoveredIDs: models,
 	})
 
-	// Invalidate Redis cache so all cluster nodes instantly see the new NVIDIA models.
-	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+	// Invalidate and synchronously reload cache so models are immediately visible
+	h.syncCaches(c.Request.Context())
 }
 
 // RegisterOllamaProvider auto-discovers all models available on an Ollama instance,
@@ -422,8 +441,8 @@ func (h *CredentialHandler) RegisterOllamaProvider(c *gin.Context) {
 		DiscoveredIDs: models,
 	})
 
-	// Invalidate Redis cache so all cluster nodes instantly see the new Ollama models.
-	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+	// Synchronously reload caches so all cluster nodes instantly see newly registered Ollama models.
+	h.syncCaches(c.Request.Context())
 }
 
 // RegisterOpenRouterProvider auto-discovers all FREE models available on OpenRouter,
@@ -476,8 +495,8 @@ func (h *CredentialHandler) RegisterOpenRouterProvider(c *gin.Context) {
 		DiscoveredIDs: models,
 	})
 
-	// Invalidate Redis cache so all cluster nodes instantly see the new OpenRouter models.
-	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+	// Synchronously reload caches so all cluster nodes instantly see newly registered OpenRouter models.
+	h.syncCaches(c.Request.Context())
 }
 
 // RegisterCustomProvider handles POST /api/v1/admin/providers/custom
@@ -564,8 +583,8 @@ func (h *CredentialHandler) RegisterCustomProvider(c *gin.Context) {
 			DiscoveredIDs: models,
 		})
 
-		// Invalidate Redis cache so all cluster nodes instantly see new custom provider models.
-		h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+		// Synchronously reload caches so all cluster nodes instantly see new custom provider models.
+		h.syncCaches(c.Request.Context())
 		return
 	}
 
@@ -613,7 +632,7 @@ func (h *CredentialHandler) RegisterCustomProvider(c *gin.Context) {
 	})
 
 	if successCount > 0 {
-		h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+		h.syncCaches(c.Request.Context())
 	}
 }
 
@@ -671,8 +690,8 @@ func (h *CredentialHandler) RegisterOneMinAIProvider(c *gin.Context) {
 		DiscoveredIDs: models,
 	})
 
-	// Invalidate Redis cache so all cluster nodes instantly see new 1min.ai models.
-	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+	// Synchronously reload caches so all cluster nodes instantly see newly registered 1min.ai models.
+	h.syncCaches(c.Request.Context())
 }
 
 // RegisterCloudflareProvider auto-discovers all Cloudflare Workers AI models
@@ -742,8 +761,8 @@ func (h *CredentialHandler) RegisterCloudflareProvider(c *gin.Context) {
 		DiscoveredIDs: models,
 	})
 
-	// Invalidate Redis cache so all cluster nodes instantly see new Cloudflare models.
-	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+	// Synchronously reload caches so all cluster nodes instantly see newly registered Cloudflare Workers AI models.
+	h.syncCaches(c.Request.Context())
 }
 
 // RegisterSarvamProvider auto-discovers all Sarvam AI chat models available under
@@ -801,8 +820,8 @@ func (h *CredentialHandler) RegisterSarvamProvider(c *gin.Context) {
 		DiscoveredIDs: models,
 	})
 
-	// Invalidate Redis cache so all cluster nodes instantly see new Sarvam AI models.
-	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+	// Synchronously reload caches so all cluster nodes instantly see newly registered Sarvam AI models.
+	h.syncCaches(c.Request.Context())
 }
 
 // RegisterGeminiProvider auto-discovers all models available under a Google AI Studio
@@ -863,8 +882,8 @@ func (h *CredentialHandler) RegisterGeminiProvider(c *gin.Context) {
 		DiscoveredIDs: models,
 	})
 
-	// Invalidate Redis cache so all cluster nodes instantly see new Gemini models.
-	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+	// Synchronously reload caches so all cluster nodes instantly see newly registered Gemini models.
+	h.syncCaches(c.Request.Context())
 }
 
 // RegisterPuterProvider auto-discovers all Puter.com AI models available under
@@ -917,8 +936,8 @@ func (h *CredentialHandler) RegisterPuterProvider(c *gin.Context) {
 		DiscoveredIDs: models,
 	})
 
-	// Invalidate Redis cache so all cluster nodes instantly see new Puter.com models.
-	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+	// Synchronously reload caches so all cluster nodes instantly see newly registered Puter models.
+	h.syncCaches(c.Request.Context())
 }
 
 // RegisterAgentRouterProvider auto-discovers all models available on AgentRouter.org
@@ -976,7 +995,7 @@ func (h *CredentialHandler) RegisterAgentRouterProvider(c *gin.Context) {
 	})
 
 	// Invalidate Redis cache so all cluster nodes instantly see new AgentRouter models.
-	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+	h.syncCaches(c.Request.Context())
 }
 
 // RegisterZenMuxProvider auto-discovers all ZenMux AI models available under
@@ -1028,8 +1047,8 @@ func (h *CredentialHandler) RegisterZenMuxProvider(c *gin.Context) {
 		DiscoveredIDs: models,
 	})
 
-	// Invalidate Redis cache so all cluster nodes instantly see new ZenMux models.
-	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+	// Synchronously reload caches so all cluster nodes instantly see newly registered ZenMux models.
+	h.syncCaches(c.Request.Context())
 }
 
 
@@ -1175,6 +1194,10 @@ func (h *CredentialHandler) RefreshAllProviders(c *gin.Context) {
 			count, discovered, discErr = credentials.DiscoverAndRegisterZenMuxModels(
 				ctx, h.db, h.vault, apiKey, weight)
 
+		case "gemini":
+			count, discovered, discErr = credentials.DiscoverAndRegisterGeminiModels(
+				ctx, h.db, h.vault, apiKey, weight)
+
 		default:
 			// Any OpenAI-compatible provider (openai, anthropic, deepseek, custom, …)
 			count, discovered, discErr = credentials.DiscoverAndRegisterCustomModels(
@@ -1205,8 +1228,8 @@ func (h *CredentialHandler) RefreshAllProviders(c *gin.Context) {
 		DiscoveredIDs: allDiscovered,
 	})
 
-	// Invalidate Redis cache so all cluster nodes instantly see newly refreshed models.
-	h.redisCacheMgr.InvalidateAndPublish(ctx)
+	// Synchronously reload caches so all cluster nodes instantly see newly refreshed models.
+	h.syncCaches(ctx)
 }
 
 // TriggerReDiscovery launches an asynchronous re-discovery job that scans all
@@ -1369,8 +1392,8 @@ func (h *CredentialHandler) BulkDelete(c *gin.Context) {
 		return
 	}
 
-	// Invalidate Redis cache so all cluster nodes stop routing to deleted credentials.
-	h.redisCacheMgr.InvalidateAndPublish(c.Request.Context())
+	// Synchronously reload caches so all cluster nodes stop routing to deleted credentials.
+	h.syncCaches(c.Request.Context())
 
 	c.JSON(http.StatusOK, dto.SuccessResponse{Message: fmt.Sprintf("%d credentials deleted successfully", len(req.IDs))})
 }

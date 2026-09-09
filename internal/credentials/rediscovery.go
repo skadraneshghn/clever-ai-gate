@@ -186,7 +186,37 @@ func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger 
 				if len(items) > 0 {
 					discoveredItems = items
 					lastErr = nil
-					break // Success! Skip remaining duplicate keys for this endpoint group
+					break // Success! Skip remaining duplicate keys for network fetching
+				}
+			}
+
+			if len(discoveredItems) > 0 {
+				// Replicate discovered models across all accounts in this endpoint group
+				var expandedItems []DiscoveredModelItem
+				for _, acc := range g.Accounts {
+					apiKey, decErr := vault.Decrypt(acc.EncryptedKey)
+					if decErr != nil {
+						continue
+					}
+					weight := acc.Weight
+					if weight <= 0 {
+						weight = 1
+					}
+					for _, baseItem := range discoveredItems {
+						expandedItems = append(expandedItems, DiscoveredModelItem{
+							ModelPattern: baseItem.ModelPattern,
+							Provider:     acc.Provider,
+							BaseURL:      acc.BaseURL,
+							RawAPIKey:    apiKey,
+							EncryptedKey: acc.EncryptedKey,
+							Weight:       weight,
+							Prefix:       acc.Prefix,
+							Capabilities: baseItem.Capabilities,
+						})
+					}
+				}
+				if len(expandedItems) > 0 {
+					discoveredItems = expandedItems
 				}
 			}
 
@@ -231,31 +261,30 @@ func RunReDiscovery(ctx context.Context, db *pgxpool.Pool, vault *Vault, logger 
 
 	wg.Wait()
 
-	// 5. In-Memory Filtering against existing model snapshot
-	var trulyNewItems []DiscoveredModelItem
-	seenPatterns := make(map[string]bool)
-
+	// 5. In-Memory Filtering: identify genuinely new model patterns for reporting
+	seenNewPatterns := make(map[string]bool)
 	for _, item := range allDiscoveredItems {
-		report.TotalModelsSynced++
-		if !existingPatterns[item.ModelPattern] && !seenPatterns[item.ModelPattern] {
-			seenPatterns[item.ModelPattern] = true
-			trulyNewItems = append(trulyNewItems, item)
+		if !existingPatterns[item.ModelPattern] && !seenNewPatterns[item.ModelPattern] {
+			seenNewPatterns[item.ModelPattern] = true
 			report.NewModels = append(report.NewModels, item.ModelPattern)
 		}
 	}
 
-	// 6. IF NO NEW MODELS: Complete immediately without executing ANY database transactions or NOTIFY signals!
-	if len(trulyNewItems) == 0 {
-		logger.Info("re-discovery: complete - no new models found (0 DB writes executed)")
+	// 6. Persist models and credentials via batch insert
+	if len(allDiscoveredItems) == 0 {
+		logger.Info("re-discovery: complete - 0 models discovered across endpoints")
 	} else {
-		// Only run batch transaction if new models were discovered
-		totalSynced, newAdded, batchErr := BatchInsertDiscoveredModels(ctx, db, vault, trulyNewItems)
+		totalSynced, newBindings, batchErr := BatchInsertDiscoveredModels(ctx, db, vault, allDiscoveredItems)
 		if batchErr != nil {
 			logger.Error("re-discovery: batch insert failed", zap.Error(batchErr))
 			report.Errors = append(report.Errors, fmt.Sprintf("batch insert error: %v", batchErr))
 		} else {
 			report.TotalModelsSynced = totalSynced
-			report.NewModelsAdded = newAdded
+			logger.Info("re-discovery: batch sync completed",
+				zap.Int("total_patterns", totalSynced),
+				zap.Int("new_credentials_bound", newBindings),
+				zap.Int("new_pools_created", len(report.NewModels)),
+			)
 		}
 	}
 

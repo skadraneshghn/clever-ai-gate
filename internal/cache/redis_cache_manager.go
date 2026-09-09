@@ -172,6 +172,27 @@ func (m *RedisCacheManager) InvalidateAndPublish(ctx context.Context, keys ...st
 	}()
 }
 
+// PublishSync broadcasts a "renew" event on the cache sync channel so all running
+// gateway replicas reload their local Ristretto L1 caches, WITHOUT deleting the
+// fresh data that was just written to Redis L2.
+// Nil-safe: no-op when the manager is nil.
+func (m *RedisCacheManager) PublishSync(ctx context.Context) {
+	if m == nil {
+		return
+	}
+
+	go func() {
+		rctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+
+		if err := m.rdb.Publish(rctx, ChannelCacheSync, "renew").Err(); err != nil {
+			m.logger.Debug("redis cache sync publish error (non-critical)", zap.Error(err))
+		} else {
+			m.logger.Info("redis cache sync event published (without key eviction)")
+		}
+	}()
+}
+
 // SubscribeCacheSync starts a background goroutine that listens on the
 // cache sync Pub/Sub channel. When a "renew" message arrives, onInvalidate
 // is called — callers use this to clear their Ristretto L1 caches so the

@@ -360,11 +360,30 @@ func (sm *SyncManager) reloadPools(ctx context.Context) error {
 	if err := sm.LoadInitialState(ctx); err != nil {
 		return err
 	}
-	// Invalidate stale Redis keys and broadcast sync event to all instances.
-	// LoadInitialState already wrote fresh data; this DELs the old keys so any
-	// node that hasn't reloaded yet will get a cache miss and re-read.
-	sm.redisCacheMgr.InvalidateAndPublish(ctx)
+	// Broadcast sync event to all instances so they reload local Ristretto.
+	// LoadInitialState already wrote fresh data to Redis L2; PublishSync
+	// notifies other instances without deleting the freshly written keys.
+	if sm.redisCacheMgr != nil {
+		sm.redisCacheMgr.PublishSync(ctx)
+	}
 	sm.logger.Info("routing pools hot-reloaded and redis cache refreshed")
+	return nil
+}
+
+// ReloadSync performs a synchronous reload of routing pools and active models,
+// populating Ristretto L1 and Redis L2, and broadcasting a sync event to replicas.
+// It is called directly by admin handlers after mutations to ensure zero lag.
+func (sm *SyncManager) ReloadSync(ctx context.Context) error {
+	if sm == nil {
+		return nil
+	}
+	if err := sm.LoadInitialState(ctx); err != nil {
+		return err
+	}
+	if sm.redisCacheMgr != nil {
+		sm.redisCacheMgr.PublishSync(ctx)
+	}
+	sm.logger.Info("routing pools synchronously reloaded and broadcast")
 	return nil
 }
 
@@ -394,4 +413,32 @@ func (sm *SyncManager) GetPool(model string) *BalancedChannelPool {
 // Returns nil if the pool does not exist.
 func (sm *SyncManager) GetPoolForCluster(pattern string) *BalancedChannelPool {
 	return sm.GetPool(pattern)
+}
+
+// GetAllPools returns a shallow copy of all currently loaded routing pools.
+func (sm *SyncManager) GetAllPools() map[string]*BalancedChannelPool {
+	if sm == nil {
+		return nil
+	}
+	pools := sm.pools.Load()
+	if pools == nil {
+		return nil
+	}
+	res := make(map[string]*BalancedChannelPool, len(*pools))
+	for k, v := range *pools {
+		res[k] = v
+	}
+	return res
+}
+
+// SetPools stores a map of pools directly (useful for testing and dynamic pool setup).
+func (sm *SyncManager) SetPools(pools map[string]*BalancedChannelPool) {
+	if sm == nil {
+		return
+	}
+	cp := make(map[string]*BalancedChannelPool, len(pools))
+	for k, v := range pools {
+		cp[k] = v
+	}
+	sm.pools.Store(&cp)
 }

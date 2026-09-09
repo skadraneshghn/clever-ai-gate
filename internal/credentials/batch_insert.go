@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -89,8 +90,14 @@ func BatchInsertDiscoveredModels(ctx context.Context, db *pgxpool.Pool, vault *V
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	totalSynced := len(patterns)
-	newModelsCount := 0
+	newPoolsCount := 0
+	newBindingsCount := 0
 
+	poolIDMap := make(map[string]int, len(patterns))
+	var allPoolIDs []int
+
+	// 4a. Batch-upsert model pools with sorted keys to avoid deadlocks
+	batchPools := &pgx.Batch{}
 	for _, pattern := range patterns {
 		grp := groups[pattern]
 
@@ -99,25 +106,94 @@ func BatchInsertDiscoveredModels(ctx context.Context, db *pgxpool.Pool, vault *V
 			capsJSON = []byte("{}")
 		}
 
-		var poolID int
-
-		// Upsert model pool
-		err = tx.QueryRow(ctx,
+		batchPools.Queue(
 			`INSERT INTO model_pools (model_pattern, strategy, capabilities)
 			 VALUES ($1, 'round-robin', $2)
 			 ON CONFLICT (model_pattern) DO UPDATE
 			 SET capabilities = EXCLUDED.capabilities
-			 RETURNING id`,
+			 RETURNING id, (xmax = 0)`,
 			pattern, capsJSON,
-		).Scan(&poolID)
-		if err != nil {
+		)
+	}
+
+	brPools := tx.SendBatch(ctx, batchPools)
+	for _, pattern := range patterns {
+		var poolID int
+		var isInserted bool
+		if err := brPools.QueryRow().Scan(&poolID, &isInserted); err != nil {
+			_ = brPools.Close()
 			return 0, 0, fmt.Errorf("failed to upsert model pool for %s: %w", pattern, err)
 		}
+		if isInserted {
+			newPoolsCount++
+		}
+		poolIDMap[pattern] = poolID
+		allPoolIDs = append(allPoolIDs, poolID)
+	}
+	_ = brPools.Close()
 
-		// Bind credentials for this pool
+	// 4b. Pre-query all existing credentials for these pools in a SINGLE query
+	alreadyBoundMap := make(map[string]bool)
+	decryptedKeyCache := make(map[string]string)
+
+	if len(allPoolIDs) > 0 {
+		rows, qErr := tx.Query(ctx,
+			`SELECT pool_id, provider, encrypted_key, base_url, COALESCE(prefix, '')
+			 FROM credentials
+			 WHERE pool_id = ANY($1)`,
+			allPoolIDs,
+		)
+		if qErr == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var pID int
+				var prov, encKey, bURL, pref string
+				if err := rows.Scan(&pID, &prov, &encKey, &bURL, &pref); err == nil {
+					// Index by encrypted key
+					alreadyBoundMap[fmt.Sprintf("%d|%s|%s|%s|%s", pID, prov, encKey, bURL, pref)] = true
+
+					// Also index by decrypted key so matching plain keys are recognized
+					plainKey, ok := decryptedKeyCache[encKey]
+					if !ok && vault != nil {
+						if dec, decErr := vault.Decrypt(encKey); decErr == nil {
+							plainKey = dec
+							decryptedKeyCache[encKey] = dec
+						}
+					}
+					if plainKey != "" {
+						alreadyBoundMap[fmt.Sprintf("%d|%s|%s|%s|%s", pID, prov, plainKey, bURL, pref)] = true
+					}
+				}
+			}
+			rows.Close()
+		}
+	}
+
+	// 4c. Queue all missing credential insertions
+	var rowsToInsert [][]any
+
+	for _, pattern := range patterns {
+		poolID := poolIDMap[pattern]
+		grp := groups[pattern]
+
 		for _, credItem := range grp.credentials {
-			cacheKey := credItem.Provider + ":" + credItem.RawAPIKey
-			encKey := encryptedKeyCache[cacheKey]
+			// Check if already bound
+			lookupPlain := fmt.Sprintf("%d|%s|%s|%s|%s", poolID, credItem.Provider, credItem.RawAPIKey, credItem.BaseURL, credItem.Prefix)
+			lookupEnc := ""
+			if credItem.EncryptedKey != "" {
+				lookupEnc = fmt.Sprintf("%d|%s|%s|%s|%s", poolID, credItem.Provider, credItem.EncryptedKey, credItem.BaseURL, credItem.Prefix)
+			}
+
+			if (credItem.RawAPIKey != "" && alreadyBoundMap[lookupPlain]) || (lookupEnc != "" && alreadyBoundMap[lookupEnc]) {
+				continue // Already bound to this pool
+			}
+
+			// Determine encrypted key for storage: prefer existing EncryptedKey, else use cached encrypted value
+			encKey := credItem.EncryptedKey
+			if encKey == "" {
+				cacheKey := credItem.Provider + ":" + credItem.RawAPIKey
+				encKey = encryptedKeyCache[cacheKey]
+			}
 			if encKey == "" {
 				continue
 			}
@@ -127,32 +203,36 @@ func BatchInsertDiscoveredModels(ctx context.Context, db *pgxpool.Pool, vault *V
 				weight = 1
 			}
 
-			// Check if credential already bound to pool
-			var existingID int
-			err := tx.QueryRow(ctx,
-				`SELECT id FROM credentials 
-				 WHERE pool_id = $1 AND provider = $2 AND base_url = $3 AND COALESCE(prefix, '') = $4`,
-				poolID, credItem.Provider, credItem.BaseURL, credItem.Prefix,
-			).Scan(&existingID)
+			rowsToInsert = append(rowsToInsert, []any{
+				poolID, credItem.Provider, encKey, credItem.BaseURL, weight, true, credItem.Prefix,
+			})
 
-			if err != nil { // No existing credential found, insert it
-				_, err = tx.Exec(ctx,
-					`INSERT INTO credentials (pool_id, provider, encrypted_key, base_url, weight, is_healthy, prefix)
-					 VALUES ($1, $2, $3, $4, $5, true, $6)`,
-					poolID, credItem.Provider, encKey, credItem.BaseURL, weight, credItem.Prefix,
-				)
-				if err != nil {
-					return 0, 0, fmt.Errorf("failed to bind credential to pool %s (%s): %w", pattern, credItem.Provider, err)
-				}
-				newModelsCount++
+			alreadyBoundMap[lookupPlain] = true
+			if lookupEnc != "" {
+				alreadyBoundMap[lookupEnc] = true
 			}
+			newBindingsCount++
 		}
 	}
 
-	// 5. Trigger single config change notification for the entire job
-	if _, err = tx.Exec(ctx, "NOTIFY config_change, 'model_pools:reload'"); err != nil {
-		return 0, 0, fmt.Errorf("failed to broadcast config change notification: %w", err)
+	if len(rowsToInsert) > 0 {
+		_, err = tx.CopyFrom(
+			ctx,
+			pgx.Identifier{"credentials"},
+			[]string{"pool_id", "provider", "encrypted_key", "base_url", "weight", "is_healthy", "prefix"},
+			pgx.CopyFromRows(rowsToInsert),
+		)
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to bulk copy credentials: %w", err)
+		}
 	}
 
-	return totalSynced, newModelsCount, tx.Commit(ctx)
+	// 5. Trigger reload notification if any pools were created or credentials were bound
+	if newPoolsCount > 0 || newBindingsCount > 0 {
+		if _, err = tx.Exec(ctx, "NOTIFY config_change, 'model_pools:reload'"); err != nil {
+			return 0, 0, fmt.Errorf("failed to broadcast config change notification: %w", err)
+		}
+	}
+
+	return totalSynced, newBindingsCount, tx.Commit(ctx)
 }

@@ -120,6 +120,10 @@ class AppState {
     return '';
   }
 
+  getAuthKey() {
+    return (this.apiKey && this.apiKey.trim()) || this.getAdminKey();
+  }
+
   async init() {
     try {
       const res = await fetch('/api/v1/playground/config');
@@ -306,26 +310,36 @@ class AppState {
     return num.toString();
   }
 
-  async loadModels() {
+  async loadModels(force = false) {
     this.apiLoading = true;
     try {
-      const res = await fetch('/v1/models', {
-        headers: {
-          'Authorization': `Bearer ${this.apiKey}`
-        }
-      });
+      const authKey = this.getAuthKey();
+      const headers = {};
+      if (authKey) {
+        headers['Authorization'] = `Bearer ${authKey}`;
+      }
+      if (force) {
+        headers['Cache-Control'] = 'no-cache';
+      }
+      const url = force ? '/v1/models?refresh=true' : '/v1/models';
+      const res = await fetch(url, { headers });
       if (res.status === 200) {
         const data = await res.json();
         this.models = data.data || [];
-        if (this.models.length > 0 && !this.selectedModel) {
-          this.selectedModel = this.models[0].id;
+        if (this.models.length > 0) {
+          if (!this.selectedModel || !this.models.some(m => m.id === this.selectedModel)) {
+            this.selectedModel = this.models[0].id;
+          }
         }
         this.statusHUD = 'Ready';
+        return true;
       } else {
         this.statusHUD = `Error: ${res.statusText}`;
+        return false;
       }
     } catch (e) {
       this.statusHUD = 'Failed to fetch models';
+      return false;
     } finally {
       this.apiLoading = false;
     }
@@ -434,12 +448,17 @@ class AppState {
     const assistantIndex = this.messages.length - 1;
 
     try {
+      const authKey = this.getAuthKey();
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+      if (authKey) {
+        headers['Authorization'] = `Bearer ${authKey}`;
+      }
+
       const response = await fetch('/v1/chat/completions', {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.apiKey}`,
-          'Content-Type': 'application/json'
-        },
+        headers: headers,
         body: JSON.stringify({
           model: this.selectedModel,
           messages: this.messages.slice(0, -1).map(m => ({ role: m.role, content: m.content })),

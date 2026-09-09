@@ -205,6 +205,8 @@ func main() {
 	transport, edgeProber := proxy.BuildOptimizedTransport(cfg, logger)
 	httpClient := proxy.BuildHTTPClient(transport)
 	proxyHandler := proxy.NewHandler(httpClient, cacheStore, redisCacheMgr, logger, telemetryPipeline, broadcaster, alertSupervisor)
+	proxyHandler.SetDB(dbPool)
+	proxyHandler.SetSyncManager(syncManager)
 
 	// Start edge IP probing and connection pre-warming
 	edgeProber.Start()
@@ -247,6 +249,7 @@ func main() {
 		LogHub:                 logHub,
 		Scheduler:              jobScheduler,
 		HealthCheckBroadcaster: healthCheckBroadcaster,
+		SyncManager:           syncManager,
 	})
 
 	// --- Step 11: Start HTTP server ---

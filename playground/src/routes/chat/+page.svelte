@@ -9,14 +9,9 @@
   import Button from '$lib/components/Button.svelte';
   import Card from '$lib/components/Card.svelte';
   import Input from '$lib/components/Input.svelte';
+  import ModelPicker from '$lib/components/ModelPicker.svelte';
 
   let chatScrollElement = $state(null);
-  let modelSearchQuery = $state('');
-
-  // Derived filtered models list
-  let filteredModels = $derived(
-    appState.models.filter(m => m.id.toLowerCase().includes(modelSearchQuery.toLowerCase()))
-  );
 
   function parseErrorObj(content) {
     if (!content) return null;
@@ -53,49 +48,14 @@
   });
 
   onMount(() => {
-    // If the models are not loaded yet and apiKey exists, load them
-    if (appState.apiKey && appState.models.length === 0) {
-      appState.loadModels();
-    }
+    // Always refresh models on chat page mount to ensure newly added models are visible immediately
+    appState.loadModels();
   });
 </script>
 
 <!-- Top header bar -->
 <header class="header flex items-center justify-between px-6 py-4 border-b shrink-0">
-  <div class="model-picker-container relative">
-    <Button variant="secondary" size="sm" onclick={() => appState.handleModelPickerClick()} class="font-bold flex items-center gap-2">
-      <span>{appState.selectedModel || 'Configure Gateway'}</span>
-      <ChevronDown size={14} />
-    </Button>
-    
-    {#if appState.showModelDropdown && appState.models.length > 0}
-      <div class="model-dropdown animate-fade-in">
-        <div class="model-dropdown-search">
-          <Search size={14} class="opacity-60 text-secondary" />
-          <input
-            type="text"
-            placeholder="Search models..."
-            class="model-search-input"
-            bind:value={modelSearchQuery}
-            onclick={(e) => e.stopPropagation()}
-            onkeydown={(e) => e.stopPropagation()}
-          />
-        </div>
-        <div class="model-dropdown-list">
-          {#each filteredModels as model}
-            <button 
-              class="model-option flex items-center w-full px-4 py-3 text-left text-xs {appState.selectedModel === model.id ? 'active' : ''}" 
-              onclick={() => { appState.selectedModel = model.id; appState.showModelDropdown = false; modelSearchQuery = ''; }}
-            >
-              {model.id}
-            </button>
-          {:else}
-            <div class="p-4 text-center text-xs opacity-60 text-secondary">No models found</div>
-          {/each}
-        </div>
-      </div>
-    {/if}
-  </div>
+  <ModelPicker variant="header" />
 
   <div class="flex items-center gap-2">
     <Button variant="ghost" size="sm" onclick={() => appState.showCodePanel = !appState.showCodePanel} title="Toggle Integration Snippets">
@@ -136,16 +96,7 @@
         <div class="prompt-toolbar flex items-center justify-between pt-3 mt-2 border-t border-[var(--border-color)]">
           <!-- Left actions: Selected Model Badge & Feature Toggles -->
           <div class="flex items-center gap-2 flex-wrap">
-            <button 
-              type="button"
-              class="model-badge-btn flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl border text-xs font-semibold transition-all cursor-pointer" 
-              onclick={() => appState.handleModelPickerClick()}
-              title="Change Selected Model"
-            >
-              <Cpu size={14} class="text-[#f97316]" />
-              <span class="truncate max-w-[200px] text-primary">{appState.selectedModel || 'Select Model'}</span>
-              <ChevronDown size={13} class="opacity-60" />
-            </button>
+            <ModelPicker variant="badge" />
 
             <button 
               type="button"
@@ -240,16 +191,7 @@
       ></textarea>
       <div class="prompt-toolbar flex items-center justify-between pt-3 mt-2 border-t border-[var(--border-color)]">
         <div class="flex items-center gap-2 flex-wrap">
-          <button 
-            type="button"
-            class="model-badge-btn flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all cursor-pointer" 
-            onclick={() => appState.handleModelPickerClick()}
-            title="Change Selected Model"
-          >
-            <Cpu size={14} class="text-[#f97316]" />
-            <span class="truncate max-w-[180px] text-primary">{appState.selectedModel || 'Select Model'}</span>
-            <ChevronDown size={13} class="opacity-60" />
-          </button>
+          <ModelPicker variant="badge" />
           
           <button 
             type="button"

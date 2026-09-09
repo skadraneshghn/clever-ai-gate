@@ -42,36 +42,81 @@ func DiscoverAndRegisterCustomModels(ctx context.Context, db *pgxpool.Pool, vaul
 	base := strings.TrimRight(baseURL, "/")
 	cleanBase := strings.TrimSuffix(base, "/v1")
 
-	// 1. Validate the key by fetching the models list
+	// 1. Validate the key by fetching the models list (supporting /v1/models, /api/v1/models, and /models)
 	client := &http.Client{Timeout: 15 * time.Second}
-	req, err := http.NewRequestWithContext(ctx, "GET", cleanBase+"/v1/models", nil)
-	if err != nil {
-		return 0, nil, fmt.Errorf("failed to build model discovery request: %w", err)
+
+	candidateList := []string{
+		cleanBase + "/v1/models",
+		cleanBase + "/api/v1/models",
+		cleanBase + "/models",
+	}
+	if base != cleanBase {
+		candidateList = append(candidateList, base+"/api/v1/models", base+"/models")
 	}
 
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, nil, fmt.Errorf("provider endpoint connection failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return 0, nil, fmt.Errorf("API key validation failed: provider returned %d — check your key", resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return 0, nil, fmt.Errorf("provider rejected request with status code: %d", resp.StatusCode)
+	seenCand := make(map[string]bool)
+	var candidateURLs []string
+	for _, u := range candidateList {
+		if !seenCand[u] {
+			seenCand[u] = true
+			candidateURLs = append(candidateURLs, u)
+		}
 	}
 
+	var lastStatusErr error
 	var modelList OpenAIModelListResponse
-	if err := json.NewDecoder(resp.Body).Decode(&modelList); err != nil {
-		return 0, nil, fmt.Errorf("failed to parse models response — is this an OpenAI-compatible endpoint? error: %w", err)
+	var success bool
+
+	for _, candURL := range candidateURLs {
+		req, err := http.NewRequestWithContext(ctx, "GET", candURL, nil)
+		if err != nil {
+			continue
+		}
+
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("Api-Key", apiKey)
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "CleverAIGate-Discovery/1.0")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastStatusErr = fmt.Errorf("provider endpoint connection failed: %w", err)
+			continue
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			resp.Body.Close()
+			return 0, nil, fmt.Errorf("API key validation failed: provider returned %d — check your key", resp.StatusCode)
+		}
+
+		if resp.StatusCode == http.StatusNotFound {
+			resp.Body.Close()
+			lastStatusErr = fmt.Errorf("provider returned 404 Not Found on %s", candURL)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastStatusErr = fmt.Errorf("provider rejected request with status code: %d", resp.StatusCode)
+			continue
+		}
+
+		decodeErr := json.NewDecoder(resp.Body).Decode(&modelList)
+		resp.Body.Close()
+		if decodeErr != nil || len(modelList.Data) == 0 {
+			lastStatusErr = fmt.Errorf("provider returned 0 models or malformed JSON from %s", candURL)
+			continue
+		}
+
+		success = true
+		break
 	}
 
-	if len(modelList.Data) == 0 {
-		return 0, nil, fmt.Errorf("provider returned 0 models — verify your API key has access to models")
+	if !success {
+		if lastStatusErr != nil {
+			return 0, nil, lastStatusErr
+		}
+		return 0, nil, fmt.Errorf("failed to discover models from provider")
 	}
 
 	// Normalise the provider label for storage
@@ -93,12 +138,19 @@ func DiscoverAndRegisterCustomModels(ctx context.Context, db *pgxpool.Pool, vaul
 	rows, err := db.Query(ctx, `SELECT pool_id, encrypted_key FROM credentials WHERE provider = $1 AND base_url = $2 AND COALESCE(prefix,'') = $3`, providerLabel, baseURL, prefix)
 	if err == nil {
 		defer rows.Close()
+		decCache := make(map[string]string)
 		for rows.Next() {
 			var poolID int
 			var encKey string
 			if err := rows.Scan(&poolID, &encKey); err == nil {
-				decrypted, decErr := vault.Decrypt(encKey)
-				if decErr == nil && decrypted == apiKey {
+				plain, ok := decCache[encKey]
+				if !ok {
+					if dec, decErr := vault.Decrypt(encKey); decErr == nil {
+						plain = dec
+						decCache[encKey] = dec
+					}
+				}
+				if plain == apiKey {
 					alreadyBound[poolID] = true
 				}
 			}
@@ -133,8 +185,13 @@ func DiscoverAndRegisterCustomModels(ctx context.Context, db *pgxpool.Pool, vaul
 
 		var poolPatterns []string
 		if trimmedPrefix != "" {
-			pooledPattern := trimmedPrefix + "/" + m.ID
-			poolPatterns = []string{pooledPattern, m.ID}
+			if strings.HasPrefix(m.ID, trimmedPrefix+"/") {
+				cleanID := strings.TrimPrefix(m.ID, trimmedPrefix+"/")
+				poolPatterns = []string{m.ID, cleanID}
+			} else {
+				pooledPattern := trimmedPrefix + "/" + m.ID
+				poolPatterns = []string{pooledPattern, m.ID}
+			}
 		} else {
 			poolPatterns = []string{m.ID}
 		}

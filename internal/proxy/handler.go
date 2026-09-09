@@ -18,6 +18,7 @@ import (
 
 	"github.com/buger/jsonparser"
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/skadraneshghn/clever-ai-gate/internal/cache"
 	"github.com/skadraneshghn/clever-ai-gate/internal/cluster"
 	"github.com/skadraneshghn/clever-ai-gate/internal/credentials"
@@ -46,6 +47,18 @@ type Handler struct {
 	rewriter      *Rewriter
 	stream        *StreamProxy
 	AlertManager  *telemetry.AlertManager
+	db            *pgxpool.Pool
+	syncManager   *credentials.SyncManager
+}
+
+// SetDB attaches the database pool for fallback queries (e.g. ListModels on cache miss).
+func (h *Handler) SetDB(db *pgxpool.Pool) {
+	h.db = db
+}
+
+// SetSyncManager attaches the sync manager for dynamic cross-provider fallback discovery.
+func (h *Handler) SetSyncManager(sm *credentials.SyncManager) {
+	h.syncManager = sm
 }
 
 // NewHandler creates the proxy handler with all its dependencies.
@@ -85,6 +98,7 @@ type proxyContext struct {
 	studioProvider string // Resolved routing label (ProviderGeminiStudio) for gemini requests; "" otherwise. Diagnostic only — the transpiler gate is cred.Provider == ProviderGemini
 	requestedModel string // The original model requested by the client before prefix stripping
 	isJiekou       bool   // True when model uses jiekou/ prefix — triggers body model rewrite + parameter clamping
+	rawBody        []byte // Pristine request body as received before provider-specific modifications
 	body           []byte
 	credential     *credentials.AcquireResult
 	pool           *credentials.BalancedChannelPool
@@ -125,6 +139,8 @@ func (h *Handler) Handle(c *gin.Context) {
 		return
 	}
 	body := buf.Bytes()
+	rawBodyCopy := make([]byte, len(body))
+	copy(rawBodyCopy, body)
 
 	// Step 2: Extract the "model" field for routing.
 	//
@@ -531,6 +547,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		isJiekou:       isJiekou,
 		studioProvider: studioProvider,
 		requestedModel: requestedModel,
+		rawBody:        rawBodyCopy,
 		body:           body,
 		pool:           pool,
 	}
@@ -579,6 +596,13 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestSt
 	var attempts []attemptRecord
 	triedIndices := make(map[int]bool) // deduplicate — never retry the same index twice
 	triedCount := 0
+	triedPools := make(map[string]bool)
+	if pctx.pool != nil {
+		triedPools[pctx.pool.ModelPattern] = true
+	}
+	if pctx.requestedModel != "" {
+		triedPools[pctx.requestedModel] = true
+	}
 
 	// Safety valve: in a high-concurrency surge, AcquireActiveToken may return
 	// the same index multiple times as the atomic cursor races with other requests.
@@ -794,7 +818,7 @@ retryLoop:
 		lastProvider = result.Credential.Provider
 
 		// Increment consecutive failures atomically
-		failures := atomic.AddUint32(&result.Credential.ConsecutiveFailures, 1)
+		atomic.AddUint32(&result.Credential.ConsecutiveFailures, 1)
 
 		// Record rotation telemetry
 		if h.AlertManager != nil {
@@ -836,8 +860,9 @@ retryLoop:
 			accountID := strings.TrimPrefix(result.Credential.BaseURL, "cloudflare:")
 			_ = autoAcceptCloudflareModelAgreement(c.Request.Context(), h.client, accountID, result.Credential.APIKey, pctx.model)
 		} else if isDepletedAccount {
-			cooldownDuration = 24 * time.Hour
-			h.logger.Error("credential account balance exhausted or suspended — marked with 24h cooldown",
+			// Transient backoff instead of 24h disabling so key is not deactivated
+			cooldownDuration = 15 * time.Second
+			h.logger.Warn("credential account balance exhausted or rate limited — applying transient 15s cooldown",
 				zap.String("model", pctx.model),
 				zap.String("provider", result.Credential.Provider),
 				zap.Int("credential_id", result.Credential.ID),
@@ -850,15 +875,7 @@ retryLoop:
 				recStatus == http.StatusTooManyRequests
 
 			if isQuotaError {
-				if failures >= 3 {
-					cooldownDuration = 24 * time.Hour
-					h.logger.Error("puter credential marked as exhausted after 3 consecutive failures",
-						zap.Int("credential_id", result.Credential.ID),
-						zap.Int("status", recStatus),
-					)
-				} else {
-					cooldownDuration = 15 * time.Second
-				}
+				cooldownDuration = 15 * time.Second
 			}
 		}
 
@@ -977,52 +994,45 @@ retryLoop:
 		)
 	}
 
-	// Try model fallback before failing
-	if triedCount >= maxAttempts && strings.HasPrefix(pctx.model, "puter/") {
-		originalModel := pctx.model
-		cheaperModel := "puter/gpt-4o-mini"
-		isLastResort := false
-
-		if originalModel == "puter/gpt-4o-mini" {
-			cheaperModel = "cloudflare/@cf/meta/llama-3.2-3b-instruct"
-			isLastResort = true
+	// ── Exact-Model Cross-Provider Fallback ────────────────────────────────────
+	// When all credentials in the current pool fail or are exhausted, attempt to
+	// fall back to other pools hosting the EXACT same model ID and same version.
+	// We strictly prohibit falling back to different, cheaper, or arbitrary models.
+	// If no healthy exact-model pool exists, the upstream error is thrown directly.
+	if h.syncManager != nil {
+		allPools := h.syncManager.GetAllPools()
+		targetModelRef := pctx.requestedModel
+		if targetModelRef == "" && pctx.pool != nil {
+			targetModelRef = pctx.pool.ModelPattern
 		}
 
-		// Look up the fallback pool
-		poolVal, found := h.cache.Get(cache.PoolKey(cheaperModel))
-		if !found {
-			poolVal, found = h.findPoolByPrefix(cheaperModel)
+		fallbacks := FindExactModelFallbacks(targetModelRef, triedPools, allPools)
+		if len(fallbacks) == 0 && pctx.pool != nil && pctx.pool.ModelPattern != targetModelRef {
+			fallbacks = FindExactModelFallbacks(pctx.pool.ModelPattern, triedPools, allPools)
 		}
 
-		if found {
-			fallbackPool := poolVal.(*credentials.BalancedChannelPool)
-
-			// Replace in JSON body
-			oldUpstreamModel := strings.TrimPrefix(originalModel, "puter/")
-			newUpstreamModel := cheaperModel
-			if isLastResort {
-				newUpstreamModel = strings.TrimPrefix(cheaperModel, "cloudflare/")
-			} else {
-				newUpstreamModel = strings.TrimPrefix(cheaperModel, "puter/")
+		// Also check configured DB fallback if it matches the exact same model & version
+		if len(fallbacks) == 0 && pctx.pool != nil && pctx.pool.FallbackPool != nil {
+			fb := pctx.pool.FallbackPool
+			if !triedPools[fb.ModelPattern] && IsSameModelAndVersion(targetModelRef, fb.ModelPattern) && fb.HealthyCount() > 0 {
+				fallbacks = []*credentials.BalancedChannelPool{fb}
 			}
-			oldToken := []byte(`"` + oldUpstreamModel + `"`)
-			newToken := []byte(`"` + newUpstreamModel + `"`)
-			pctx.body = bytes.Replace(pctx.body, oldToken, newToken, 1)
+		}
 
-			pctx.model = cheaperModel
-			pctx.pool = fallbackPool
+		if len(fallbacks) > 0 {
+			fallbackPool := fallbacks[0]
+			triedPools[fallbackPool.ModelPattern] = true
 
-			if isLastResort {
-				pctx.isPuter = false
-				pctx.isCloudflare = true
-				// Mirror the prefix stripping done in Handle()'s isCloudflare
-				// block: cloudflarePath embeds the model in the /ai/run/{model}
-				// URL, so pctx.model must hold the clean ID without the
-				// "cloudflare/" routing prefix.
-				pctx.model = strings.TrimPrefix(cheaperModel, "cloudflare/")
-			}
+			h.logger.Warn("current pool credentials failed; switching to exact-model cross-provider fallback",
+				zap.String("original_model", pctx.requestedModel),
+				zap.String("failed_pool", pctx.pool.ModelPattern),
+				zap.String("fallback_pool", fallbackPool.ModelPattern),
+				zap.Int("fallback_healthy_keys", fallbackPool.HealthyCount()),
+			)
 
-			// Reset retry counters to try all fallback credentials
+			h.switchProxyContextToFallback(pctx, fallbackPool)
+
+			// Reset retry counters for the fallback pool
 			triedCount = 0
 			triedIndices = make(map[int]bool)
 			maxAttempts = int(fallbackPool.TotalCount)
@@ -1035,12 +1045,6 @@ retryLoop:
 			maxSpins = maxAttempts*3 + 1
 			spins = 0
 
-			h.logger.Warn("all credentials exhausted for model; falling back to cheaper model",
-				zap.String("original_model", originalModel),
-				zap.String("fallback_model", cheaperModel),
-			)
-
-			// Restart retry loop
 			goto retryLoop
 		}
 	}
@@ -1078,7 +1082,61 @@ retryLoop:
 	// Never dump raw upstream bytes — always return a canonical OpenAI error envelope.
 	summary := buildAttemptSummary(pctx.model, attempts)
 	finalBody := formatOpenAIError(lastStatus, lastErrBody, summary)
-	c.Data(http.StatusBadGateway, "application/json", finalBody)
+	respStatus := http.StatusBadGateway
+	if lastStatus >= 400 && lastStatus < 600 {
+		respStatus = lastStatus
+	}
+	c.Data(respStatus, "application/json", finalBody)
+}
+
+// switchProxyContextToFallback updates the proxy context to route subsequent retries
+// to an exact-model fallback pool on a different provider.
+func (h *Handler) switchProxyContextToFallback(pctx *proxyContext, newPool *credentials.BalancedChannelPool) {
+	newPattern := newPool.ModelPattern
+	newUpstreamModel := FormatUpstreamModelForPattern(newPattern)
+
+	// Rewrite model in request body
+	if len(pctx.rawBody) > 0 {
+		origModelInBody, err := jsonparser.GetString(pctx.rawBody, "model")
+		if err == nil && origModelInBody != "" {
+			oldToken := []byte(`"` + origModelInBody + `"`)
+			newToken := []byte(`"` + newUpstreamModel + `"`)
+			pctx.body = bytes.Replace(pctx.rawBody, oldToken, newToken, 1)
+		} else {
+			pctx.body = make([]byte, len(pctx.rawBody))
+			copy(pctx.body, pctx.rawBody)
+		}
+	} else if len(pctx.body) > 0 {
+		currModelInBody, err := jsonparser.GetString(pctx.body, "model")
+		if err == nil && currModelInBody != "" {
+			oldToken := []byte(`"` + currModelInBody + `"`)
+			newToken := []byte(`"` + newUpstreamModel + `"`)
+			pctx.body = bytes.Replace(pctx.body, oldToken, newToken, 1)
+		}
+	}
+
+	pctx.model = newPattern
+	pctx.pool = newPool
+
+	// Update provider flags based on the target provider
+	pctx.isNvidia = strings.HasPrefix(newPattern, "nvidia/")
+	pctx.isOneMinAI = strings.HasPrefix(newPattern, "1min/")
+	pctx.isCloudflare = strings.HasPrefix(newPattern, "cloudflare/")
+	pctx.isSarvam = strings.HasPrefix(newPattern, "sarvam/")
+	pctx.isPuter = strings.HasPrefix(newPattern, "puter/")
+	pctx.isAgentRouter = strings.HasPrefix(newPattern, "agentrouter/")
+	pctx.isZenMux = strings.HasPrefix(newPattern, "zenmux/")
+	pctx.isJiekou = strings.HasPrefix(newPattern, "jiekou/")
+	pctx.isGemini = strings.HasPrefix(newPattern, credentials.ProviderGeminiLegacy+"/")
+
+	// Special provider adjustments:
+	if pctx.isCloudflare {
+		// Cloudflare path transformer embeds the model in /ai/run/{model}
+		pctx.model = strings.TrimPrefix(newPattern, "cloudflare/")
+	}
+	if pctx.isNvidia && supportsNvidiaReasoning(newUpstreamModel) {
+		pctx.body = injectNvidiaParams(pctx.body, pctx.body, h.logger)
+	}
 }
 
 // forwardRequest sends the request to the upstream provider and returns the
@@ -2270,6 +2328,8 @@ func isCredentialAuthError(status int) bool {
 // cooldownForStatus returns the appropriate cooldown duration for a given
 // upstream HTTP status code. Covers standard codes, auth anomalies, and
 // non-standard codes from load balancers and custom proxies (444, 520, 524, 599…).
+// Uses short transient cooldowns so credentials and models are never permanently
+// or semi-permanently deactivated on failure.
 func cooldownForStatus(status int) time.Duration {
 	switch {
 	case status == http.StatusUnauthorized ||
@@ -2277,26 +2337,24 @@ func cooldownForStatus(status int) time.Duration {
 		status == http.StatusForbidden ||
 		status == http.StatusNotFound ||
 		status == http.StatusUnprocessableEntity:
-		// Auth/access anomalies: the key is broken for this model.
-		// 20–30 min jitter prevents thundering-herd re-activation of all bad keys.
-		return 20*time.Minute + time.Duration(rand.Intn(int(10*time.Minute)))
+		// Transient cooldown — do not deactivate or disable credential
+		return 10 * time.Second
 
 	case status == http.StatusTooManyRequests:
-		return 30 * time.Second // Rate limited — wait for quota window reset
+		return 10 * time.Second // Rate limited — short wait for window reset
 
 	case status == http.StatusInternalServerError || status == http.StatusBadGateway:
-		return 10 * time.Second // Server error — moderate cooldown
+		return 3 * time.Second // Server error — transient cooldown
 
 	case status == http.StatusServiceUnavailable:
-		return 15 * time.Second // Overloaded — moderate-long cooldown
+		return 5 * time.Second // Overloaded — transient cooldown
 
 	case status == http.StatusGatewayTimeout:
-		return 5 * time.Second // Timeout — short cooldown, try others first
+		return 2 * time.Second // Timeout — short cooldown, try others first
 
 	default:
 		// Non-standard codes (nginx 444, Cloudflare 520/524, custom 599, etc.)
-		// 15s safe fallback prevents cascading delays across cluster nodes.
-		return 15 * time.Second
+		return 5 * time.Second
 	}
 }
 
@@ -2321,64 +2379,121 @@ type ModelListResponse struct {
 // detected capabilities in OpenAI-compatible format.
 //
 // Read order:
-//  1. Redis L2 (< 1ms, shared across all gateway replicas)
-//  2. Ristretto L1 (sub-microsecond, local in-process)
-//  3. Empty list (no DB call — data is always pre-loaded at startup)
+//  1. If refresh requested (?refresh=true or Cache-Control: no-cache): bypass cache and query DB
+//  2. Redis L2 (< 1ms, shared across all gateway replicas)
+//  3. Ristretto L1 (sub-microsecond, local in-process)
+//  4. PostgreSQL DB fallback (if caches missed, empty, or refresh requested)
 func (h *Handler) ListModels(c *gin.Context) {
 	var data []ModelDetail
 	now := time.Now().Unix()
 
-	// --- Tier 1: Redis L2 cache (serves all gateway replicas with single-digit ms) ---
-	if h.redisCacheMgr != nil {
-		var redisModels []cache.ActiveModelEntry
-		found, _ := h.redisCacheMgr.GetJSON(c.Request.Context(), cache.KeyActiveModels, &redisModels)
-		if found && len(redisModels) > 0 {
-			data = make([]ModelDetail, len(redisModels))
-			for i, m := range redisModels {
-				data[i] = ModelDetail{
-					ID:           m.Pattern,
-					Object:       "model",
-					Created:      now,
-					OwnedBy:      "clever-ai-gate",
-					Capabilities: m.Capabilities,
+	forceRefresh := c.Query("refresh") == "true" || c.GetHeader("Cache-Control") == "no-cache"
+
+	if !forceRefresh {
+		// --- Tier 1: Redis L2 cache (serves all gateway replicas with single-digit ms) ---
+		if h.redisCacheMgr != nil {
+			var redisModels []cache.ActiveModelEntry
+			found, _ := h.redisCacheMgr.GetJSON(c.Request.Context(), cache.KeyActiveModels, &redisModels)
+			if found && len(redisModels) > 0 {
+				data = make([]ModelDetail, len(redisModels))
+				for i, m := range redisModels {
+					data[i] = ModelDetail{
+						ID:           m.Pattern,
+						Object:       "model",
+						Created:      now,
+						OwnedBy:      "clever-ai-gate",
+						Capabilities: m.Capabilities,
+					}
 				}
+				c.JSON(http.StatusOK, ModelListResponse{
+					Object: "list",
+					Data:   data,
+				})
+				return
 			}
-			c.JSON(http.StatusOK, ModelListResponse{
-				Object: "list",
-				Data:   data,
-			})
-			return
+		}
+
+		// --- Tier 2: Ristretto L1 cache (sub-microsecond, local in-process) ---
+		val, found := h.cache.Get("system:active_models")
+		if found {
+			// New enriched format: []credentials.ActiveModel
+			if models, ok := val.([]credentials.ActiveModel); ok && len(models) > 0 {
+				data = make([]ModelDetail, len(models))
+				for i, m := range models {
+					data[i] = ModelDetail{
+						ID:           m.Pattern,
+						Object:       "model",
+						Created:      now,
+						OwnedBy:      "clever-ai-gate",
+						Capabilities: m.Capabilities,
+					}
+				}
+				// Back-fill Redis L2 asynchronously from Ristretto L1 data.
+				// This heals a Redis cache miss without blocking the response.
+				if h.redisCacheMgr != nil && len(models) > 0 {
+					go func(m []credentials.ActiveModel) {
+						entries := make([]cache.ActiveModelEntry, len(m))
+						for i, am := range m {
+							entries[i] = cache.ActiveModelEntry{
+								Pattern:      am.Pattern,
+								Capabilities: am.Capabilities,
+							}
+						}
+						h.redisCacheMgr.SetJSON(context.Background(), cache.KeyActiveModels, entries, cache.DefaultCacheTTL)
+					}(models)
+				}
+				c.JSON(http.StatusOK, ModelListResponse{
+					Object: "list",
+					Data:   data,
+				})
+				return
+			}
 		}
 	}
 
-	// --- Tier 2: Ristretto L1 cache (sub-microsecond, local in-process) ---
-	val, found := h.cache.Get("system:active_models")
-	if found {
-		// New enriched format: []credentials.ActiveModel
-		if models, ok := val.([]credentials.ActiveModel); ok {
-			data = make([]ModelDetail, len(models))
-			for i, m := range models {
-				data[i] = ModelDetail{
-					ID:           m.Pattern,
-					Object:       "model",
-					Created:      now,
-					OwnedBy:      "clever-ai-gate",
-					Capabilities: m.Capabilities,
+	// --- Tier 3: PostgreSQL DB fallback (when cache missed, empty, or refresh requested) ---
+	if h.db != nil {
+		rows, err := h.db.Query(c.Request.Context(),
+			`SELECT model_pattern, capabilities FROM model_pools WHERE is_active = true ORDER BY model_pattern ASC`)
+		if err == nil {
+			defer rows.Close()
+			var activeModels []credentials.ActiveModel
+			for rows.Next() {
+				var pattern string
+				var capsJSON []byte
+				if scanErr := rows.Scan(&pattern, &capsJSON); scanErr == nil {
+					am := credentials.ActiveModel{Pattern: pattern}
+					if len(capsJSON) > 0 && string(capsJSON) != "{}" {
+						_ = json.Unmarshal(capsJSON, &am.Capabilities)
+					}
+					activeModels = append(activeModels, am)
 				}
 			}
-			// Back-fill Redis L2 asynchronously from Ristretto L1 data.
-			// This heals a Redis cache miss without blocking the response.
-			if h.redisCacheMgr != nil && len(models) > 0 {
-				go func(m []credentials.ActiveModel) {
-					entries := make([]cache.ActiveModelEntry, len(m))
-					for i, am := range m {
-						entries[i] = cache.ActiveModelEntry{
+
+			if len(activeModels) > 0 {
+				data = make([]ModelDetail, len(activeModels))
+				for i, m := range activeModels {
+					data[i] = ModelDetail{
+						ID:           m.Pattern,
+						Object:       "model",
+						Created:      now,
+						OwnedBy:      "clever-ai-gate",
+						Capabilities: m.Capabilities,
+					}
+				}
+
+				// Populate both Ristretto L1 and Redis L2
+				h.cache.Set("system:active_models", activeModels, 1000)
+				if h.redisCacheMgr != nil {
+					redisModels := make([]cache.ActiveModelEntry, len(activeModels))
+					for i, am := range activeModels {
+						redisModels[i] = cache.ActiveModelEntry{
 							Pattern:      am.Pattern,
 							Capabilities: am.Capabilities,
 						}
 					}
-					h.redisCacheMgr.SetJSON(context.Background(), cache.KeyActiveModels, entries, cache.DefaultCacheTTL)
-				}(models)
+					h.redisCacheMgr.SetJSON(context.Background(), cache.KeyActiveModels, redisModels, cache.DefaultCacheTTL)
+				}
 			}
 		}
 	}

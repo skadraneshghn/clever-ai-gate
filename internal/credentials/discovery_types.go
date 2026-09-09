@@ -7,6 +7,7 @@ type DiscoveredModelItem struct {
 	Provider     string            `json:"provider"`
 	BaseURL      string            `json:"base_url"`
 	RawAPIKey    string            `json:"raw_api_key"`
+	EncryptedKey string            `json:"encrypted_key,omitempty"`
 	Weight       int               `json:"weight"`
 	Prefix       string            `json:"prefix"`
 	Capabilities ModelCapabilities `json:"capabilities"`

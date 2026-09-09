@@ -39,6 +39,7 @@ type Dependencies struct {
 	LogHub                *telemetry.LogHub // non-blocking log broadcaster for the admin log viewer
 	Scheduler             *jobs.Scheduler  // nil when not initialized
 	HealthCheckBroadcaster chan jobs.HealthCheckSSEEvent // real-time SSE broadcaster for model health monitor
+	SyncManager           *credentials.SyncManager // nil when not initialized
 }
 
 // NewEngine creates and configures the Gin engine with all routes.
@@ -55,6 +56,10 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 	// Create engine WITHOUT default middleware
 	// Default middleware adds logging and recovery which we don't want on the hot-path
 	engine := gin.New()
+
+	if deps.Proxy != nil && deps.SyncManager != nil {
+		deps.Proxy.SetSyncManager(deps.SyncManager)
+	}
 
 	// --- Health routes (no middleware) ---
 	engine.GET("/health", deps.Health.Liveness)
@@ -142,11 +147,11 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 	// --- Proxy routes (minimal middleware for maximum throughput) ---
 	proxyGroup := engine.Group("")
 	{
-		// Auth: prefer two-layer Ristretto+Redis cache when available
+		// Auth: prefer two-layer Ristretto+Redis cache when available; accepts Admin key for playground
 		if deps.TenantCache != nil {
-			proxyGroup.Use(middleware.ProxyAuthWithRedis(deps.TenantCache))
+			proxyGroup.Use(middleware.ProxyAuthWithRedis(deps.TenantCache, deps.Config.AdminAPIKey))
 		} else {
-			proxyGroup.Use(middleware.ProxyAuth(deps.Cache))
+			proxyGroup.Use(middleware.ProxyAuth(deps.Cache, deps.Config.AdminAPIKey))
 		}
 
 		// Rate limiting: prefer Redis Lua sliding-window when available
@@ -193,7 +198,7 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		adminGroup.DELETE("/tenants/:id", tenantHandler.Delete)
 
 		// Model pool management
-		poolHandler := admin.NewPoolHandler(deps.DB, deps.Vault, deps.Scheduler, deps.RedisCacheMgr)
+		poolHandler := admin.NewPoolHandler(deps.DB, deps.Vault, deps.Scheduler, deps.RedisCacheMgr, deps.SyncManager)
 		adminGroup.GET("/pools", poolHandler.List)
 		adminGroup.POST("/pools", poolHandler.Create)
 		// NOTE: static routes must be registered before Gin's parameterised :id patterns.
@@ -208,7 +213,7 @@ func NewEngine(deps *Dependencies) *gin.Engine {
 		adminGroup.POST("/pools/:id/credentials/:cred_id/test", poolHandler.TestCredential)
 
 		// Credential management
-		credHandler := admin.NewCredentialHandler(deps.DB, deps.Vault, deps.Scheduler, deps.RedisCacheMgr)
+		credHandler := admin.NewCredentialHandler(deps.DB, deps.Vault, deps.Scheduler, deps.RedisCacheMgr, deps.SyncManager)
 		adminGroup.GET("/credentials", credHandler.List)
 		adminGroup.POST("/credentials", credHandler.Create)
 		adminGroup.GET("/credentials/:id", credHandler.Get)

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -535,6 +536,62 @@ func TestFindPoolByPrefix_GenericSlash(t *testing.T) {
 					tc.requestModel, tc.poolPattern, found, tc.wantFound)
 			}
 		})
+	}
+}
+
+func TestListModels_FromCache(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger := zap.NewNop()
+	cfg := &config.Config{CacheMaxSizeMB: 10, CacheNumCounters: 100}
+	cs, err := cache.New(cfg, logger)
+	if err != nil {
+		t.Fatalf("failed to create cache: %v", err)
+	}
+	defer cs.Close()
+
+	activeModels := []credentials.ActiveModel{
+		{
+			Pattern: "gpt-4o",
+			Capabilities: map[string]bool{
+				"vision": true,
+			},
+		},
+		{
+			Pattern: "claude-3-5-sonnet",
+			Capabilities: map[string]bool{
+				"coding": true,
+			},
+		},
+	}
+	cs.Set("system:active_models", activeModels, 1000)
+	cs.Wait()
+
+	handler := NewHandler(nil, cs, nil, logger, nil, nil, nil)
+
+	r := gin.New()
+	r.GET("/v1/models", handler.ListModels)
+
+	req := httptest.NewRequest("GET", "/v1/models", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp ModelListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if len(resp.Data) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(resp.Data))
+	}
+	if resp.Data[0].ID != "gpt-4o" {
+		t.Errorf("expected first model to be gpt-4o, got %s", resp.Data[0].ID)
+	}
+	if resp.Data[0].Capabilities["vision"] != true {
+		t.Errorf("expected vision capability for gpt-4o")
 	}
 }
 

@@ -343,7 +343,7 @@
             batchReport = data;
             appState.addToast(data.success_count > 0 ? 'warning' : 'error', data.message || `Batch finished: ${data.success_count} succeeded, ${data.failed_count} failed`);
             reloadCredentials();
-            if (appState.apiKey) appState.loadModels();
+            appState.loadModels(true);
             return;
           }
         }
@@ -351,7 +351,7 @@
         appState.addToast('success', data.message || `Successfully synchronized ${data.models_count || 0} ${displayName} models`);
         showAddProviderModal = false;
         reloadCredentials();
-        if (appState.apiKey) appState.loadModels();
+        appState.loadModels(true);
       } else {
         const err = await res.json();
         appState.addToast('error', err.details || err.error || 'Auto-discovery failed');
@@ -459,7 +459,7 @@
         selectedIds = [];
         reloadCredentials();
         loadPools();
-        if (appState.apiKey) appState.loadModels();
+        appState.loadModels(true);
       } else {
         const err = await res.json();
         appState.addToast('error', err.details || err.error || 'Failed to delete credentials');
@@ -511,7 +511,7 @@
         const data = await res.json();
         appState.addToast('success', data.message || `Re-synced ${data.models_count ?? 0} model pools`);
         await reloadCredentials();
-        if (appState.apiKey) appState.loadModels();
+        appState.loadModels(true);
       } else {
         const err = await res.json();
         appState.addToast('error', err.details || err.error || 'Refresh failed');
@@ -569,7 +569,7 @@
             isRediscovering = false;
             // Reload credentials to reflect any new models
             await reloadCredentials();
-            if (appState.apiKey) appState.loadModels();
+            appState.loadModels(true);
           }
         }, 2000);
       } else if (res.status === 409) {

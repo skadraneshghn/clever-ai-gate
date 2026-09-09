@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -20,14 +21,21 @@ type NvidiaModelListResponse struct {
 // DiscoverAndRegisterNvidiaModels connects to NVIDIA's REST endpoint, fetches all available models,
 // auto-provisions model pools inside PostgreSQL, and binds the newly added key to all of them.
 func DiscoverAndRegisterNvidiaModels(ctx context.Context, db *pgxpool.Pool, vault *Vault, apiKey, baseURL string, weight int) (int, []string, error) {
+	baseURL = strings.TrimRight(baseURL, "/")
+	if baseURL == "" {
+		baseURL = "https://integrate.api.nvidia.com/v1"
+	}
+	cleanBase := strings.TrimSuffix(baseURL, "/v1")
+
 	// 1. Fetch live models array directly from NVIDIA
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/models", nil)
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, "GET", cleanBase+"/v1/models", nil)
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to build model discovery request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "CleverAIGate-Discovery/1.0")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -53,16 +61,24 @@ func DiscoverAndRegisterNvidiaModels(ctx context.Context, db *pgxpool.Pool, vaul
 	var discoveredModels []string
 
 	// Find which pools already have this apiKey bound to avoid duplicates.
+	// Uses an in-memory decryption cache so identical ciphertexts are decrypted once.
 	alreadyBound := make(map[int]bool)
-	rows, err := db.Query(ctx, `SELECT pool_id, encrypted_key FROM credentials WHERE provider = $1 AND base_url = $2`, "nvidia", baseURL)
+	rows, err := db.Query(ctx, `SELECT pool_id, encrypted_key FROM credentials WHERE provider = $1`, "nvidia")
 	if err == nil {
 		defer rows.Close()
+		decCache := make(map[string]string)
 		for rows.Next() {
 			var poolID int
 			var encKey string
 			if err := rows.Scan(&poolID, &encKey); err == nil {
-				decrypted, decErr := vault.Decrypt(encKey)
-				if decErr == nil && decrypted == apiKey {
+				plain, ok := decCache[encKey]
+				if !ok {
+					if dec, decErr := vault.Decrypt(encKey); decErr == nil {
+						plain = dec
+						decCache[encKey] = dec
+					}
+				}
+				if plain == apiKey {
 					alreadyBound[poolID] = true
 				}
 			}
@@ -77,18 +93,13 @@ func DiscoverAndRegisterNvidiaModels(ctx context.Context, db *pgxpool.Pool, vaul
 	defer tx.Rollback(ctx)
 
 	for _, m := range modelList.Data {
-		// Register each model under two pool patterns:
-		//
-		//   1. Prefixed form  "nvidia/X" — used by clients that select NVIDIA
-		//      explicitly. The handler.go isNvidia block detects this prefix and
-		//      strips it from the JSON body before forwarding to NVIDIA NIM.
-		//
-		//   2. Clean form     "X"        — required for client tools (Cline,
-		//      LobeChat, Open WebUI …) that hardcode model name whitelists and
-		//      reject any unknown prefix. When the clean form is used the handler
-		//      skips the isNvidia body-rewrite, but that is correct: the JSON
-		//      body already contains the clean model ID that NVIDIA NIM expects.
-		patterns := []string{"nvidia/" + m.ID, m.ID}
+		var patterns []string
+		if strings.HasPrefix(m.ID, "nvidia/") {
+			cleanID := strings.TrimPrefix(m.ID, "nvidia/")
+			patterns = []string{m.ID, cleanID}
+		} else {
+			patterns = []string{"nvidia/" + m.ID, m.ID}
+		}
 
 		for _, modelPattern := range patterns {
 			var poolID int

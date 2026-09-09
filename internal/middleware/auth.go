@@ -30,18 +30,28 @@ func (r *ristrettoLookup) Get(_ context.Context, apiKey string) (*database.Tenan
 // ProxyAuth extracts and validates the virtual API key from the Authorization header.
 // Uses RedisTenantCache (L1 Ristretto + L2 Redis) when available, falling back to
 // Ristretto-only — zero database calls on every hot-path request.
+// Accepts optional master admin API key to allow admin users to query proxy routes.
 //
 // Header format: Authorization: Bearer <virtual-api-key>
-func ProxyAuth(cacheStore *cache.Store) gin.HandlerFunc {
-	return proxyAuthWith(&ristrettoLookup{cacheStore})
+func ProxyAuth(cacheStore *cache.Store, adminAPIKey ...string) gin.HandlerFunc {
+	var adminKey string
+	if len(adminAPIKey) > 0 {
+		adminKey = adminAPIKey[0]
+	}
+	return proxyAuthWith(&ristrettoLookup{cacheStore}, adminKey)
 }
 
 // ProxyAuthWithRedis uses the two-layer Ristretto+Redis tenant cache.
-func ProxyAuthWithRedis(tenantCache *cache.RedisTenantCache) gin.HandlerFunc {
-	return proxyAuthWith(tenantCache)
+// Accepts optional master admin API key to allow admin users to query proxy routes.
+func ProxyAuthWithRedis(tenantCache *cache.RedisTenantCache, adminAPIKey ...string) gin.HandlerFunc {
+	var adminKey string
+	if len(adminAPIKey) > 0 {
+		adminKey = adminAPIKey[0]
+	}
+	return proxyAuthWith(tenantCache, adminKey)
 }
 
-func proxyAuthWith(lookup tenantLookup) gin.HandlerFunc {
+func proxyAuthWith(lookup tenantLookup, adminAPIKey string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
@@ -63,6 +73,16 @@ func proxyAuthWith(lookup tenantLookup) gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"error": "empty API key",
 			})
+			return
+		}
+
+		// Master Admin key bypass for playground and admin tools
+		if adminAPIKey != "" && constantTimeEqual(apiKey, adminAPIKey) {
+			c.Set("tenant_id", "admin")
+			c.Set("tenant_name", "Master Admin")
+			c.Set("tenant_rate_limit", 100000)
+			c.Set("tenant_balance", int64(1000000000000))
+			c.Next()
 			return
 		}
 
