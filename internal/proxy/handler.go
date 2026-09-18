@@ -31,7 +31,7 @@ import (
 // are assumed to contain heavy multi-modal payloads (Base64 images from IDE
 // extensions like Cline). Only the leading segment is parsed for routing;
 // the full body is piped directly to the upstream without being scanned.
-const metadataScanLimit = 256 * 1024 // 256KB
+const metadataScanLimit = 2 * 1024 * 1024 // 2MB (initial bounded scan for routing fields)
 
 // Handler is the main proxy handler for AI provider requests.
 // It sits on the hot-path and is designed for zero heap allocations
@@ -183,21 +183,36 @@ func (h *Handler) Handle(c *gin.Context) {
 		scanSlice = body
 		if len(body) > metadataScanLimit {
 			scanSlice = body[:metadataScanLimit]
-			h.logger.Debug("large payload detected, using bounded metadata scan",
+			h.logger.Debug("large payload detected, using bounded metadata scan first",
 				zap.Int("body_size", len(body)),
 				zap.Int("scan_limit", metadataScanLimit),
 			)
 		}
 
 		modelBytes, _, _, err := jsonparser.Get(scanSlice, "model")
+		if (err != nil || len(modelBytes) == 0) && len(body) > len(scanSlice) {
+			// Fallback: search the entire body. Long chat conversations or clients that serialize
+			// "messages" before "model" will push "model" beyond the initial scan limit.
+			modelBytes, _, _, err = jsonparser.Get(body, "model")
+		}
 		if err != nil || len(modelBytes) == 0 {
+			h.logger.Warn("request rejected: missing or invalid 'model' field",
+				zap.Int("body_size", len(body)),
+				zap.String("path", c.Request.URL.Path),
+				zap.String("client_ip", c.ClientIP()),
+				zap.Error(err),
+			)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing or invalid 'model' field"})
 			return
 		}
 		model = string(modelBytes)
 
-		// Step 3: Detect streaming mode (also bounded to metadata segment)
-		isStream, _ = jsonparser.GetBoolean(scanSlice, "stream")
+		// Step 3: Detect streaming mode (with full body fallback if not found in leading segment)
+		var streamErr error
+		isStream, streamErr = jsonparser.GetBoolean(scanSlice, "stream")
+		if streamErr != nil && len(body) > len(scanSlice) {
+			isStream, _ = jsonparser.GetBoolean(body, "stream")
+		}
 	}
 
 	requestedModel := model
@@ -424,7 +439,7 @@ func (h *Handler) Handle(c *gin.Context) {
 
 		// Fix 2: Conditional reasoning injection — only for supported architectures
 		if supportsNvidiaReasoning(upstreamModel) {
-			body = injectNvidiaParams(body, scanSlice, h.logger)
+			body = injectNvidiaParams(body, body, h.logger)
 		} else {
 			h.logger.Debug("skipping reasoning injection for standard non-thinking model",
 				zap.String("model", upstreamModel),

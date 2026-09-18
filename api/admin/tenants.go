@@ -3,6 +3,7 @@ package admin
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"math"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -80,12 +81,21 @@ func (h *TenantHandler) Create(c *gin.Context) {
 		return
 	}
 
-	// Set defaults
-	if req.TokenBalance == 0 {
-		req.TokenBalance = 1_000_000_000 // 1 billion tokens default
+	// Set defaults and enforce limits
+	if req.TokenBalance <= 0 {
+		if req.TokenBalance == 0 {
+			req.TokenBalance = 1_000_000_000 // 1 billion tokens default
+		} else {
+			// Negative balance interpreted as unlimited tokens
+			req.TokenBalance = math.MaxInt64
+		}
 	}
 	if req.RateLimitRPM == 0 {
 		req.RateLimitRPM = 60
+	} else if req.RateLimitRPM < 0 {
+		req.RateLimitRPM = 0 // 0 means unlimited rate limit
+	} else if req.RateLimitRPM > math.MaxInt32 {
+		req.RateLimitRPM = math.MaxInt32
 	}
 
 	id, err := database.CreateTenant(c.Request.Context(), h.db, req.Name, apiKey, req.TokenBalance, req.RateLimitRPM)
@@ -164,6 +174,15 @@ func (h *TenantHandler) Update(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body", Details: err.Error()})
 		return
+	}
+
+	if req.TokenBalance < 0 {
+		req.TokenBalance = math.MaxInt64
+	}
+	if req.RateLimitRPM < 0 {
+		req.RateLimitRPM = 0
+	} else if req.RateLimitRPM > math.MaxInt32 {
+		req.RateLimitRPM = math.MaxInt32
 	}
 
 	err := database.UpdateTenant(c.Request.Context(), h.db, id, req.Name, req.TokenBalance, req.IsActive, req.RateLimitRPM)

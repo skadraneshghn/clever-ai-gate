@@ -85,6 +85,12 @@ func (rl *RedisRateLimiter) Middleware() gin.HandlerFunc {
 			rpmLimit = limit.(int)
 		}
 
+		// No rate limit configured — allow all requests
+		if rpmLimit <= 0 {
+			c.Next()
+			return
+		}
+
 		tenantKey := fmt.Sprintf("rl:%s", tenantID.(string))
 		nowMs := time.Now().UnixMilli()
 		windowMs := int64(60_000) // 1 minute in milliseconds

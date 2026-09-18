@@ -1,8 +1,8 @@
 {
   "apps": [
     {
-      "app_id": "app_ddb3d220-a310-44e5-8b32-7e61808e94d8",
-      "org_id": "user_dda79ac5-c8e0-4767-b2b6-73f5a180dc73",
+      "app_id": "app_35199071-4dba-4838-b8ac-ae43dc841872",
+      "org_id": "user_9adddbb5-29c6-4829-9061-b8db6c0053c3",
       "deploy_url": "https://github.com/skadraneshghn/clever-ai-gate.git",
       "git_ssh_url": "https://github.com/skadraneshghn/clever-ai-gate.git",
       "name": "clever-ai-gate",

@@ -1,5 +1,12 @@
 package dto
 
+import (
+	"encoding/json"
+	"math"
+	"math/big"
+	"strings"
+)
+
 // --- Request DTOs ---
 
 // CreateTenantRequest represents the body for creating a tenant.
@@ -9,12 +16,115 @@ type CreateTenantRequest struct {
 	RateLimitRPM int    `json:"rate_limit_rpm,omitempty" example:"60"`
 }
 
+// UnmarshalJSON implements custom JSON unmarshaling to prevent integer overflow
+// when users submit huge numbers (e.g. 100000000000000000000 or 9999999999999999999)
+// for token balance or rate limits. Values exceeding math.MaxInt64 / math.MaxInt32
+// are clamped safely.
+func (r *CreateTenantRequest) UnmarshalJSON(data []byte) error {
+	type Alias CreateTenantRequest
+	aux := struct {
+		TokenBalance any `json:"token_balance"`
+		RateLimitRPM any `json:"rate_limit_rpm"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if aux.TokenBalance != nil {
+		r.TokenBalance = parseClampedInt64(aux.TokenBalance, math.MaxInt64)
+	}
+	if aux.RateLimitRPM != nil {
+		r.RateLimitRPM = int(parseClampedInt64(aux.RateLimitRPM, math.MaxInt32))
+	}
+	return nil
+}
+
 // UpdateTenantRequest represents the body for updating a tenant.
 type UpdateTenantRequest struct {
 	Name         string `json:"name" binding:"required" example:"Acme Corp Updated"`
 	TokenBalance int64  `json:"token_balance" example:"2000000000"`
 	IsActive     bool   `json:"is_active" example:"true"`
 	RateLimitRPM int    `json:"rate_limit_rpm" example:"120"`
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling to prevent integer overflow
+// for UpdateTenantRequest.
+func (r *UpdateTenantRequest) UnmarshalJSON(data []byte) error {
+	type Alias UpdateTenantRequest
+	aux := struct {
+		TokenBalance any `json:"token_balance"`
+		RateLimitRPM any `json:"rate_limit_rpm"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if aux.TokenBalance != nil {
+		r.TokenBalance = parseClampedInt64(aux.TokenBalance, math.MaxInt64)
+	}
+	if aux.RateLimitRPM != nil {
+		r.RateLimitRPM = int(parseClampedInt64(aux.RateLimitRPM, math.MaxInt32))
+	}
+	return nil
+}
+
+// parseClampedInt64 safely parses any representation of a number (int, float, scientific notation,
+// string, json.Number) and clamps it to maxVal to prevent integer overflow.
+func parseClampedInt64(v any, maxVal int64) int64 {
+	if v == nil {
+		return 0
+	}
+	switch val := v.(type) {
+	case float64:
+		if math.IsNaN(val) || math.IsInf(val, 0) || val >= float64(maxVal) {
+			return maxVal
+		}
+		if val <= 0 {
+			return int64(val)
+		}
+		return int64(val)
+	case int64:
+		if val >= maxVal {
+			return maxVal
+		}
+		return val
+	case int:
+		if int64(val) >= maxVal {
+			return maxVal
+		}
+		return int64(val)
+	case json.Number:
+		return parseStringNumber(string(val), maxVal)
+	case string:
+		return parseStringNumber(val, maxVal)
+	default:
+		return 0
+	}
+}
+
+func parseStringNumber(s string, maxVal int64) int64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	bf, _, err := big.ParseFloat(s, 10, 128, big.ToNearestEven)
+	if err == nil {
+		maxBf := new(big.Float).SetInt64(maxVal)
+		if bf.Cmp(maxBf) >= 0 {
+			return maxVal
+		}
+		if bf.Sign() <= 0 {
+			i64, _ := bf.Int64()
+			return i64
+		}
+		i64, _ := bf.Int64()
+		return i64
+	}
+	return 0
 }
 
 // CreatePoolRequest represents the body for creating a model routing pool.
