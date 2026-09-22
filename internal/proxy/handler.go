@@ -593,6 +593,55 @@ type attemptRecord struct {
 	credID     int
 }
 
+// retryRoundsPerPool is the number of complete passes over a pool's
+// credentials that executeWithRetry performs before giving up on the pool and
+// switching to the exact same model on another provider. Round 1 is the
+// initial pass; rounds 2+ retry every credential of the pool again (cooldowns
+// permitting). The cross-provider fallback only fires after ALL rounds fail.
+//
+// Package-level var (not const) so tests can pin fast settings.
+var retryRoundsPerPool = 3
+
+// roundTransitionWaitBudget caps how long executeWithRetry waits, between two
+// retry rounds on the same pool, for the soonest failed credential's cooldown
+// to expire. Transient 5xx cooldowns are 2-5s so a full fresh-key round is
+// always affordable; non-retryable rejections (auth/quota/rate-limit) skip
+// rounds entirely via isNonRetryableCredentialStatus.
+//
+// Package-level var (not const) so tests can pin fast settings.
+var roundTransitionWaitBudget = 6 * time.Second
+
+// isNonRetryableCredentialStatus reports whether an upstream status means the
+// CREDENTIAL itself was rejected — auth failure, quota/billing exhaustion,
+// rate limit, or an invalid payload. Re-trying the same credential inside the
+// same request cannot resolve these, so remaining retry rounds are skipped
+// and the gateway switches to the exact same model on another provider
+// instead of stalling the client on dead keys.
+func isNonRetryableCredentialStatus(status int) bool {
+	return status == http.StatusBadRequest ||
+		status == http.StatusTooManyRequests ||
+		isCredentialAuthError(status)
+}
+
+// poolSoonestCooldownRemaining returns how much longer the pool's
+// soonest-available credential still needs before its cooldown expires.
+// Zero means a credential is already fresh. Retry rounds use this to pace
+// themselves: each new round starts once the first failed key has cooled down.
+func poolSoonestCooldownRemaining(pool *credentials.BalancedChannelPool) time.Duration {
+	if pool == nil {
+		return 0
+	}
+	result := pool.AcquireLeastPenalizedToken()
+	if result == nil {
+		return 0
+	}
+	remaining := time.Duration(atomic.LoadInt64(&result.Credential.CooldownUntil) - time.Now().UnixNano())
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
 // executeWithRetry attempts the proxy request, cycling through ALL credentials
 // in the pool before giving up.
 //
@@ -602,14 +651,27 @@ type attemptRecord struct {
 //   - 429 single-key pool: abort immediately (no other key can help).
 //   - 429 multi-key pool: short cooldown, rotate to next key.
 //   - 5xx / transport-mapped (502/504) / non-standard codes: moderate cooldown, rotate.
-//   - When all exhausted: canonical OpenAI error envelope is returned to client.
+//
+// Retry-round policy — the gateway does NOT switch providers on the first
+// full failure of a pool. After every credential has failed once, ALL
+// credentials are retried in complete rounds (up to retryRoundsPerPool), so
+// transient upstream errors recover without a provider switch. Rounds are
+// skipped when the last round produced only non-retryable credential
+// rejections, and each round waits at most roundTransitionWaitBudget for
+// cooled-down keys.
+//
+// Only after all retry rounds fail does the exact-model cross-provider
+// fallback switch to another provider hosting the exact same model. If every
+// such provider is exhausted, a canonical OpenAI error envelope describing
+// every pool, every round, and every credential attempt is returned to the
+// client.
 func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestStart time.Time, maxAttempts int) {
 	requestID, _ := c.Get("request_id")
 	var lastErrBody []byte
 	var lastStatus int
 	var lastProvider string
 	var attempts []attemptRecord
-	triedIndices := make(map[int]bool) // deduplicate — never retry the same index twice
+	triedIndices := make(map[int]bool) // deduplicate — never retry the same index twice per round
 	triedCount := 0
 	triedPools := make(map[string]bool)
 	if pctx.pool != nil {
@@ -617,6 +679,17 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestSt
 	}
 	if pctx.requestedModel != "" {
 		triedPools[pctx.requestedModel] = true
+	}
+
+	// Retry-round + cross-provider fallback bookkeeping.
+	// round counts complete passes over the CURRENT pool's credentials:
+	// 1 = initial pass, retryRoundsPerPool = last allowed pass.
+	round := 1
+	roundStartIdx := 0 // index into attempts where the current round began
+	poolsAttempted := make([]string, 0, 2)
+	roundsByPool := make(map[string]int)
+	if pctx.pool != nil {
+		poolsAttempted = append(poolsAttempted, pctx.pool.ModelPattern)
 	}
 
 	// Safety valve: in a high-concurrency surge, AcquireActiveToken may return
@@ -730,8 +803,10 @@ retryLoop:
 			zap.String("provider", result.Credential.Provider),
 			zap.String("studio_provider", pctx.studioProvider),
 			zap.Int("credential_id", result.Credential.ID),
+			zap.Int("round", round),
 			zap.Int("attempt", triedCount),
 			zap.Int("max_attempts", maxAttempts),
+			zap.Int("max_rounds", retryRoundsPerPool),
 		)
 
 		statusCode, upstreamURL, errBody, err := h.forwardRequest(c, pctx)
@@ -864,7 +939,17 @@ retryLoop:
 				strings.Contains(bodyLower, "quota_exceeded") ||
 				strings.Contains(bodyLower, "credit limit") ||
 				strings.Contains(bodyLower, "usage-limited-chat") ||
-				strings.Contains(bodyLower, "error_400_from_delegate") {
+				strings.Contains(bodyLower, "error_400_from_delegate") ||
+				// Error-in-success-body sniffer (response_error_sniffer.go):
+				// synthetic 402 bodies mark credit/balance errors that were
+				// smuggled inside 200 OK responses (e.g. Pollinations).
+				strings.Contains(bodyLower, "not enough credits") ||
+				strings.Contains(bodyLower, "insufficient credits") ||
+				strings.Contains(bodyLower, "insufficient_quota") ||
+				strings.Contains(bodyLower, "insufficient_credits") ||
+				strings.Contains(bodyLower, "agent_low_balance") ||
+				strings.Contains(bodyLower, "enter.pollinations.ai") ||
+				strings.Contains(bodyLower, "upstream_error_in_success_body") {
 				isDepletedAccount = true
 			}
 		}
@@ -1009,12 +1094,85 @@ retryLoop:
 		)
 	}
 
+	// ── Retry-Round Policy (never switch providers on the first failure) ──────
+	// The pool is abandoned only after retryRoundsPerPool COMPLETE passes over
+	// its credentials. After every credential has failed once, ALL credentials
+	// are retried (bounded wait for the soonest key's cooldown) so transient
+	// upstream errors — 5xx blips, overloads, timeouts — recover without a
+	// provider switch.
+	//
+	// Rounds are skipped when every failure in the last round was a
+	// non-retryable credential rejection (auth/quota/billing/rate-limit/
+	// payload): re-trying those keys inside the same request cannot succeed,
+	// so the gateway proceeds to the exact-model fallback immediately instead
+	// of stalling the client.
+	//
+	// Fast-fail paths above (404, repeated 400, single-key 429, spin guard)
+	// break the loop early; if they fired before every key was tried they skip
+	// this block (triedCount < maxAttempts). If they fired on the very last key
+	// they still land here, but their statuses are all non-retryable, so the
+	// guard below routes them straight to the cross-provider fallback instead
+	// of burning retry rounds.
+	if triedCount >= maxAttempts && round < retryRoundsPerPool {
+		lastRoundRetryable := false
+		for _, a := range attempts[roundStartIdx:] {
+			if !isNonRetryableCredentialStatus(a.statusCode) {
+				lastRoundRetryable = true
+				break
+			}
+		}
+
+		if !lastRoundRetryable {
+			h.logger.Warn("every credential rejected with non-retryable errors — skipping remaining retry rounds and switching provider",
+				zap.String("model", pctx.model),
+				zap.String("tenant_id", pctx.tenantID),
+				zap.Int("rounds_completed", round),
+				zap.Int("rounds_max", retryRoundsPerPool),
+				zap.Int("keys_tried", triedCount),
+				zap.Duration("elapsed", time.Since(requestStart)),
+			)
+		} else {
+			// Wait — bounded — for the soonest failed key's cooldown so the
+			// next round probes fresh credentials, then re-try the whole pool.
+			wait := poolSoonestCooldownRemaining(pctx.pool)
+			if wait > roundTransitionWaitBudget {
+				wait = roundTransitionWaitBudget
+			}
+			if wait > 0 {
+				select {
+				case <-time.After(wait):
+				case <-c.Request.Context().Done():
+					// Client gone: the loop-top context guard aborts cleanly.
+				}
+			}
+			round++
+			roundStartIdx = len(attempts)
+			triedCount = 0
+			triedIndices = make(map[int]bool)
+			spins = 0
+			h.logger.Warn("all pool credentials failed this round — retrying every credential before any provider switch",
+				zap.String("model", pctx.model),
+				zap.String("tenant_id", pctx.tenantID),
+				zap.String("pool", pctx.pool.ModelPattern),
+				zap.Int("round", round),
+				zap.Int("rounds_max", retryRoundsPerPool),
+				zap.Int("credentials", maxAttempts),
+				zap.Duration("waited_for_cooldown", wait),
+			)
+			goto retryLoop
+		}
+	}
+
 	// ── Exact-Model Cross-Provider Fallback ────────────────────────────────────
 	// When all credentials in the current pool fail or are exhausted, attempt to
 	// fall back to other pools hosting the EXACT same model ID and same version.
 	// We strictly prohibit falling back to different, cheaper, or arbitrary models.
 	// If no healthy exact-model pool exists, the upstream error is thrown directly.
 	if h.syncManager != nil {
+		// Record how many complete rounds the pool being abandoned consumed.
+		if pctx.pool != nil {
+			roundsByPool[pctx.pool.ModelPattern] = round
+		}
 		allPools := h.syncManager.GetAllPools()
 		targetModelRef := pctx.requestedModel
 		if targetModelRef == "" && pctx.pool != nil {
@@ -1037,19 +1195,23 @@ retryLoop:
 		if len(fallbacks) > 0 {
 			fallbackPool := fallbacks[0]
 			triedPools[fallbackPool.ModelPattern] = true
+			poolsAttempted = append(poolsAttempted, fallbackPool.ModelPattern)
 
-			h.logger.Warn("current pool credentials failed; switching to exact-model cross-provider fallback",
+			h.logger.Warn("pool exhausted across all retry rounds — switching to exact-model cross-provider fallback",
 				zap.String("original_model", pctx.requestedModel),
 				zap.String("failed_pool", pctx.pool.ModelPattern),
+				zap.Int("failed_pool_rounds", round),
 				zap.String("fallback_pool", fallbackPool.ModelPattern),
 				zap.Int("fallback_healthy_keys", fallbackPool.HealthyCount()),
 			)
 
 			h.switchProxyContextToFallback(pctx, fallbackPool)
 
-			// Reset retry counters for the fallback pool
+			// Reset retry counters and give the fallback pool its own retry rounds.
 			triedCount = 0
 			triedIndices = make(map[int]bool)
+			round = 1
+			roundStartIdx = len(attempts)
 			maxAttempts = int(fallbackPool.TotalCount)
 			if maxAttempts < 1 {
 				maxAttempts = 1
@@ -1065,10 +1227,26 @@ retryLoop:
 	}
 
 	// ── All credentials exhausted ─────────────────────────────────────────────
+	// Every credential of every pool hosting the exact same model has failed
+	// across all retry rounds. Record the final pool's rounds and return a
+	// meaningful canonical error describing every pool, round, and attempt.
+	if pctx.pool != nil {
+		roundsByPool[pctx.pool.ModelPattern] = round
+	}
+	// Prefer the client-requested model name so the error describes what the
+	// user actually asked for, not the last pool's routing pattern.
+	summaryModel := pctx.requestedModel
+	if summaryModel == "" {
+		summaryModel = pctx.model
+	}
+
 	h.logger.Error("all pool credentials exhausted",
 		zap.String("model", pctx.model),
 		zap.String("tenant_id", pctx.tenantID),
 		zap.Int("keys_tried", triedCount),
+		zap.Int("rounds_on_last_pool", round),
+		zap.Int("rounds_max_per_pool", retryRoundsPerPool),
+		zap.Strings("pools_attempted", poolsAttempted),
 		zap.Int("last_status", lastStatus),
 		zap.String("last_provider", lastProvider),
 		zap.Duration("total_elapsed", time.Since(requestStart)),
@@ -1088,14 +1266,14 @@ retryLoop:
 		entry.PromptTokens = promptTokens
 		entry.LatencyMs = int(time.Since(requestStart).Milliseconds())
 		entry.StatusCode = http.StatusBadGateway
-		entry.ErrorMessage = buildAttemptSummary(pctx.model, attempts)
+		entry.ErrorMessage = buildAttemptSummary(summaryModel, attempts, roundsByPool, poolsAttempted)
 		entry.CreatedAt = time.Now()
 		entry.Prompt = promptText
 		h.pipeline.Emit(entry)
 	}
 
 	// Never dump raw upstream bytes — always return a canonical OpenAI error envelope.
-	summary := buildAttemptSummary(pctx.model, attempts)
+	summary := buildAttemptSummary(summaryModel, attempts, roundsByPool, poolsAttempted)
 	finalBody := formatOpenAIError(lastStatus, lastErrBody, summary)
 	respStatus := http.StatusBadGateway
 	if lastStatus >= 400 && lastStatus < 600 {
@@ -1572,6 +1750,55 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 	}
 
 handleSuccess:
+	// ── Error-in-success-body sniffing ────────────────────────────────────
+	// Some upstreams (Pollinations being the reported case) return HTTP 200
+	// with the actual error message — credit/balance exhaustion, marketing
+	// top-up links — embedded in the response body in place of the model's
+	// answer. Detect this BEFORE anything is written to the client and
+	// convert it into a synthetic 402 so executeWithRetry penalizes the
+	// credential, rotates to a healthy key, and can fall back to another
+	// provider hosting the same model. See response_error_sniffer.go.
+	{
+		ct := resp.Header.Get("Content-Type")
+		if isSniffableContentType(ct) {
+			if pctx.isStream && resp.StatusCode == http.StatusOK {
+				res := sniffStreamForError(resp.Body)
+				if res.verdict != nil {
+					h.logger.Warn("upstream 200 OK body is actually an error — converting to retryable failure",
+						zap.String("model", pctx.model),
+						zap.String("provider", cred.Provider),
+						zap.Int("credential_id", cred.ID),
+						zap.String("reason", res.verdict.Reason),
+						zap.Bool("stream", true),
+						zap.String("detail", truncateSnippet(res.verdict.Message, 300)),
+					)
+					return http.StatusPaymentRequired, upstreamURL, res.verdict.SyntheticBody(), nil
+				}
+				// Clean: replay the sniffed bytes byte-exactly. The
+				// function-level `defer resp.Body.Close()` captured the
+				// original body at defer time, so it is still closed exactly
+				// once; ProxyStream closing the NopCloser wrapper is a no-op.
+				resp.Body = io.NopCloser(&prefixReplayReader{prefix: res.replay, rest: resp.Body})
+			} else if !pctx.isStream && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				prefix, truncated := readPrefix(resp.Body, nonStreamSniffLimit)
+				if len(prefix) > 0 && (ct != "" || isLikelyTextual(prefix)) {
+					if v := detectSuccessBodyError(prefix, ct, !truncated); v != nil {
+						h.logger.Warn("upstream 200 OK body is actually an error — converting to retryable failure",
+							zap.String("model", pctx.model),
+							zap.String("provider", cred.Provider),
+							zap.Int("credential_id", cred.ID),
+							zap.String("reason", v.Reason),
+							zap.Bool("stream", false),
+							zap.String("detail", truncateSnippet(v.Message, 300)),
+						)
+						return http.StatusPaymentRequired, upstreamURL, v.SyntheticBody(), nil
+					}
+				}
+				resp.Body = io.NopCloser(&prefixReplayReader{prefix: prefix, rest: resp.Body})
+			}
+		}
+	}
+
 	// --- Success stream path ---
 	if pctx.isStream && resp.StatusCode == http.StatusOK {
 		c.Writer.Header().Set("X-Gateway-Provider", cred.Provider)
@@ -2756,19 +2983,67 @@ func isContextTimeoutError(err error) bool {
 		strings.Contains(msg, "timeout")
 }
 
-// buildAttemptSummary formats the list of failed credential attempts into a
-// human-readable diagnostic string for inclusion in the final error envelope.
-func buildAttemptSummary(model string, attempts []attemptRecord) string {
+// buildAttemptSummary renders the diagnostic message embedded in the final
+// canonical OpenAI error envelope when every credential — across every retry
+// round and every exact-model fallback pool — has been exhausted. It reports:
+//   - the total number of upstream credential attempts,
+//   - every pool that was tried and how many complete retry rounds it consumed,
+//   - every failing credential, with repeat failures across retry rounds
+//     aggregated into compact "cred#id(provider)→status ×N" groups.
+func buildAttemptSummary(model string, attempts []attemptRecord, roundsByPool map[string]int, poolsAttempted []string) string {
 	if len(attempts) == 0 {
 		return fmt.Sprintf("all upstream credentials for model %q were exhausted with no successful response", model)
 	}
+
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "all %d credential(s) exhausted for model %q. Attempts: [", len(attempts), model)
-	for i, a := range attempts {
+	fmt.Fprintf(&sb, "all %d credential attempt(s) exhausted for model %q", len(attempts), model)
+
+	if len(poolsAttempted) > 0 {
+		sb.WriteString(" across pool(s):")
+		for i, p := range poolsAttempted {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			if rounds, ok := roundsByPool[p]; ok && rounds > 0 {
+				fmt.Fprintf(&sb, " %s (%d round(s))", p, rounds)
+			} else {
+				fmt.Fprintf(&sb, " %s", p)
+			}
+		}
+	}
+
+	// Aggregate repeat failures (retry rounds re-hit the same keys) into ×N
+	// groups, preserving first-seen order.
+	type attemptKey struct {
+		credID   int
+		provider string
+		status   int
+	}
+	order := make([]attemptKey, 0, len(attempts))
+	counts := make(map[attemptKey]int, len(attempts))
+	for _, a := range attempts {
+		k := attemptKey{credID: a.credID, provider: a.provider, status: a.statusCode}
+		if counts[k] == 0 {
+			order = append(order, k)
+		}
+		counts[k]++
+	}
+
+	const maxListedGroups = 12
+	sb.WriteString(". Attempts: [")
+	for i, k := range order {
+		if i == maxListedGroups {
+			fmt.Fprintf(&sb, ", + %d more attempt group(s)", len(order)-maxListedGroups)
+			break
+		}
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		fmt.Fprintf(&sb, "cred#%d(%s)→%d", a.credID, a.provider, a.statusCode)
+		if counts[k] > 1 {
+			fmt.Fprintf(&sb, "cred#%d(%s)→%d ×%d", k.credID, k.provider, k.status, counts[k])
+		} else {
+			fmt.Fprintf(&sb, "cred#%d(%s)→%d", k.credID, k.provider, k.status)
+		}
 	}
 	sb.WriteString("]")
 	return sb.String()
@@ -2779,8 +3054,11 @@ func buildAttemptSummary(model string, attempts []attemptRecord) string {
 // — never raw upstream bytes, never unformatted text or HTML.
 //
 // Detection priority:
-//  1. rawBody is already a valid OpenAI error envelope → return as-is
-//     (preserves provider transparency: upstream Claude/OpenAI error details)
+//  1. rawBody is already a valid OpenAI error envelope AND summary is empty
+//     → return as-is (preserves provider transparency). When a summary IS
+//     provided (total exhaustion), the gateway context must reach the client,
+//     so the envelope falls through and is re-wrapped with the summary plus
+//     the extracted upstream message.
 //  2. rawBody is JSON with a "message", "error.message", or "detail" field
 //     → extract and re-wrap into the canonical schema
 //  3. HTML, plain-text, or empty body → sanitize and embed in the message field
@@ -2795,8 +3073,10 @@ func formatOpenAIError(statusCode int, rawBody []byte, summary string) []byte {
 		Error innerError `json:"error"`
 	}
 
-	// 1. Already a valid OpenAI error envelope? Return unchanged.
-	if len(rawBody) > 0 {
+	// 1. Already a valid OpenAI error envelope AND no gateway summary provided?
+	//    Return unchanged. With a summary (total exhaustion), fall through so
+	//    the client sees the gateway context plus the upstream message.
+	if summary == "" && len(rawBody) > 0 {
 		if errVal, dataType, _, parseErr := jsonparser.Get(rawBody, "error"); parseErr == nil &&
 			dataType == jsonparser.Object && len(errVal) > 0 {
 			if _, _, _, msgErr := jsonparser.Get(errVal, "message"); msgErr == nil {

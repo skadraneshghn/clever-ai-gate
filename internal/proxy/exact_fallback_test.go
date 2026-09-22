@@ -19,6 +19,11 @@ import (
 )
 
 func TestExactModelCrossProviderFallback_Success(t *testing.T) {
+	// Pin single-round behavior: this test verifies the cross-provider switch
+	// mechanics. The multi-round retry policy (retry every credential of a
+	// pool before switching providers) has dedicated tests in retry_rounds_test.go.
+	setRetryRoundSettings(t, 1, 10*time.Millisecond)
+
 	gin.SetMode(gin.TestMode)
 	logger := zap.NewNop()
 	cfg := &config.Config{
@@ -175,6 +180,11 @@ func TestExactModelCrossProviderFallback_Success(t *testing.T) {
 }
 
 func TestExactModelFallback_NoArbitraryDowngrade_ThrowsError(t *testing.T) {
+	// Pin single-round behavior: this test verifies that no downgrade happens
+	// when no exact-model fallback exists. The multi-round retry policy has
+	// dedicated tests in retry_rounds_test.go.
+	setRetryRoundSettings(t, 1, 10*time.Millisecond)
+
 	gin.SetMode(gin.TestMode)
 	logger := zap.NewNop()
 	cfg := &config.Config{
@@ -274,6 +284,12 @@ func TestExactModelFallback_NoArbitraryDowngrade_ThrowsError(t *testing.T) {
 	// Should only have called the 1 nvidia provider, never downgraded to openrouter 3.1 or puter
 	if calledProviders != 1 {
 		t.Errorf("expected exactly 1 provider attempt (nvidia), got %d", calledProviders)
+	}
+
+	// The error must be meaningful: name the requested model, the pool that was
+	// tried, and how many rounds it consumed.
+	if !strings.Contains(w.Body.String(), "nvidia/meta/llama-3.3-70b-instruct (1 round(s))") {
+		t.Errorf("expected meaningful exhaustion summary listing the pool and round count, got: %s", w.Body.String())
 	}
 }
 

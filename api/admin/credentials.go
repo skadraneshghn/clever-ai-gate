@@ -887,17 +887,23 @@ func (h *CredentialHandler) RegisterGeminiProvider(c *gin.Context) {
 }
 
 // RegisterPuterProvider auto-discovers all Puter.com AI models available under
-// an API token, creates model pools for each, and binds the credential
-// to all of them in one transaction.
+// one or more API tokens, creates model pools for each, and binds every
+// credential to all of them in one transaction per key.
+//
+// Bulk registration is supported: pass an array of tokens via api_keys (or a
+// newline/comma-separated list in api_key). Keys are processed one by one — a
+// failing key is reported in the results without aborting the batch, and every
+// valid key is inserted into the credentials table bound to the full Puter
+// model catalog for round-robin load balancing.
 
 //
 // @Summary      Auto-discover Puter.com Models
-// @Description  Submits a Puter token, fetches the model details, and registers all models automatically
+// @Description  Submits one or more Puter tokens, fetches the model details, and registers all models automatically
 // @Tags         Credentials
 // @Accept       json
 // @Produce      json
 // @Security     BearerAuth
-// @Param        body  body      dto.DiscoverPuterRequest  true  "Puter provider details (api_key required)"
+// @Param        body  body      dto.DiscoverPuterRequest  true  "Puter provider details (api_key or api_keys required)"
 // @Success      200   {object}  dto.DiscoverProviderResponse
 // @Failure      400   {object}  dto.ErrorResponse
 // @Failure      500   {object}  dto.ErrorResponse
@@ -909,8 +915,30 @@ func (h *CredentialHandler) RegisterPuterProvider(c *gin.Context) {
 		return
 	}
 
-	if req.APIKey == "" {
-		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "api_key is required for Puter.com auto-discovery"})
+	// Collect keys: prefer the explicit api_keys array, then fall back to
+	// newline/comma-separated tokens in api_key.
+	var keys []string
+	for _, k := range req.APIKeys {
+		k = strings.TrimSpace(k)
+		if k != "" {
+			keys = append(keys, k)
+		}
+	}
+
+	if len(keys) == 0 && req.APIKey != "" {
+		rawKeys := strings.FieldsFunc(req.APIKey, func(r rune) bool {
+			return r == '\n' || r == '\r' || r == ','
+		})
+		for _, rk := range rawKeys {
+			rk = strings.TrimSpace(rk)
+			if rk != "" {
+				keys = append(keys, rk)
+			}
+		}
+	}
+
+	if len(keys) == 0 {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "api_key or api_keys is required for Puter.com auto-discovery"})
 		return
 	}
 
@@ -918,26 +946,75 @@ func (h *CredentialHandler) RegisterPuterProvider(c *gin.Context) {
 		req.Weight = 1
 	}
 
-	count, models, err := credentials.DiscoverAndRegisterPuterModels(
-		c.Request.Context(),
-		h.db,
-		h.vault,
-		req.APIKey,
-		req.Weight,
-	)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Puter.com auto-discovery failed", Details: err.Error()})
+	// Single key workflow (legacy response shape).
+	if len(keys) == 1 && len(req.APIKeys) == 0 {
+		count, models, err := credentials.DiscoverAndRegisterPuterModels(
+			c.Request.Context(),
+			h.db,
+			h.vault,
+			keys[0],
+			req.Weight,
+		)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Puter.com auto-discovery failed", Details: err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, dto.DiscoverProviderResponse{
+			Message:       fmt.Sprintf("Successfully synchronized %d Puter.com models", count),
+			ModelsCount:   count,
+			DiscoveredIDs: models,
+		})
+
+		// Synchronously reload caches so all cluster nodes instantly see newly registered Puter models.
+		h.syncCaches(c.Request.Context())
 		return
 	}
 
+	// Batch keys workflow: each key is processed one by one; failures are
+	// reported per key without aborting the remaining keys.
+	totalKeys, successCount, failedCount, totalModels, results, allDiscovered, err := credentials.DiscoverAndRegisterPuterModelsBatch(
+		c.Request.Context(),
+		h.db,
+		h.vault,
+		keys,
+		req.Weight,
+	)
+	if err != nil && successCount == 0 {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Puter.com batch auto-discovery failed", Details: err.Error()})
+		return
+	}
+
+	batchResults := make([]dto.BatchKeyResult, len(results))
+	for i, r := range results {
+		batchResults[i] = dto.BatchKeyResult{
+			Index:         r.Index,
+			KeyMasked:     r.KeyMasked,
+			Success:       r.Success,
+			ModelsCount:   r.ModelsCount,
+			DiscoveredIDs: r.DiscoveredIDs,
+			Error:         r.Error,
+		}
+	}
+
+	msg := fmt.Sprintf("Successfully synchronized %d unique Puter.com models across %d of %d keys", totalModels, successCount, totalKeys)
+	if failedCount > 0 {
+		msg = fmt.Sprintf("Batch discovery completed: %d of %d keys succeeded, %d failed (%d unique models synchronized)", successCount, totalKeys, failedCount, totalModels)
+	}
+
 	c.JSON(http.StatusOK, dto.DiscoverProviderResponse{
-		Message:       fmt.Sprintf("Successfully synchronized %d Puter.com models", count),
-		ModelsCount:   count,
-		DiscoveredIDs: models,
+		Message:       msg,
+		ModelsCount:   totalModels,
+		DiscoveredIDs: allDiscovered,
+		TotalKeys:     totalKeys,
+		SuccessCount:  successCount,
+		FailedCount:   failedCount,
+		Results:       batchResults,
 	})
 
-	// Synchronously reload caches so all cluster nodes instantly see newly registered Puter models.
-	h.syncCaches(c.Request.Context())
+	if successCount > 0 {
+		h.syncCaches(c.Request.Context())
+	}
 }
 
 // RegisterAgentRouterProvider auto-discovers all models available on AgentRouter.org

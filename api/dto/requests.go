@@ -210,10 +210,13 @@ type DiscoverSarvamRequest struct {
 
 // DiscoverPuterRequest is the request body for POST /api/v1/admin/providers/puter.
 // Puter.com only needs an API token (api_key) — the base URL is hardcoded to
-// https://api.puter.com/puterai/openai/v1.
+// https://api.puter.com/puterai/openai/v1. Bulk registration is supported via
+// api_keys (array) or newline/comma-separated tokens in api_key; each key is
+// processed one by one and bound to all discovered Puter model pools.
 type DiscoverPuterRequest struct {
-	APIKey string `json:"api_key" binding:"required" example:"..."`
-	Weight int    `json:"weight,omitempty" example:"1"`
+	APIKey  string   `json:"api_key,omitempty" example:"..."`
+	APIKeys []string `json:"api_keys,omitempty"`
+	Weight  int      `json:"weight,omitempty" example:"1"`
 }
 
 // DiscoverAgentRouterRequest is the request body for POST /api/v1/admin/providers/agentrouter.

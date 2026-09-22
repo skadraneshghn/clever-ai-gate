@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -121,6 +122,70 @@ func DiscoverAndRegisterPuterModels(ctx context.Context, db *pgxpool.Pool, vault
 	}
 
 	return len(discoveredModels), discoveredModels, tx.Commit(ctx)
+}
+
+// DiscoverAndRegisterPuterModelsBatch processes multiple Puter.com API tokens,
+// registering each key one by one against the full Puter model catalog.
+//
+// Every key is processed sequentially: a failing key (invalid token, network
+// error, …) is recorded in the results and does NOT abort the batch — the
+// remaining keys still get discovered and bound, exactly like the custom
+// OpenAI-compatible batch flow. Each key is inserted atomically into the
+// credentials table and bound to all discovered Puter model pools.
+func DiscoverAndRegisterPuterModelsBatch(
+	ctx context.Context,
+	db *pgxpool.Pool,
+	vault *Vault,
+	apiKeys []string,
+	weight int,
+) (totalKeys, successCount, failedCount, totalModels int, results []BatchKeyDiscoveryResult, allDiscovered []string, err error) {
+	// Deduplicate and trim keys while preserving order.
+	seenKeys := make(map[string]bool)
+	var cleanKeys []string
+	for _, raw := range apiKeys {
+		k := strings.TrimSpace(raw)
+		if k != "" && !seenKeys[k] {
+			seenKeys[k] = true
+			cleanKeys = append(cleanKeys, k)
+		}
+	}
+
+	if len(cleanKeys) == 0 {
+		return 0, 0, 0, 0, nil, nil, fmt.Errorf("no valid Puter API tokens provided")
+	}
+
+	totalKeys = len(cleanKeys)
+	results = make([]BatchKeyDiscoveryResult, 0, totalKeys)
+	discoveredMap := make(map[string]bool)
+
+	for i, k := range cleanKeys {
+		res := BatchKeyDiscoveryResult{
+			Index:     i + 1,
+			KeyMasked: MaskAPIKey(k),
+		}
+
+		count, models, dErr := DiscoverAndRegisterPuterModels(ctx, db, vault, k, weight)
+		if dErr != nil {
+			res.Success = false
+			res.Error = dErr.Error()
+			failedCount++
+		} else {
+			res.Success = true
+			res.ModelsCount = count
+			res.DiscoveredIDs = models
+			successCount++
+			for _, m := range models {
+				if !discoveredMap[m] {
+					discoveredMap[m] = true
+					allDiscovered = append(allDiscovered, m)
+				}
+			}
+		}
+		results = append(results, res)
+	}
+
+	totalModels = len(allDiscovered)
+	return totalKeys, successCount, failedCount, totalModels, results, allDiscovered, nil
 }
 
 func fetchPuterModels(ctx context.Context, apiKey string) ([]puterModelDetail, error) {
