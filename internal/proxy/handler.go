@@ -611,6 +611,19 @@ var retryRoundsPerPool = 3
 // Package-level var (not const) so tests can pin fast settings.
 var roundTransitionWaitBudget = 6 * time.Second
 
+// cooldownAcquireWaitBudget caps how long a FRESH request (round 1, including
+// the first round on a fallback pool) waits when every credential of the pool
+// is already cooling down from earlier failures. Cooldowns longer than this
+// budget mean the keys were hard-rejected (suspended account, exhausted quota,
+// rate-limit window) — sleeping and probing them again inside this request
+// would only stall the client, so the gateway fails over to the exact-model
+// fallback (or a meaningful exhaustion error) immediately. Brief penalties
+// (≤ budget) are still waited out; retry rounds 2+ are unaffected because
+// re-probing their own transient failures is the point of rounds.
+//
+// Package-level var (not const) so tests can pin fast settings.
+var cooldownAcquireWaitBudget = 600 * time.Millisecond
+
 // isNonRetryableCredentialStatus reports whether an upstream status means the
 // CREDENTIAL itself was rejected — auth failure, quota/billing exhaustion,
 // rate limit, or an invalid payload. Re-trying the same credential inside the
@@ -745,7 +758,7 @@ retryLoop:
 
 		if result == nil {
 			// All tokens are currently on cooldown.
-			// Pick the soonest-available one and sleep briefly.
+			// Pick the soonest-available one and decide whether waiting is worthwhile.
 			result = pctx.pool.AcquireLeastPenalizedToken()
 			if result == nil {
 				h.logger.Error("no credentials in pool at all",
@@ -761,6 +774,26 @@ retryLoop:
 			cooldownUntil := atomic.LoadInt64(&result.Credential.CooldownUntil)
 			if cooldownUntil > now {
 				sleepFor := time.Duration(cooldownUntil - now)
+				// Fast-fail: a fresh request (round 1) against a pool whose
+				// soonest credential needs more than cooldownAcquireWaitBudget
+				// is staring at a hard rejection (suspended account, exhausted
+				// quota, rate-limit window). Sleeping 600ms per key and probing
+				// anyway — the historical behavior — multiplied a 17-key dead
+				// pool into ~15s of doomed requests before a 502. Skip the
+				// wait entirely and fail over to the exact-model fallback or a
+				// meaningful exhaustion error. Retry rounds 2+ intentionally
+				// keep the sleep-and-probe behavior: they re-probe cooldowns
+				// created by this request's own transient failures.
+				if round == 1 && sleepFor > cooldownAcquireWaitBudget {
+					h.logger.Warn("all pool credentials cooling down for longer than the acquire wait budget — skipping cooldown wait and failing over",
+						zap.String("model", pctx.model),
+						zap.String("tenant_id", pctx.tenantID),
+						zap.String("provider", result.Credential.Provider),
+						zap.Duration("soonest_cooldown_remaining", sleepFor),
+						zap.Int("unique_tried", triedCount),
+					)
+					break retryLoop
+				}
 				const maxSleep = 600 * time.Millisecond
 				if sleepFor > maxSleep {
 					sleepFor = maxSleep
@@ -1107,12 +1140,12 @@ retryLoop:
 	// so the gateway proceeds to the exact-model fallback immediately instead
 	// of stalling the client.
 	//
-	// Fast-fail paths above (404, repeated 400, single-key 429, spin guard)
-	// break the loop early; if they fired before every key was tried they skip
-	// this block (triedCount < maxAttempts). If they fired on the very last key
-	// they still land here, but their statuses are all non-retryable, so the
-	// guard below routes them straight to the cross-provider fallback instead
-	// of burning retry rounds.
+	// Fast-fail paths above (404, repeated 400, single-key 429, spin guard,
+	// whole-pool long-cooldown acquire) break the loop early; if they fired
+	// before every key was tried they skip this block (triedCount <
+	// maxAttempts). If they fired on the very last key they still land here,
+	// but their statuses are all non-retryable, so the guard below routes them
+	// straight to the cross-provider fallback instead of burning retry rounds.
 	if triedCount >= maxAttempts && round < retryRoundsPerPool {
 		lastRoundRetryable := false
 		for _, a := range attempts[roundStartIdx:] {
@@ -1252,6 +1285,29 @@ retryLoop:
 		zap.Duration("total_elapsed", time.Since(requestStart)),
 	)
 
+	// Build the diagnostic summary once — telemetry and the client response
+	// must describe the same failure.
+	summary := buildAttemptSummary(summaryModel, attempts, roundsByPool, poolsAttempted)
+	respStatus := http.StatusBadGateway
+	if lastStatus >= 400 && lastStatus < 600 {
+		respStatus = lastStatus
+	}
+	if len(attempts) == 0 {
+		// No credential was ever attempted this request: every pool credential
+		// was already cooling down from earlier failures (long-cooldown
+		// fast-fail) or was penalized by concurrent requests. The model is not
+		// broken, just saturated — report temporary unavailability with the
+		// soonest retry time so clients can back off intelligently.
+		respStatus = http.StatusServiceUnavailable
+		if pctx.pool != nil {
+			if wait := poolSoonestCooldownRemaining(pctx.pool); wait > 0 {
+				summary = fmt.Sprintf(
+					"model %q is temporarily unavailable — all %d pool credential(s) are cooling down after earlier failures (soonest retry in ~%s); no upstream request was sent",
+					summaryModel, pctx.pool.TotalCount, wait.Round(time.Second))
+			}
+		}
+	}
+
 	// Emit exhaustion telemetry (zero-alloc pool pattern)
 	if h.pipeline != nil {
 		promptText := extractPromptText(pctx.body)
@@ -1265,20 +1321,15 @@ retryLoop:
 		entry.Provider = lastProvider
 		entry.PromptTokens = promptTokens
 		entry.LatencyMs = int(time.Since(requestStart).Milliseconds())
-		entry.StatusCode = http.StatusBadGateway
-		entry.ErrorMessage = buildAttemptSummary(summaryModel, attempts, roundsByPool, poolsAttempted)
+		entry.StatusCode = respStatus
+		entry.ErrorMessage = summary
 		entry.CreatedAt = time.Now()
 		entry.Prompt = promptText
 		h.pipeline.Emit(entry)
 	}
 
 	// Never dump raw upstream bytes — always return a canonical OpenAI error envelope.
-	summary := buildAttemptSummary(summaryModel, attempts, roundsByPool, poolsAttempted)
-	finalBody := formatOpenAIError(lastStatus, lastErrBody, summary)
-	respStatus := http.StatusBadGateway
-	if lastStatus >= 400 && lastStatus < 600 {
-		respStatus = lastStatus
-	}
+	finalBody := formatOpenAIError(respStatus, lastErrBody, summary)
 	c.Data(respStatus, "application/json", finalBody)
 }
 
@@ -3191,4 +3242,3 @@ func isEmbeddingModel(model string) bool {
 		strings.Contains(lower, "gte-") ||
 		strings.Contains(lower, "sentence-")
 }
-

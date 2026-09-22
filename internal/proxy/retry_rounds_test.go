@@ -69,6 +69,13 @@ func newRoundTestCred(id int, provider, key, baseURL string) *credentials.Runtim
 // chat completion request, and returns the recorder.
 func serveRetryRoundsChat(t *testing.T, roundTrip func(req *http.Request) (*http.Response, error), pools ...*credentials.BalancedChannelPool) *httptest.ResponseRecorder {
 	t.Helper()
+	return serveRetryRoundsChatModel(t, "nvidia/meta/llama-3.3-70b-instruct", roundTrip, pools...)
+}
+
+// serveRetryRoundsChatModel is serveRetryRoundsChat with a configurable
+// request model (e.g. puter/* patterns for provider-specific scenarios).
+func serveRetryRoundsChatModel(t *testing.T, model string, roundTrip func(req *http.Request) (*http.Response, error), pools ...*credentials.BalancedChannelPool) *httptest.ResponseRecorder {
+	t.Helper()
 
 	logger := zap.NewNop()
 	cfg := &config.Config{CacheMaxSizeMB: 10, CacheNumCounters: 100}
@@ -94,7 +101,7 @@ func serveRetryRoundsChat(t *testing.T, roundTrip func(req *http.Request) (*http
 	router := gin.New()
 	router.POST("/v1/chat/completions", h.Handle)
 
-	payload := `{"model": "nvidia/meta/llama-3.3-70b-instruct", "messages": [{"role": "user", "content": "hi"}]}`
+	payload := `{"model": "` + model + `", "messages": [{"role": "user", "content": "hi"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -295,6 +302,157 @@ func TestRetryRounds_FallbackAlsoFails_ReturnsMeaningfulError(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("meaningful error missing %q:\n%s", want, body)
 		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Long-cooldown fast-fail tests
+//
+// Policy (see executeWithRetry acquisition path): a FRESH request (round 1,
+// including the first round on a fallback pool) that finds every credential of
+// the pool cooling down for longer than cooldownAcquireWaitBudget must NOT
+// sleep 600ms per key probing doomed credentials — it fails over to the
+// exact-model fallback immediately, or returns a meaningful 503 without a
+// single upstream call. Brief penalties (≤ budget) are still waited out, and
+// retry rounds 2+ keep probing their own transient cooldowns.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestCooldownFastFail_AllKeysCooling_Returns503WithoutUpstreamCall reproduces
+// the puter.com pathology from the production logs: every key of the pool was
+// hard-rejected earlier (suspended account / exhausted quota) and carries a
+// long cooldown. The gateway must answer instantly with a 503 that explains
+// the cooldown situation instead of sleeping ~600ms per key.
+func TestCooldownFastFail_AllKeysCooling_Returns503WithoutUpstreamCall(t *testing.T) {
+	setRetryRoundSettings(t, 3, 25*time.Millisecond)
+
+	puterPool := credentials.NewBalancedPool("puter/infron:xiaomi/mimo-v2.6-pro-ultraspeed", "round-robin",
+		[]*credentials.RuntimeCredential{
+			newRoundTestCred(330519, "puter", "puter-token-1", "https://api.puter.com"),
+			newRoundTestCred(330520, "puter", "puter-token-2", "https://api.puter.com"),
+		}, nil)
+
+	// Simulate the production state: both puter keys were suspended minutes
+	// ago and received long quota cooldowns.
+	now := time.Now().UnixNano()
+	atomic.StoreInt64(&puterPool.Credentials[0].CooldownUntil, now+15*time.Second.Nanoseconds())
+	atomic.StoreInt64(&puterPool.Credentials[1].CooldownUntil, now+16*time.Second.Nanoseconds())
+
+	upstreamCalls := 0
+	roundTrip := func(req *http.Request) (*http.Response, error) {
+		upstreamCalls++
+		return roundTestJSONResponse(http.StatusForbidden, `{"error":"Account suspended"}`), nil
+	}
+
+	start := time.Now()
+	w := serveRetryRoundsChatModel(t, "puter/infron:xiaomi/mimo-v2.6-pro-ultraspeed", roundTrip, puterPool)
+	elapsed := time.Since(start)
+
+	if upstreamCalls != 0 {
+		t.Fatalf("no upstream request may be sent when the whole pool is cooling down, got %d call(s)", upstreamCalls)
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected HTTP 503 (temporary unavailability), got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		"temporarily unavailable",
+		"cooling down",
+		"no upstream request was sent",
+		"soonest retry in ~",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected error body to contain %q:\n%s", want, body)
+		}
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("fast-fail must be immediate, took %v", elapsed)
+	}
+}
+
+// TestCooldownFastFail_FallsBackToHealthyExactModelPool verifies that the
+// long-cooldown fast-fail feeds the exact-model cross-provider fallback: a
+// fully rate-limited provider is skipped instantly (zero probes) and the same
+// model is served by another provider.
+func TestCooldownFastFail_FallsBackToHealthyExactModelPool(t *testing.T) {
+	setRetryRoundSettings(t, 3, 25*time.Millisecond)
+
+	nvidiaCred := newRoundTestCred(101, "nvidia", "nv-key", "https://integrate.api.nvidia.com")
+	nvidiaPool := credentials.NewBalancedPool("nvidia/meta/llama-3.3-70b-instruct", "round-robin",
+		[]*credentials.RuntimeCredential{nvidiaCred}, nil)
+	orPool := credentials.NewBalancedPool("openrouter/meta-llama/llama-3.3-70b-instruct", "round-robin",
+		[]*credentials.RuntimeCredential{newRoundTestCred(202, "openrouter", "or-key", "https://openrouter.ai/api")}, nil)
+
+	// Whole primary pool rate-limited for 10s — longer than the acquire budget.
+	now := time.Now().UnixNano()
+	atomic.StoreInt64(&nvidiaCred.CooldownUntil, now+10*time.Second.Nanoseconds())
+
+	nvidiaCalls, openrouterCalls := 0, 0
+	roundTrip := func(req *http.Request) (*http.Response, error) {
+		bodyBytes, _ := io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		switch {
+		case strings.Contains(req.URL.Host, "nvidia.com"):
+			nvidiaCalls++
+			return roundTestJSONResponse(http.StatusTooManyRequests, `{"error":"rate limited"}`), nil
+		case strings.Contains(req.URL.Host, "openrouter.ai"):
+			openrouterCalls++
+			return roundTestJSONResponse(http.StatusOK,
+				`{"id":"or","choices":[{"message":{"role":"assistant","content":"openrouter answered"}}]}`), nil
+		}
+		return roundTestJSONResponse(http.StatusInternalServerError, `{"error":"unexpected host"}`), nil
+	}
+
+	start := time.Now()
+	w := serveRetryRoundsChat(t, roundTrip, nvidiaPool, orPool)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200 from the exact-model fallback, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "openrouter answered") {
+		t.Fatalf("expected the openrouter answer, got: %s", w.Body.String())
+	}
+	if nvidiaCalls != 0 {
+		t.Errorf("cooling-down primary pool must not be probed, got %d nvidia call(s)", nvidiaCalls)
+	}
+	if openrouterCalls != 1 {
+		t.Errorf("expected exactly 1 openrouter attempt, got %d", openrouterCalls)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("failover must be immediate, took %v", elapsed)
+	}
+}
+
+// TestCooldownFastFail_ShortCooldownStillWaitsAndServes verifies that brief
+// contention penalties (≤ cooldownAcquireWaitBudget) are still waited out and
+// served — the fast-fail only applies to long cooldowns.
+func TestCooldownFastFail_ShortCooldownStillWaitsAndServes(t *testing.T) {
+	setRetryRoundSettings(t, 3, 25*time.Millisecond)
+
+	nvidiaCred := newRoundTestCred(101, "nvidia", "nv-key", "https://integrate.api.nvidia.com")
+	nvidiaPool := credentials.NewBalancedPool("nvidia/meta/llama-3.3-70b-instruct", "round-robin",
+		[]*credentials.RuntimeCredential{nvidiaCred}, nil)
+
+	// Brief penalty from a concurrent request — well within the budget.
+	now := time.Now().UnixNano()
+	atomic.StoreInt64(&nvidiaCred.CooldownUntil, now+250*time.Millisecond.Nanoseconds())
+
+	calls := 0
+	roundTrip := func(req *http.Request) (*http.Response, error) {
+		calls++
+		return roundTestJSONResponse(http.StatusOK,
+			`{"id":"ok","choices":[{"message":{"role":"assistant","content":"served after brief cooldown"}}]}`), nil
+	}
+
+	w := serveRetryRoundsChat(t, roundTrip, nvidiaPool)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200 after waiting out the brief cooldown, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "served after brief cooldown") {
+		t.Fatalf("expected the successful answer, got: %s", w.Body.String())
+	}
+	if calls != 1 {
+		t.Errorf("expected exactly 1 upstream attempt, got %d", calls)
 	}
 }
 
