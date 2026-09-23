@@ -588,9 +588,10 @@ func (h *Handler) Handle(c *gin.Context) {
 // the retry loop. A slice of these is built during pool exhaustion and used
 // to construct a detailed diagnostic summary in the final OpenAI error envelope.
 type attemptRecord struct {
-	provider   string
-	statusCode int
-	credID     int
+	provider     string
+	statusCode   int
+	credID       int
+	transient400 bool // 400 was an upstream-side failure, not a payload schema error
 }
 
 // retryRoundsPerPool is the number of complete passes over a pool's
@@ -684,7 +685,8 @@ func (h *Handler) executeWithRetry(c *gin.Context, pctx *proxyContext, requestSt
 	var lastStatus int
 	var lastProvider string
 	var attempts []attemptRecord
-	triedIndices := make(map[int]bool) // deduplicate — never retry the same index twice per round
+	triedIndices := make(map[int]bool)              // deduplicate — never retry the same index twice per round
+	strippedSamplingParams := make(map[string]bool) // self-heal guard — strip each rejected sampling param at most once per request
 	triedCount := 0
 	triedPools := make(map[string]bool)
 	if pctx.pool != nil {
@@ -932,9 +934,10 @@ retryLoop:
 			recStatus = http.StatusInternalServerError
 		}
 		attempts = append(attempts, attemptRecord{
-			provider:   result.Credential.Provider,
-			statusCode: recStatus,
-			credID:     result.Credential.ID,
+			provider:     result.Credential.Provider,
+			statusCode:   recStatus,
+			credID:       result.Credential.ID,
+			transient400: recStatus == http.StatusBadRequest && isTransientUpstream400(errBody),
 		})
 		lastErrBody = errBody
 		lastStatus = recStatus
@@ -1072,13 +1075,41 @@ retryLoop:
 		// Allows up to 2 attempts for a provider before concluding the payload schema
 		// is invalid, protecting remaining pool keys from pointless exhaustion.
 		if recStatus == http.StatusBadRequest {
+			// Self-heal for "unsupported sampling parameter" rejections
+			// (see sampling_params.go): the credential is healthy — the model
+			// generation just refuses the parameter. Strip it from the body
+			// and retry the same credential instead of burning the 400
+			// fast-fail budget. Each param is stripped at most once per
+			// request, so a pathological upstream cannot loop us forever.
+			if param, ok := parseUnsupportedSamplingParam(errBody); ok && !strippedSamplingParams[param] {
+				if stripped, changed := stripJSONTopLevelKeys(pctx.body, []string{param}); changed {
+					strippedSamplingParams[param] = true
+					pctx.body = stripped
+					// The failure was our payload, not the key: refund the
+					// attempt and allow the same credential to be re-acquired.
+					delete(triedIndices, result.Index)
+					triedCount--
+					h.logger.Warn("upstream rejected unsupported sampling parameter — stripped it and retrying same credential",
+						zap.String("request_id", fmt.Sprintf("%v", requestID)),
+						zap.String("model", pctx.model),
+						zap.String("provider", result.Credential.Provider),
+						zap.Int("credential_id", result.Credential.ID),
+						zap.String("param", param),
+					)
+					continue retryLoop
+				}
+			}
+
 			provider400Count := 0
 			for _, a := range attempts {
-				if a.provider == result.Credential.Provider && a.statusCode == http.StatusBadRequest {
+				// Transient upstream-side 400s ("The upstream provider
+				// returned an error while processing this request.") are not
+				// payload schema errors — exclude them from the abort count.
+				if a.provider == result.Credential.Provider && a.statusCode == http.StatusBadRequest && !a.transient400 {
 					provider400Count++
 				}
 			}
-			if provider400Count >= 2 {
+			if provider400Count >= 2 && !isTransientUpstream400(errBody) {
 				h.logger.Error("payload schema error — aborting rotation to protect remaining pool keys",
 					zap.String("model", pctx.model),
 					zap.String("provider", result.Credential.Provider),
@@ -1430,6 +1461,17 @@ func (h *Handler) forwardRequest(c *gin.Context, pctx *proxyContext) (statusCode
 			newToken := []byte(`"` + modelName + `"`)
 			bodyBytes = bytes.Replace(bodyBytes, oldToken, newToken, 1)
 		}
+	}
+
+	// --- Claude ≥ Opus 4.5 sampling-param sanitization ---
+	// This Claude generation hard-rejects OpenAI sampling parameters with a
+	// 400 "Validation error at temperature: `temperature` is not supported on
+	// this model. Remove it from your request." (Cloudflare Workers AI,
+	// code 7003). Strip temperature/top_p/top_k up-front for these models on
+	// every provider — aggregators already drop them, strict Anthropic-schema
+	// endpoints reject them. See sampling_params.go for the full rationale.
+	if modelDisallowsSamplingParams(modelName) {
+		bodyBytes = stripSamplingParams(bodyBytes)
 	}
 
 	// --- 1min.ai Request Body Translation ---

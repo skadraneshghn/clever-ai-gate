@@ -76,6 +76,14 @@ func serveRetryRoundsChat(t *testing.T, roundTrip func(req *http.Request) (*http
 // request model (e.g. puter/* patterns for provider-specific scenarios).
 func serveRetryRoundsChatModel(t *testing.T, model string, roundTrip func(req *http.Request) (*http.Response, error), pools ...*credentials.BalancedChannelPool) *httptest.ResponseRecorder {
 	t.Helper()
+	payload := `{"model": "` + model + `", "messages": [{"role": "user", "content": "hi"}]}`
+	return serveRetryRoundsChatPayload(t, model, payload, roundTrip, pools...)
+}
+
+// serveRetryRoundsChatPayload is serveRetryRoundsChatModel with a fully
+// custom JSON payload (e.g. requests carrying temperature/top_p).
+func serveRetryRoundsChatPayload(t *testing.T, model, payload string, roundTrip func(req *http.Request) (*http.Response, error), pools ...*credentials.BalancedChannelPool) *httptest.ResponseRecorder {
+	t.Helper()
 
 	logger := zap.NewNop()
 	cfg := &config.Config{CacheMaxSizeMB: 10, CacheNumCounters: 100}
@@ -101,7 +109,6 @@ func serveRetryRoundsChatModel(t *testing.T, model string, roundTrip func(req *h
 	router := gin.New()
 	router.POST("/v1/chat/completions", h.Handle)
 
-	payload := `{"model": "` + model + `", "messages": [{"role": "user", "content": "hi"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -540,5 +547,164 @@ func TestBuildAttemptSummary_RoundsAndPools(t *testing.T) {
 	// Empty attempts must still produce a meaningful message.
 	if got := buildAttemptSummary("m", nil, nil, nil); !strings.Contains(got, "exhausted with no successful response") {
 		t.Errorf("unexpected empty-attempts summary: %s", got)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Claude "no sampling parameters" tests (see sampling_params.go)
+//
+// Production evidence (gateway-2026-09-22.log): the Claude ≥ Opus 4.5
+// generation hard-rejects temperature with Cloudflare code 7003 —
+// "`temperature` is not supported on this model. Remove it from your
+// request." — and the inference provider returns opaque transient 400s
+// ("The upstream provider returned an error while processing this
+// request."). Both used to abort rotation as "payload schema error" even
+// though every pool credential was healthy.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// temperatureUnsupportedBody is the exact upstream 400 body observed in
+// production for anthropic/claude-opus-5 (Cloudflare Workers AI, code 7003).
+const temperatureUnsupportedBody = "{\"errors\":[{\"message\":\"Model execution failed (User Input Error): Validation error at temperature: `temperature` is not supported on this model. Remove it from your request. See https://docs.anthropic.com/en/docs/about-claude/models/migration-guide for details.\",\"code\":7003}],\"success\":false,\"result\":{},\"messages\":[]}"
+
+// TestRetryRounds_ClaudeNoSamplingGeneration_ProactiveStrip verifies the
+// claude-opus-5 generation never sees temperature/top_p/top_k: the gateway
+// strips them before the first upstream call, so a strict Anthropic-schema
+// endpoint accepts the request on the very first attempt.
+func TestRetryRounds_ClaudeNoSamplingGeneration_ProactiveStrip(t *testing.T) {
+	setRetryRoundSettings(t, 3, 25*time.Millisecond)
+
+	infPool := credentials.NewBalancedPool("inference/claude-opus-5", "round-robin",
+		[]*credentials.RuntimeCredential{newRoundTestCred(101, "inference", "inf-key", "https://api.inference.net")}, nil)
+	orPool := credentials.NewBalancedPool("openrouter/claude-opus-5", "round-robin",
+		[]*credentials.RuntimeCredential{newRoundTestCred(202, "openrouter", "or-key", "https://openrouter.ai/api")}, nil)
+
+	upstreamCalls := 0
+	roundTrip := func(req *http.Request) (*http.Response, error) {
+		bodyBytes, _ := io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		switch {
+		case strings.Contains(req.URL.Host, "inference.net"):
+			upstreamCalls++
+			body := string(bodyBytes)
+			for _, param := range []string{"temperature", "top_p", "top_k"} {
+				if strings.Contains(body, `"`+param+`"`) {
+					return roundTestJSONResponse(http.StatusBadRequest, temperatureUnsupportedBody), nil
+				}
+			}
+			return roundTestJSONResponse(http.StatusOK,
+				`{"id":"inf","choices":[{"message":{"role":"assistant","content":"inference answered"}}]}`), nil
+		case strings.Contains(req.URL.Host, "openrouter.ai"):
+			return roundTestJSONResponse(http.StatusInternalServerError, `{"error":"unexpected fallback"}`), nil
+		}
+		return roundTestJSONResponse(http.StatusInternalServerError, `{"error":"unexpected host"}`), nil
+	}
+
+	payload := `{"model": "inference/claude-opus-5", "messages": [{"role": "user", "content": "hi"}], "temperature": 0.7, "top_p": 0.9}`
+	w := serveRetryRoundsChatPayload(t, "inference/claude-opus-5", payload, roundTrip, infPool, orPool)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200 on the first attempt (sampling params stripped before send), got %d: %s", w.Code, w.Body.String())
+	}
+	if upstreamCalls != 1 {
+		t.Errorf("expected exactly 1 upstream call, got %d", upstreamCalls)
+	}
+	if !strings.Contains(w.Body.String(), "inference answered") {
+		t.Errorf("expected the inference answer, got: %s", w.Body.String())
+	}
+}
+
+// TestRetryRounds_UnsupportedSamplingParam_SelfHeals verifies the reactive
+// path: a model OUTSIDE the proactive gate (a future generation the gateway
+// does not know yet) rejects temperature with the explicit "not supported"
+// error; the gateway strips the parameter and retries the SAME healthy
+// credential — no rotation, no 400 fast-fail abort, request completes.
+func TestRetryRounds_UnsupportedSamplingParam_SelfHeals(t *testing.T) {
+	setRetryRoundSettings(t, 3, 25*time.Millisecond)
+
+	futurePool := credentials.NewBalancedPool("newvendor/future-model-x", "round-robin",
+		[]*credentials.RuntimeCredential{newRoundTestCred(101, "newvendor", "nv-key", "https://api.newvendor.org")}, nil)
+
+	var bodies []string
+	roundTrip := func(req *http.Request) (*http.Response, error) {
+		bodyBytes, _ := io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		bodies = append(bodies, string(bodyBytes))
+		if strings.Contains(string(bodyBytes), `"temperature"`) {
+			return roundTestJSONResponse(http.StatusBadRequest, temperatureUnsupportedBody), nil
+		}
+		return roundTestJSONResponse(http.StatusOK,
+			`{"id":"ok","choices":[{"message":{"role":"assistant","content":"self-healed"}}]}`), nil
+	}
+
+	payload := `{"model": "newvendor/future-model-x", "messages": [{"role": "user", "content": "hi"}], "temperature": 0.7}`
+	w := serveRetryRoundsChatPayload(t, "newvendor/future-model-x", payload, roundTrip, futurePool)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200 after self-healing the payload, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("expected exactly 2 upstream calls (reject → strip → retry same key), got %d", len(bodies))
+	}
+	if !strings.Contains(bodies[0], `"temperature"`) {
+		t.Errorf("first upstream call should carry temperature, got: %s", bodies[0])
+	}
+	if strings.Contains(bodies[1], `"temperature"`) {
+		t.Errorf("second upstream call must not carry temperature, got: %s", bodies[1])
+	}
+	if !strings.Contains(w.Body.String(), "self-healed") {
+		t.Errorf("expected the retried answer, got: %s", w.Body.String())
+	}
+}
+
+// TestRetryRounds_TransientUpstream400_RotatesAndFallsBack verifies that an
+// opaque upstream-side 400 ("The upstream provider returned an error while
+// processing this request." — observed from the inference provider on
+// claude-opus-5) is NOT counted as a payload schema error: every pool key is
+// tried and the exact-model fallback still runs. Before the fix, the second
+// such 400 aborted rotation mid-pool — the third key was never tried.
+func TestRetryRounds_TransientUpstream400_RotatesAndFallsBack(t *testing.T) {
+	setRetryRoundSettings(t, 3, 25*time.Millisecond)
+
+	infPool := credentials.NewBalancedPool("inference/claude-opus-5", "round-robin",
+		[]*credentials.RuntimeCredential{
+			newRoundTestCred(101, "inference", "inf-key-1", "https://api.inference.net"),
+			newRoundTestCred(102, "inference", "inf-key-2", "https://api.inference.net"),
+			newRoundTestCred(103, "inference", "inf-key-3", "https://api.inference.net"),
+		}, nil)
+	orPool := credentials.NewBalancedPool("openrouter/claude-opus-5", "round-robin",
+		[]*credentials.RuntimeCredential{newRoundTestCred(202, "openrouter", "or-key", "https://openrouter.ai/api")}, nil)
+
+	inferenceCalls := 0
+	openrouterCalls := 0
+	roundTrip := func(req *http.Request) (*http.Response, error) {
+		bodyBytes, _ := io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		switch {
+		case strings.Contains(req.URL.Host, "inference.net"):
+			inferenceCalls++
+			return roundTestJSONResponse(http.StatusBadRequest,
+				`{"error":{"message":"The upstream provider returned an error while processing this request.","type":"upstream_error"}}`), nil
+		case strings.Contains(req.URL.Host, "openrouter.ai"):
+			openrouterCalls++
+			return roundTestJSONResponse(http.StatusOK,
+				`{"id":"or","choices":[{"message":{"role":"assistant","content":"openrouter answered"}}]}`), nil
+		}
+		return roundTestJSONResponse(http.StatusInternalServerError, `{"error":"unexpected host"}`), nil
+	}
+
+	payload := `{"model": "inference/claude-opus-5", "messages": [{"role": "user", "content": "hi"}]}`
+	w := serveRetryRoundsChatPayload(t, "inference/claude-opus-5", payload, roundTrip, infPool, orPool)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200 from the fallback provider, got %d: %s", w.Code, w.Body.String())
+	}
+	if inferenceCalls != 3 {
+		t.Errorf("expected all 3 inference keys tried (no payload-schema abort after two transient 400s), got %d calls", inferenceCalls)
+	}
+	if openrouterCalls != 1 {
+		t.Errorf("expected 1 openrouter attempt, got %d", openrouterCalls)
+	}
+	if !strings.Contains(w.Body.String(), "openrouter answered") {
+		t.Errorf("expected the openrouter answer, got: %s", w.Body.String())
 	}
 }
