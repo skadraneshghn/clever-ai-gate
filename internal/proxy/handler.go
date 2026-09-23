@@ -1856,6 +1856,23 @@ handleSuccess:
 		if isSniffableContentType(ct) {
 			if pctx.isStream && resp.StatusCode == http.StatusOK {
 				res := sniffStreamForError(resp.Body)
+				if res.stalled {
+					// Upstream accepted the request but produced no bytes
+					// within the idle window — a stalled stream, not an error
+					// body. Map to 504 (retryable, short cooldown) so the
+					// rotation loop tries the next credential instead of
+					// hanging until the client's intermediary kills the
+					// connection (~100-110s idle timeouts in the wild).
+					h.logger.Warn("upstream stalled before first stream byte — rotating to next credential",
+						zap.String("model", pctx.model),
+						zap.String("provider", cred.Provider),
+						zap.Int("credential_id", cred.ID),
+						zap.String("upstream_url", upstreamURL),
+						zap.Duration("idle_timeout", streamFirstByteIdleTimeout),
+					)
+					return http.StatusGatewayTimeout, upstreamURL,
+						[]byte(`{"error":{"message":"upstream stalled before sending the first byte of the stream","type":"server_error","code":"upstream_stalled"}}`), nil
+				}
 				if res.verdict != nil {
 					h.logger.Warn("upstream 200 OK body is actually an error — converting to retryable failure",
 						zap.String("model", pctx.model),

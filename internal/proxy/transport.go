@@ -87,6 +87,14 @@ func BuildOptimizedTransport(cfg *config.Config, logger *zap.Logger) (*http.Tran
 		IdleConnTimeout:       cfg.IdleConnTimeout,
 		TLSHandshakeTimeout:   5 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		// ResponseHeaderTimeout bounds how long the gateway waits for upstream
+		// response headers after sending the request. Chat generation happens
+		// in the body phase (bounded by the stream stall watchdog), so a
+		// provider that neither answers nor errors within this window is a
+		// transport failure and the rotation loop moves to the next
+		// credential — without this, a hung upstream holds the request until
+		// the client's intermediary (~100-110s idle timeout) kills it.
+		ResponseHeaderTimeout: 120 * time.Second,
 		ForceAttemptHTTP2:     true,
 		// Disable compression — AI providers send JSON which we forward as-is.
 		// Avoiding decompression/recompression saves CPU cycles on the hot-path.

@@ -9,6 +9,8 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/buger/jsonparser"
 	"github.com/gin-gonic/gin"
@@ -38,6 +40,119 @@ func NewStreamProxy(client *http.Client, logger *zap.Logger) *StreamProxy {
 	}
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Stream liveness knobs
+//
+// Production incident (2026-09-23, 52xueai/claude-opus-5): the model streamed
+// its opening answer, then went silent for ~109s while composing a large code
+// block. The gateway had nothing to relay, so every intermediary between the
+// client and the gateway (nginx / Cloudflare / hosting load balancer, idle
+// timeouts of ~60-110s) tore the client connection down — surfacing to the
+// end user as "unexpected EOF (incomplete chunked read)".
+//
+// Two mechanisms below fix that class of failure:
+//   1. an SSE heartbeat (`: keepalive` comment) emitted while the upstream is
+//      silent, which resets every intermediary's idle timer;
+//   2. a stall watchdog that gives up on a totally-silent upstream and
+//      terminates the client stream cleanly with a visible error event.
+//
+// Package-level vars (not consts) so tests can shrink them without waiting
+// wall-clock minutes.
+var (
+	// sseKeepaliveInterval is how often the heartbeat fires while the
+	// upstream is silent.
+	sseKeepaliveInterval = 15 * time.Second
+
+	// streamStallTimeout is the maximum upstream silence tolerated mid-stream
+	// before the credential is abandoned. Generous by design: even long
+	// Claude-style thinking gaps stream keepalive deltas and never approach
+	// this window.
+	streamStallTimeout = 5 * time.Minute
+)
+
+// sseWriter serializes writes to the client response between the main relay
+// loop and the keepalive heartbeat goroutine. SSE comments (`: …`) are legal
+// between events per the SSE spec, so interleaving heartbeats with data
+// events is protocol-safe. The mutex is released via defer inside every
+// method, so a panic mid-write can never leave it locked for the recovery
+// path.
+type sseWriter struct {
+	w  gin.ResponseWriter
+	mu sync.Mutex
+}
+
+// writeDataEvent emits one `data: <payload>\n\n` SSE event and flushes it.
+func (s *sseWriter) writeDataEvent(payload []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.w.Write([]byte("data: ")); err != nil {
+		return err
+	}
+	if _, err := s.w.Write(payload); err != nil {
+		return err
+	}
+	if _, err := s.w.Write([]byte("\n\n")); err != nil {
+		return err
+	}
+	s.w.Flush()
+	return nil
+}
+
+// writeComment emits one SSE comment line (`: <comment>\n\n`) and flushes it.
+// Comments are ignored by every SSE parser — the standard heartbeat channel.
+func (s *sseWriter) writeComment(comment string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.w.Write([]byte(": " + comment + "\n\n")); err != nil {
+		return err
+	}
+	s.w.Flush()
+	return nil
+}
+
+// signalProgressChan notifies the heartbeat goroutine that upstream data was
+// just relayed, resetting the stall watchdog. Non-blocking: a dropped signal
+// only delays the watchdog by one heartbeat tick.
+func signalProgressChan(progress chan struct{}) {
+	select {
+	case progress <- struct{}{}:
+	default:
+	}
+}
+
+// emitStreamInterrupted terminates an SSE stream with a visible, OpenAI-style
+// error event followed by [DONE] so clients render a clear "stream
+// interrupted" error instead of a silently truncated (or hanging) response.
+// The client already holds partial content at this point — a retry is
+// impossible, so the honest, graceful end is an explicit error signal.
+func emitStreamInterrupted(sw *sseWriter, cause string) {
+	if sw == nil {
+		return
+	}
+	payload := fmt.Sprintf(
+		`{"error":{"message":"Upstream connection interrupted before the response completed (%s). Partial content may be missing — retry the request.","type":"server_error","code":"stream_interrupted"}}`,
+		sanitizeSSEJSONString(cause, 200),
+	)
+	_ = sw.writeDataEvent([]byte(payload))
+	_ = sw.writeDataEvent([]byte("[DONE]"))
+}
+
+// sanitizeSSEJSONString makes an arbitrary error string safe to embed inside a
+// JSON string literal (strips quotes, backslashes and control characters).
+func sanitizeSSEJSONString(s string, maxLen int) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r == '"' || r == '\\' || r < 0x20 {
+			continue
+		}
+		b.WriteRune(r)
+		if b.Len() >= maxLen {
+			break
+		}
+	}
+	return b.String()
+}
+
 // ProxyStream pipes SSE chunks from upstream to client with format translation,
 // and returns the fully accumulated response text along with estimated completion tokens.
 func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, provider string, requestedModel string) (responseText string, completionTokens int) {
@@ -46,6 +161,9 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 
 	var responseBuilder strings.Builder
 	var tokenEstimate int
+	streamStart := time.Now()
+
+	var sw *sseWriter // created once the flusher is confirmed; nil-safe everywhere
 
 	defer func() {
 		// Always return the scanner buffer to the pool
@@ -62,9 +180,8 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 				zap.ByteString("stack", debug.Stack()),
 			)
 			// Attempt to signal stream termination to client if connection is still alive
-			if flusher, ok := c.Writer.(http.Flusher); ok {
-				c.Writer.Write([]byte("data: [DONE]\n\n"))
-				flusher.Flush()
+			if sw != nil {
+				_ = sw.writeDataEvent([]byte("[DONE]"))
 			}
 		}
 	}()
@@ -85,17 +202,65 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 	scanner := bufio.NewScanner(upstream.Body)
 	scanner.Buffer(scanBuf, 1024*1024) // Max 1MB line (for base64 images)
 
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
+	if _, ok := c.Writer.(http.Flusher); !ok {
 		sp.logger.Error("response writer does not support flushing")
 		return "", 0
 	}
+	sw = &sseWriter{w: c.Writer}
+
+	// Step 3.5: keepalive heartbeat + stall watchdog.
+	//
+	// Long generations regularly go silent for minutes while the model
+	// composes a large code block. Intermediaries between the client and the
+	// gateway (nginx, Cloudflare, hosting load balancers) kill "idle"
+	// connections after ~60-110s. The heartbeat goroutine below:
+	//
+	//   1. emits `: keepalive` SSE comments while the upstream is silent,
+	//      keeping every intermediary's idle timer reset;
+	//   2. aborts the upstream read once the client connection is gone
+	//      (heartbeat write fails) so the relay loop exits promptly;
+	//   3. aborts the upstream read after streamStallTimeout of total
+	//      silence — a truly dead upstream — so the client receives a clean
+	//      error event + [DONE] instead of hanging forever.
+	kaDone := make(chan struct{})
+	progress := make(chan struct{}, 1)
+	var clientGone int32   // atomic: heartbeat write failed → client disconnected
+	var stallAborted int32 // atomic: watchdog closed the upstream body
+
+	go func() {
+		ticker := time.NewTicker(sseKeepaliveInterval)
+		defer ticker.Stop()
+		lastData := time.Now()
+		for {
+			select {
+			case <-kaDone:
+				return
+			case <-progress:
+				lastData = time.Now()
+			case <-ticker.C:
+				if err := sw.writeComment("keepalive"); err != nil {
+					// Client connection is gone. Unblock the relay loop by
+					// closing the upstream body — its next Read errors out.
+					atomic.StoreInt32(&clientGone, 1)
+					upstream.Body.Close()
+					return
+				}
+				if time.Since(lastData) >= streamStallTimeout {
+					atomic.StoreInt32(&stallAborted, 1)
+					upstream.Body.Close()
+					return
+				}
+			}
+		}
+	}()
+	defer close(kaDone)
 
 	// Step 4: Read and transmux each SSE line
 	var sseEventType string
 	var sawToolCalls bool    // tracks if any translated chunk contained tool_calls
 	var sawFinishReason bool // tracks if a non-null finish_reason was already sent
 	for scanner.Scan() {
+		signalProgressChan(progress)
 		line := scanner.Bytes()
 
 		// Skip empty lines (SSE delimiter)
@@ -109,8 +274,7 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 
 			// Check for stream termination
 			if bytes.Equal(data, []byte("[DONE]")) {
-				c.Writer.Write([]byte("data: [DONE]\n\n"))
-				flusher.Flush()
+				_ = sw.writeDataEvent([]byte("[DONE]"))
 				responseText = responseBuilder.String()
 				completionTokens = tokenEstimate
 				return
@@ -177,7 +341,7 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 					tokenEstimate++
 				}
 
-				if _, writeErr := c.Writer.Write([]byte("data: ")); writeErr != nil {
+				if writeErr := sw.writeDataEvent(translated); writeErr != nil {
 					sp.logger.Debug("client disconnected during stream",
 						zap.String("provider", provider),
 						zap.Error(writeErr),
@@ -186,9 +350,6 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 					completionTokens = tokenEstimate
 					return
 				}
-				c.Writer.Write(translated)
-				c.Writer.Write([]byte("\n\n"))
-				flusher.Flush()
 			}
 			continue
 		}
@@ -205,7 +366,7 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 
 		// Handle provider-specific non-SSE streaming (e.g., Gemini JSON array)
 		if provider == "gemini" && len(line) > 0 && (line[0] == '[' || line[0] == ',' || line[0] == '{') {
-			text, tok := sp.handleGeminiStream(c, flusher, tmx, line, scanner)
+			text, tok := sp.handleGeminiStream(sw, tmx, line, scanner, progress)
 			responseBuilder.WriteString(text)
 			tokenEstimate += tok
 			responseText = responseBuilder.String()
@@ -215,7 +376,7 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 
 		// Handle Ollama native NDJSON streaming (/api/chat and /api/generate).
 		if provider == "ollama" && transmux.IsOllamaNativeChunk(line) {
-			content := sp.processOllamaChunk(c, flusher, tmx, line)
+			content := sp.processOllamaChunk(sw, tmx, line, progress)
 			if content != "" {
 				responseBuilder.WriteString(content)
 				tokenEstimate++
@@ -229,8 +390,47 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		sp.logger.Debug("stream scanner error", zap.Error(err))
+	// ── Upstream stream failure: terminate cleanly and visibly ──────────────
+	// scanner.Err() != nil means the upstream connection broke mid-stream
+	// (unexpected EOF, connection reset, watchdog abort, …). The client
+	// already holds partial content, so a retry is impossible — but the old
+	// behavior of masking the truncation as a successful [DONE] left clients
+	// with silently truncated answers and left nothing in production logs.
+	if scanErr := scanner.Err(); scanErr != nil {
+		elapsed := time.Since(streamStart)
+		switch {
+		case atomic.LoadInt32(&clientGone) == 1:
+			// Client (or an intermediary in front of it) already tore the
+			// connection down — nothing we write can be delivered.
+			sp.logger.Warn("client disconnected during upstream stream — aborting relay",
+				zap.String("provider", provider),
+				zap.String("model", requestedModel),
+				zap.Duration("elapsed", elapsed),
+				zap.Int("estimated_tokens", tokenEstimate),
+				zap.Error(scanErr),
+			)
+		case atomic.LoadInt32(&stallAborted) == 1:
+			sp.logger.Warn("upstream stream stalled — terminating client stream with error event",
+				zap.String("provider", provider),
+				zap.String("model", requestedModel),
+				zap.Duration("silent_for", streamStallTimeout),
+				zap.Duration("elapsed", elapsed),
+				zap.Int("estimated_tokens", tokenEstimate),
+			)
+			emitStreamInterrupted(sw, "upstream produced no data for "+streamStallTimeout.String())
+		default:
+			sp.logger.Warn("upstream stream interrupted mid-response — terminating client stream with error event",
+				zap.String("provider", provider),
+				zap.String("model", requestedModel),
+				zap.Duration("elapsed", elapsed),
+				zap.Int("estimated_tokens", tokenEstimate),
+				zap.Error(scanErr),
+			)
+			emitStreamInterrupted(sw, scanErr.Error())
+		}
+		responseText = responseBuilder.String()
+		completionTokens = tokenEstimate
+		return
 	}
 
 	// Gap 5 Fix: For 1min.ai, emit a synthetic stop chunk if the upstream
@@ -242,10 +442,7 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 		tmx.SetEventType("done")
 		stopChunk, _ := tmx.TranslateChunk([]byte(`{}`))
 		if len(stopChunk) > 0 {
-			c.Writer.Write([]byte("data: "))
-			c.Writer.Write(stopChunk)
-			c.Writer.Write([]byte("\n\n"))
-			flusher.Flush()
+			_ = sw.writeDataEvent(stopChunk)
 		}
 	}
 
@@ -264,15 +461,11 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 			zap.String("reason", reason),
 			zap.Bool("saw_tool_calls", sawToolCalls),
 		)
-		c.Writer.Write([]byte("data: "))
-		c.Writer.Write([]byte(finishChunk))
-		c.Writer.Write([]byte("\n\n"))
-		flusher.Flush()
+		_ = sw.writeDataEvent([]byte(finishChunk))
 	}
 
 	// Ensure [DONE] is sent even if upstream didn't send it
-	c.Writer.Write([]byte("data: [DONE]\n\n"))
-	flusher.Flush()
+	_ = sw.writeDataEvent([]byte("[DONE]"))
 
 	responseText = responseBuilder.String()
 	completionTokens = tokenEstimate
@@ -280,37 +473,37 @@ func (sp *StreamProxy) ProxyStream(c *gin.Context, upstream *http.Response, prov
 }
 
 // handleGeminiStream processes Gemini's non-SSE JSON streaming format.
-func (sp *StreamProxy) handleGeminiStream(c *gin.Context, flusher http.Flusher, tmx transmux.Transmuxer, firstLine []byte, scanner *bufio.Scanner) (string, int) {
+func (sp *StreamProxy) handleGeminiStream(sw *sseWriter, tmx transmux.Transmuxer, firstLine []byte, scanner *bufio.Scanner, progress chan struct{}) (string, int) {
 	var sb strings.Builder
 	var tokens int
 
 	// Process the first line
-	if val := sp.processGeminiChunk(c, flusher, tmx, firstLine); val != "" {
+	if val := sp.processGeminiChunk(sw, tmx, firstLine, progress); val != "" {
 		sb.WriteString(val)
 		tokens++
 	}
 
 	// Continue reading
 	for scanner.Scan() {
+		signalProgressChan(progress)
 		line := scanner.Bytes()
 		if len(line) == 0 || bytes.Equal(line, []byte("]")) {
 			continue
 		}
-		if val := sp.processGeminiChunk(c, flusher, tmx, line); val != "" {
+		if val := sp.processGeminiChunk(sw, tmx, line, progress); val != "" {
 			sb.WriteString(val)
 			tokens++
 		}
 	}
 
-	c.Writer.Write([]byte("data: [DONE]\n\n"))
-	flusher.Flush()
+	_ = sw.writeDataEvent([]byte("[DONE]"))
 
 	return sb.String(), tokens
 }
 
 // processOllamaChunk translates a single Ollama native NDJSON line into an
 // OpenAI-compatible SSE chunk and flushes it to the client.
-func (sp *StreamProxy) processOllamaChunk(c *gin.Context, flusher http.Flusher, tmx transmux.Transmuxer, chunk []byte) string {
+func (sp *StreamProxy) processOllamaChunk(sw *sseWriter, tmx transmux.Transmuxer, chunk []byte, progress chan struct{}) string {
 	translated, err := tmx.TranslateChunk(chunk)
 	if err != nil {
 		sp.logger.Debug("ollama chunk transmux error", zap.Error(err))
@@ -318,10 +511,10 @@ func (sp *StreamProxy) processOllamaChunk(c *gin.Context, flusher http.Flusher, 
 	}
 
 	if len(translated) > 0 {
-		c.Writer.Write([]byte("data: "))
-		c.Writer.Write(translated)
-		c.Writer.Write([]byte("\n\n"))
-		flusher.Flush()
+		signalProgressChan(progress)
+		if writeErr := sw.writeDataEvent(translated); writeErr != nil {
+			return ""
+		}
 
 		if content, err := jsonparser.GetString(translated, "choices", "[0]", "delta", "content"); err == nil {
 			return content
@@ -333,7 +526,7 @@ func (sp *StreamProxy) processOllamaChunk(c *gin.Context, flusher http.Flusher, 
 }
 
 // processGeminiChunk translates a single Gemini JSON chunk into OpenAI SSE format.
-func (sp *StreamProxy) processGeminiChunk(c *gin.Context, flusher http.Flusher, tmx transmux.Transmuxer, chunk []byte) string {
+func (sp *StreamProxy) processGeminiChunk(sw *sseWriter, tmx transmux.Transmuxer, chunk []byte, progress chan struct{}) string {
 	chunk = bytes.TrimLeft(chunk, "[,")
 	chunk = bytes.TrimRight(chunk, "]")
 	chunk = bytes.TrimSpace(chunk)
@@ -348,10 +541,10 @@ func (sp *StreamProxy) processGeminiChunk(c *gin.Context, flusher http.Flusher, 
 	}
 
 	if len(translated) > 0 {
-		c.Writer.Write([]byte("data: "))
-		c.Writer.Write(translated)
-		c.Writer.Write([]byte("\n\n"))
-		flusher.Flush()
+		signalProgressChan(progress)
+		if writeErr := sw.writeDataEvent(translated); writeErr != nil {
+			return ""
+		}
 
 		if content, err := jsonparser.GetString(translated, "choices", "[0]", "delta", "content"); err == nil {
 			return content

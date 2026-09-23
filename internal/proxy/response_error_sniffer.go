@@ -78,6 +78,15 @@ const (
 	wholeBodyErrorMaxChars = 600
 )
 
+// streamFirstByteIdleTimeout bounds how long a single blocking Read inside
+// sniffStreamForError may wait for upstream bytes. Real providers answer with
+// the first SSE event within seconds; a stream that produces nothing within
+// this window is declared stalled and the request rotates to another
+// credential (observed in production: 52xueai accepted the request, then sat
+// silent for 109s until the client's intermediary killed the connection).
+// Package-level var (not const) so tests can shrink it.
+var streamFirstByteIdleTimeout = 90 * time.Second
+
 // successBodyError is the verdict returned when a 2xx body is classified as
 // an error carrier.
 type successBodyError struct {
@@ -561,6 +570,11 @@ func extractEventContent(evt []byte) (content, errMsg string) {
 type streamSniffResult struct {
 	verdict *successBodyError
 	replay  []byte
+	// stalled is set when the upstream went silent mid-sniff (no byte within
+	// streamFirstByteIdleTimeout). The caller surfaces this as a retryable
+	// transport failure so the rotation loop moves to the next credential
+	// instead of hanging the client until its own timeout fires.
+	stalled bool
 }
 
 // streamSniffer holds the incremental state while sniffing a stream.
@@ -695,20 +709,49 @@ func hasWatchKeyword(content string) bool {
 //   - Watch-keywords present but nothing conclusive          → keep buffering,
 //     bounded by the raw cap and the deadline.
 //
-// Limitation: like the pre-existing StreamProxy, a stalled upstream can hold
-// the sniffer in a blocking Read; the client request context remains the
-// ultimate guard. A watch-keyword stream that trickles for more than
-// streamSniffDeadline commits as clean, trading recall for latency safety.
+// Reads are pumped through a goroutine so a stalled upstream cannot hold the
+// sniffer (and the whole request) hostage: each Read must produce bytes within
+// streamFirstByteIdleTimeout, otherwise the stream is declared stalled and the
+// caller rotates to another credential. The abandoned pump goroutine exits
+// once the caller closes the response body.
 func sniffStreamForError(body io.Reader) *streamSniffResult {
 	s := &streamSniffer{}
 	start := time.Now()
-	tmp := make([]byte, 16*1024)
 	spins := 0
 
+	type readResult struct {
+		buf []byte
+		err error
+	}
+	reads := make(chan readResult, 1)
+	go func() {
+		tmp := make([]byte, 16*1024)
+		for {
+			n, err := body.Read(tmp)
+			// Copy out of tmp before handing over — the next Read reuses it.
+			buf := make([]byte, n)
+			copy(buf, tmp[:n])
+			reads <- readResult{buf: buf, err: err}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	var n int
+	var readErr error
 	for {
-		n, readErr := body.Read(tmp)
-		if n > 0 {
-			s.ingest(tmp[:n])
+		select {
+		case r := <-reads:
+			n, readErr = len(r.buf), r.err
+			if n > 0 {
+				s.ingest(r.buf)
+			}
+		case <-time.After(streamFirstByteIdleTimeout):
+			// Upstream accepted the request but went silent before producing
+			// the first byte — a retryable transport failure, not an error
+			// body. The rotation loop moves to the next credential.
+			return &streamSniffResult{verdict: nil, replay: s.raw, stalled: true}
 		}
 
 		// Unambiguous error events fire immediately.
